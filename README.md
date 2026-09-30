@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/logo.png" alt="PresencePro" width="320" />
+<img src="docs/logo.png" alt="PresencePro" width="500" />
 
 ### Smart Attendance & Curriculum Management, in one app.
 
