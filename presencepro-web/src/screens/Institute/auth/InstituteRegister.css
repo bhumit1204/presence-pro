@@ -1,0 +1,666 @@
+/* ─── Reset & Base ─────────────────────────────── */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html,
+body,
+#root {
+  background: #F5F5F5;
+  min-height: 100%;
+}
+
+.ir-page {
+  background: #F5F5F5;
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+  color: #1C2333;
+  padding-bottom: 60px;
+}
+
+/* ─── Navbar ────────────────────────────────────── */
+.ir-navbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0px 40px;
+  background: #FFFFFF;
+  border-bottom: 1px solid #ECECEC;
+}
+
+.ir-navbar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  text-decoration: none;
+}
+
+.ir-navbar-logo {
+  height: 68px;
+  width: auto;
+  display: block;
+}
+
+.ir-navbar-right {
+  font-size: 14px;
+  color: #555;
+}
+
+.ir-navbar-right a {
+  color: #4F46E5;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ir-navbar-right a:hover {
+  text-decoration: underline;
+}
+
+/* ─── Page body ─────────────────────────────────── */
+.ir-body {
+  max-width: 1180px;
+  margin: 0 auto;
+  padding: 40px 40px 0;
+}
+
+/* ─── Page heading ──────────────────────────────── */
+.ir-heading {
+  margin-bottom: 32px;
+}
+
+.ir-heading h1 {
+  font-size: 32px;
+  font-weight: 800;
+  color: #1C2333;
+  letter-spacing: -0.5px;
+  margin-bottom: 6px;
+}
+
+.ir-heading p {
+  font-size: 15px;
+  color: #555;
+}
+
+.ir-heading p span {
+  color: #4F46E5;
+  font-weight: 600;
+}
+
+/* ─── Shared section card ───────────────────────── */
+.ir-section {
+  background: #FFFFFF;
+  border: 1px solid #E4E4E4;
+  border-radius: 12px;
+  padding: 28px 32px;
+  margin-bottom: 20px;
+}
+
+/* ─── Step badge ────────────────────────────────── */
+.ir-step-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.ir-step-badge {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  background: #4F46E5;
+  color: #FFFFFF;
+  font-size: 13px;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ir-step-title {
+  font-size: 17px;
+  font-weight: 700;
+  color: #1C2333;
+}
+
+.ir-step-subtitle {
+  font-size: 13px;
+  color: #888;
+  margin-bottom: 20px;
+  padding-left: 40px;
+}
+
+/* ─── Section 1 – Find Your Institute ──────────── */
+.ir-field-label {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1C2333;
+  margin-bottom: 8px;
+  display: block;
+}
+
+.ir-search-row {
+  display: flex;
+  gap: 12px;
+  align-items: stretch;
+}
+
+.ir-search-row input {
+  flex: 1;
+  height: 48px;
+  border: 1px solid #D8D8D8;
+  border-radius: 8px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #1C2333;
+  background: #FFFFFF;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.ir-search-row input:focus {
+  border-color: #4F46E5;
+}
+
+.ir-search-row input::placeholder {
+  color: #BDBDBD;
+}
+
+.ir-fetch-btn {
+  height: 48px;
+  padding: 0 24px;
+  background: #4F46E5;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+  transition: background 0.15s;
+}
+
+.ir-fetch-btn:hover {
+  background: #4338CA;
+}
+
+.ir-fetch-btn svg {
+  width: 16px;
+  height: 16px;
+}
+
+.ir-aishe-note {
+  margin-top: 14px;
+  background: #EEEEFF;
+  border-radius: 8px;
+  padding: 12px 16px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-size: 13px;
+  color: #3D3D3D;
+}
+
+.ir-aishe-note-icon {
+  font-size: 18px;
+  flex-shrink: 0;
+  color: #6C5CE7;
+}
+
+/* "institute details" portion rendered purple via span in JSX */
+.ir-aishe-note .ir-aishe-highlight {
+  color: #4F46E5;
+}
+
+/* ─── "Institute not found?" banner ─────────────── */
+.ir-notfound-banner {
+  background: #FFFBF0;
+  border: 1px solid #F5E4B0;
+  border-radius: 12px;
+  padding: 20px 24px;
+  margin-bottom: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  transition: padding 0.2s;
+}
+
+.ir-notfound-banner--open {
+  padding-bottom: 28px;
+}
+
+.ir-notfound-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.ir-notfound-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.ir-notfound-icon-wrap {
+  width: 44px;
+  height: 44px;
+  background: #FFF3CD;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  color: #92710A;
+}
+
+.ir-notfound-text h3 {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1C2333;
+  margin-bottom: 3px;
+}
+
+.ir-notfound-text p {
+  font-size: 13px;
+  color: #888;
+}
+
+.ir-create-btn {
+  height: 40px;
+  padding: 0 20px;
+  background: #FFFFFF;
+  color: #4F46E5;
+  border: 1.5px solid #4F46E5;
+  border-radius: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: background 0.15s, color 0.15s;
+}
+
+.ir-create-btn:hover {
+  background: #EEF2FF;
+}
+
+/* ─── Expanded create-new form inside banner ─────── */
+.ir-create-form-divider {
+  height: 1px;
+  background: #F0DFA0;
+  margin: 20px 0;
+}
+
+.ir-create-form {
+  /* inherits .ir-field-group, .ir-two-col, etc. */
+  display: flex;
+  flex-direction: column;
+}
+
+.ir-create-form .ir-field-group input,
+.ir-create-form .ir-field-group select {
+  background: #FFFFFF;
+}
+
+/* ─── Required / optional label decorators ───────── */
+.ir-required {
+  color: #E53935;
+  font-weight: 700;
+  margin-left: 2px;
+}
+
+.ir-optional {
+  font-size: 11px;
+  font-weight: 400;
+  color: #AAA;
+  margin-left: 4px;
+}
+
+/* ─── AISHE success note ─────────────────────────── */
+.ir-aishe-success {
+  margin-top: 14px;
+  background: #EDFDF5;
+  border: 1px solid #A7F0C8;
+  border-radius: 8px;
+  padding: 11px 16px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0A7045;
+}
+
+
+
+/* ─── Step badge variants ────────────────────────── */
+.ir-step-badge--green {
+  background: #00B37E;
+}
+
+.ir-autofill-tag {
+  font-size: 11px;
+  font-weight: 600;
+  color: #00B37E;
+  background: #EDFDF5;
+  border: 1px solid #A7F0C8;
+  border-radius: 20px;
+  padding: 2px 10px;
+  margin-left: 4px;
+}
+
+
+.ir-field-group {
+  margin-bottom: 18px;
+}
+
+.ir-field-group:last-child {
+  margin-bottom: 0;
+}
+
+.ir-field-group input,
+.ir-field-group select {
+  width: 100%;
+  height: 48px;
+  border: 1px solid #D8D8D8;
+  border-radius: 8px;
+  padding: 0 16px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #1C2333;
+  background: #FFFFFF;
+  outline: none;
+  transition: border-color 0.15s;
+  appearance: none;
+  -webkit-appearance: none;
+}
+
+.ir-field-group input:focus,
+.ir-field-group select:focus {
+  border-color: #4F46E5;
+}
+
+.ir-field-group input::placeholder {
+  color: #BDBDBD;
+}
+
+.ir-field-group select {
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' viewBox='0 0 24 24'%3E%3Cpath d='M6 9l6 6 6-6' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 14px center;
+  padding-right: 40px;
+  cursor: pointer;
+}
+
+.ir-two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 16px;
+}
+
+/* ─── Section 3 – Institute Account ─────────────── */
+.ir-three-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 16px;
+  margin-bottom: 14px;
+}
+
+.ir-password-wrap {
+  position: relative;
+}
+
+.ir-password-wrap input {
+  width: 100%;
+  height: 48px;
+  border: 1px solid #D8D8D8;
+  border-radius: 8px;
+  padding: 0 44px 0 16px;
+  font-size: 14px;
+  font-family: inherit;
+  color: #1C2333;
+  background: #FFFFFF;
+  outline: none;
+  transition: border-color 0.15s;
+}
+
+.ir-password-wrap input:focus {
+  border-color: #4F46E5;
+}
+
+.ir-password-wrap input::placeholder {
+  color: #BDBDBD;
+}
+
+.ir-eye-btn {
+  position: absolute;
+  right: 12px;
+  top: 50%;
+  transform: translateY(-50%);
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #888;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ir-eye-btn:hover {
+  color: #4F46E5;
+}
+
+.ir-email-note {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #555;
+  margin-bottom: 0;
+}
+
+.ir-email-note svg {
+  color: #4F46E5;
+  flex-shrink: 0;
+}
+
+/* ─── Footer row ─────────────────────────────────── */
+.ir-footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 24px;
+  flex-wrap: wrap;
+  gap: 16px;
+}
+
+.ir-tos-check {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #555;
+  cursor: pointer;
+  user-select: none;
+}
+
+.ir-tos-check input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  border: 1px solid #C0C0C0;
+  border-radius: 3px;
+  accent-color: #4F46E5;
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.ir-tos-check a {
+  color: #4F46E5;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ir-tos-check a:hover {
+  text-decoration: underline;
+}
+
+.ir-register-btn {
+  height: 48px;
+  padding: 0 32px;
+  background: #4F46E5;
+  color: #FFFFFF;
+  border: none;
+  border-radius: 8px;
+  font-size: 15px;
+  font-weight: 700;
+  font-family: inherit;
+  cursor: pointer;
+  transition: background 0.15s;
+  white-space: nowrap;
+}
+
+.ir-register-btn:hover {
+  background: #4338CA;
+}
+
+.ir-register-btn:disabled {
+  background: #A5A5E0;
+  cursor: not-allowed;
+}
+
+/* ─── Responsive ─────────────────────────────────── */
+@media (max-width: 768px) {
+  .ir-body {
+    padding: 24px 16px 48px;
+  }
+
+  .ir-navbar {
+    padding: 14px 20px;
+  }
+
+  .ir-search-row {
+    flex-direction: column;
+  }
+
+  .ir-fetch-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .ir-two-col,
+  .ir-three-col {
+    grid-template-columns: 1fr;
+  }
+
+  .ir-notfound-top {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ir-create-btn {
+    width: 100%;
+    justify-content: center;
+  }
+
+  .ir-footer-row {
+    flex-direction: column;
+    align-items: flex-start;
+  }
+
+  .ir-register-btn {
+    width: 100%;
+  }
+}
+
+/* ─── Alert banners (global) ─────────────────────── */
+.ir-alert {
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 10px;
+  padding: 10px 14px;
+  margin-bottom: 18px;
+}
+
+.ir-alert--error {
+  background: rgba(240, 84, 84, 0.10);
+  color: #F05454;
+}
+
+.ir-alert--ok {
+  background: rgba(0, 179, 126, 0.10);
+  color: #00B37E;
+}
+
+/* ─── Inline fetch error ─────────────────────────── */
+.ir-inline-error {
+  font-size: 13px;
+  color: #F05454;
+  margin-top: 8px;
+}
+
+/* ─── Password rules checklist ───────────────────── */
+.ir-pwd-rules {
+  list-style: none;
+  margin-top: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 0;
+}
+
+.ir-pwd-rules li {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  font-weight: 500;
+  transition: color 0.15s;
+}
+
+.ir-pwd-rule--pass {
+  color: #00924E;
+}
+
+.ir-pwd-rule--fail {
+  color: #999;
+}
+
+/* ─── Input valid/invalid border states ──────────── */
+.ir-password-wrap input.ir-input--valid,
+.ir-field-group input.ir-input--valid {
+  border-color: #00B37E;
+}
+
+.ir-password-wrap input.ir-input--invalid,
+.ir-field-group input.ir-input--invalid {
+  border-color: #E53935;
+}
+
+/* ─── Confirm password feedback ──────────────────── */
+.ir-confirm-ok {
+  font-size: 12px;
+  font-weight: 600;
+  color: #00924E;
+  margin-top: 6px;
+}
+
+.ir-confirm-err {
+  font-size: 12px;
+  font-weight: 600;
+  color: #E53935;
+  margin-top: 6px;
+}

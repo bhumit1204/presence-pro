@@ -1,0 +1,597 @@
+/* ── Reset ───────────────────────────────────────────────────────────── */
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+html, body, #root {
+  height: 100%;
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+  background: #F4F6FB;
+  color: #1C2333;
+}
+
+/* ── Shell ───────────────────────────────────────────────────────────── */
+.db-shell {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+}
+
+/* ── Sidebar ─────────────────────────────────────────────────────────── */
+.db-sidebar {
+  width: 220px;
+  background: #FFFFFF;
+  border-right: 1px solid #E8EBF2;
+  display: flex;
+  flex-direction: column;
+  transition: width 0.2s ease;
+  flex-shrink: 0;
+  overflow: hidden;
+}
+
+.db-sidebar--collapsed {
+  width: 64px;
+}
+
+/* Brand */
+.db-sidebar-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 20px 16px;
+  border-bottom: 1px solid #F0F2FA;
+  min-height: 88px;
+}
+
+.db-sidebar-brand-icon {
+  width: 40px;
+  height: 40px;
+  background: #EEF2FF;
+  color: #4F46E5;
+  border-radius: 10px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.db-sidebar-college-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1C2333;
+  line-height: 1.3;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.db-sidebar-aishe {
+  display: inline-block;
+  margin-top: 4px;
+  font-size: 10px;
+  font-weight: 700;
+  color: #4F46E5;
+  background: #EEF2FF;
+  border-radius: 20px;
+  padding: 2px 8px;
+}
+
+/* Nav */
+.db-sidebar-nav {
+  flex: 1;
+  padding: 12px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+}
+
+.db-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #5A6479;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  position: relative;
+}
+
+.db-nav-item:hover {
+  background: #F4F6FB;
+  color: #1C2333;
+}
+
+.db-nav-item--active {
+  background: #EEF2FF;
+  color: #4F46E5;
+  font-weight: 700;
+}
+
+.db-nav-badge {
+  margin-left: auto;
+  background: #F59E0B;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 20px;
+  padding: 1px 7px;
+  min-width: 20px;
+  text-align: center;
+}
+
+/* Logout */
+.db-sidebar-logout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 22px;
+  border: none;
+  background: none;
+  color: #E53935;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  border-top: 1px solid #F0F2FA;
+  white-space: nowrap;
+}
+
+.db-sidebar-logout:hover {
+  background: #FFF5F5;
+}
+
+/* ── Main ────────────────────────────────────────────────────────────── */
+.db-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* Topbar */
+.db-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 28px;
+  height: 60px;
+  background: #FFFFFF;
+  border-bottom: 1px solid #E8EBF2;
+  flex-shrink: 0;
+}
+
+.db-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.db-topbar-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: #5A6479;
+  display: flex;
+  align-items: center;
+  padding: 4px;
+}
+
+.db-topbar-toggle:hover { color: #1C2333; }
+
+.db-topbar-title {
+  font-size: 20px;
+  font-weight: 800;
+  color: #1C2333;
+}
+
+.db-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #5A6479;
+  font-size: 14px;
+}
+
+.db-topbar-college {
+  font-weight: 600;
+  color: #1C2333;
+}
+
+.db-topbar-aishe-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4F46E5;
+  background: #EEF2FF;
+  border-radius: 20px;
+  padding: 3px 10px;
+}
+
+/* Content */
+.db-content {
+  flex: 1;
+  overflow-y: auto;
+  padding: 24px 28px 40px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+
+/* ── Shared card ─────────────────────────────────────────────────────── */
+.db-card {
+  background: #FFFFFF;
+  border: 1px solid #E8EBF2;
+  border-radius: 16px;
+  padding: 24px;
+}
+
+/* ── College Info Card ───────────────────────────────────────────────── */
+.db-college-card {
+  display: flex;
+  align-items: flex-start;
+  gap: 20px;
+}
+
+.db-college-card-icon {
+  width: 64px;
+  height: 64px;
+  background: #EEF2FF;
+  color: #4F46E5;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.db-college-card-body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.db-college-card-title-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.db-college-name {
+  font-size: 22px;
+  font-weight: 800;
+  color: #1C2333;
+}
+
+.db-aishe-badge {
+  font-size: 12px;
+  font-weight: 700;
+  color: #4F46E5;
+  background: #EEF2FF;
+  border-radius: 20px;
+  padding: 3px 12px;
+}
+
+.db-college-meta-row,
+.db-college-detail-row {
+  display: flex;
+  align-items: center;
+  gap: 28px;
+  flex-wrap: wrap;
+}
+
+.db-college-meta-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: #5A6479;
+}
+
+.db-college-meta-item svg {
+  flex-shrink: 0;
+  color: #9CA3AF;
+}
+
+.db-college-meta-item strong {
+  color: #1C2333;
+  font-weight: 500;
+}
+
+/* ── Stats Row ───────────────────────────────────────────────────────── */
+.db-stats-row {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 16px;
+}
+
+.db-stat-card {
+  background: #FFFFFF;
+  border: 1px solid #E8EBF2;
+  border-radius: 16px;
+  padding: 20px;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
+
+.db-stat-icon {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.db-stat-icon--purple { background: #EEF2FF; color: #4F46E5; }
+.db-stat-icon--green  { background: #ECFDF5; color: #059669; }
+.db-stat-icon--blue   { background: #EFF6FF; color: #2563EB; }
+.db-stat-icon--orange { background: #FFF7ED; color: #EA580C; }
+
+.db-stat-body {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.db-stat-label {
+  font-size: 12px;
+  color: #5A6479;
+  font-weight: 500;
+  line-height: 1.3;
+}
+
+.db-stat-value {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1;
+}
+
+.db-stat-value--purple { color: #4F46E5; }
+.db-stat-value--green  { color: #059669; }
+.db-stat-value--blue   { color: #2563EB; }
+.db-stat-value--orange { color: #EA580C; }
+
+/* ── Pending Banner ──────────────────────────────────────────────────── */
+.db-pending-banner {
+  background: #FFFBEB;
+  border: 1px solid #FDE68A;
+  border-radius: 14px;
+  padding: 18px 24px;
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+}
+
+.db-pending-icon {
+  color: #D97706;
+  flex-shrink: 0;
+  margin-top: 2px;
+}
+
+.db-pending-content {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  flex: 1;
+}
+
+.db-pending-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #1C2333;
+}
+
+.db-pending-items {
+  display: flex;
+  align-items: center;
+  gap: 40px;
+  flex-wrap: wrap;
+}
+
+.db-pending-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 14px;
+  color: #5A6479;
+}
+
+.db-pending-item strong {
+  color: #D97706;
+  font-weight: 800;
+}
+
+.db-pending-btn {
+  display: inline-flex;
+  align-items: center;
+  padding: 5px 14px;
+  border: 1.5px solid #D97706;
+  border-radius: 8px;
+  color: #D97706;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+
+.db-pending-btn:hover {
+  background: #FEF3C7;
+}
+
+/* ── Courses Section ─────────────────────────────────────────────────── */
+.db-courses-section { padding: 24px; }
+
+.db-courses-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 18px;
+}
+
+.db-section-title {
+  font-size: 16px;
+  font-weight: 700;
+  color: #1C2333;
+}
+
+.db-view-all-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 16px;
+  border: 1.5px solid #4F46E5;
+  border-radius: 8px;
+  color: #4F46E5;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background 0.15s;
+}
+
+.db-view-all-btn:hover { background: #EEF2FF; }
+
+.db-courses-scroll {
+  display: flex;
+  gap: 14px;
+  overflow-x: auto;
+  padding-bottom: 8px;
+  scrollbar-width: thin;
+}
+
+.db-courses-loading,
+.db-courses-empty {
+  font-size: 14px;
+  color: #9CA3AF;
+  padding: 20px 0;
+}
+
+/* Course card */
+.db-course-card {
+  min-width: 200px;
+  max-width: 200px;
+  background: #FFFFFF;
+  border: 1px solid #E8EBF2;
+  border-radius: 14px;
+  padding: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  transition: box-shadow 0.15s;
+}
+
+.db-course-card:hover {
+  box-shadow: 0 4px 16px rgba(79, 70, 229, 0.10);
+}
+
+.db-course-card-icon {
+  width: 44px;
+  height: 44px;
+  background: #4F46E5;
+  color: #FFFFFF;
+  border-radius: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 4px;
+}
+
+.db-course-card-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #1C2333;
+  line-height: 1.3;
+}
+
+.db-course-abbr-badge {
+  display: inline-block;
+  font-size: 11px;
+  font-weight: 700;
+  color: #4F46E5;
+  background: #EEF2FF;
+  border-radius: 20px;
+  padding: 2px 10px;
+  width: fit-content;
+}
+
+.db-course-card-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11px;
+  color: #9CA3AF;
+}
+
+.db-course-card-meta span {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.db-course-card-meta strong {
+  font-size: 12px;
+  color: #1C2333;
+  font-weight: 500;
+}
+
+/* View all card */
+.db-course-card--viewall {
+  border: 2px dashed #C7D2FE;
+  background: #F8F9FF;
+  align-items: center;
+  justify-content: center;
+  color: #4F46E5;
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.db-course-viewall-icon {
+  color: #4F46E5;
+  margin-bottom: 6px;
+}
+
+.db-course-viewall-text {
+  font-size: 13px;
+  font-weight: 700;
+  color: #4F46E5;
+  text-align: center;
+}
+
+/* ── Alerts ──────────────────────────────────────────────────────────── */
+.db-alert {
+  padding: 12px 16px;
+  border-radius: 10px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.db-alert--error {
+  background: rgba(229, 57, 53, 0.08);
+  color: #E53935;
+}
+
+/* ── Responsive ──────────────────────────────────────────────────────── */
+@media (max-width: 1024px) {
+  .db-stats-row { grid-template-columns: repeat(2, 1fr); }
+}
+
+@media (max-width: 768px) {
+  .db-sidebar { width: 64px; }
+  .db-sidebar-brand-text,
+  .db-nav-item span,
+  .db-nav-badge,
+  .db-sidebar-logout span { display: none; }
+  .db-stats-row { grid-template-columns: repeat(2, 1fr); }
+  .db-content { padding: 16px; }
+  .db-college-card { flex-direction: column; }
+  .db-college-meta-row { gap: 12px; }
+  .db-pending-items { flex-direction: column; gap: 10px; }
+}

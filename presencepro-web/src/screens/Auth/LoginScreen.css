@@ -1,0 +1,227 @@
+.login-page {
+  min-height: 100vh;
+  width: 100%;
+  display: flex;
+  font-family: 'DM Sans', 'Segoe UI', sans-serif;
+}
+
+/* ── Left cover panel ─────────────────────────────────────────────── */
+.login-cover {
+  flex: 1 1 80%;
+  position: relative;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: linear-gradient(155deg, #4834D4 0%, #6C5CE7 55%, #8B7CF8 100%);
+  box-sizing: border-box;
+
+  @media (max-width: 900px) {
+    display: none;
+  }
+}
+
+.login-cover-image {
+  height: 100%;
+  display: block;
+  object-fit: contain;
+}
+
+/* ── Right form side ──────────────────────────────────────────────── */
+.login-form-side {
+  flex: 1 1 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #F0F2FA;
+  padding: 40px 24px;
+  box-sizing: border-box;
+
+  @media (max-width: 900px) {
+    flex: 1 1 100%;
+  }
+}
+
+.login-card {
+  width: 100%;
+  max-width: 420px;
+  background: #FFFFFF;
+  border-radius: 32px;
+  padding: 40px 36px;
+  box-shadow: 0 8px 32px rgba(108, 92, 231, 0.08);
+  border: 1px solid #E8EBF2;
+  box-sizing: border-box;
+
+  @media (max-width: 480px) {
+    padding: 32px 24px;
+    border-radius: 24px;
+  }
+}
+
+.login-card-brand-mobile {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  background: #EEF2FF;
+  padding: 6px 16px;
+  border-radius: 100px;
+  width: fit-content;
+  margin-bottom: 24px;
+  font-weight: 700;
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  color: #6C5CE7;
+
+  .login-cover-dot {
+    background: #6C5CE7;
+  }
+
+  @media (max-width: 900px) {
+    display: inline-flex;
+  }
+}
+
+.login-title {
+  font-size: 26px;
+  font-weight: 800;
+  color: #1C2333;
+  margin: 0 0 6px;
+}
+
+.login-subtitle {
+  font-size: 14px;
+  color: #8A94A6;
+  margin: 0 0 24px;
+}
+
+.login-alert {
+  font-size: 13px;
+  font-weight: 600;
+  border-radius: 12px;
+  padding: 10px 14px;
+  margin-bottom: 18px;
+
+  &--error {
+    background: rgba(240, 84, 84, 0.1);
+    color: #F05454;
+  }
+  &--ok {
+    background: rgba(0, 179, 126, 0.1);
+    color: #00B37E;
+  }
+}
+
+.login-label {
+  display: block;
+  font-size: 14px;
+  font-weight: 700;
+  color: #1C2333;
+  margin: 14px 0 8px;
+}
+
+.login-input {
+  width: 100%;
+  height: 56px;
+  border: 1px solid #D0D0D0;
+  border-radius: 30px;
+  padding: 0 20px;
+  font-size: 15px;
+  color: #1C2333;
+  background: #FFFFFF;
+  box-sizing: border-box;
+  font-family: inherit;
+  transition: border-color 0.2s;
+
+  &:focus {
+    outline: none;
+    border-color: #6C5CE7;
+  }
+}
+
+.login-submit {
+  width: 100%;
+  background: linear-gradient(135deg, #6C5CE7, #8B7CF8);
+  color: #FFFFFF;
+  border: none;
+  border-radius: 32px;
+  height: 56px;
+  font-size: 16px;
+  font-weight: 700;
+  letter-spacing: 0.3px;
+  margin-top: 26px;
+  box-shadow: 0 8px 18px rgba(108, 92, 231, 0.35);
+}
+
+.login-forgot {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  color: #6C5CE7;
+  font-size: 14px;
+  font-weight: 600;
+  margin-top: 18px;
+  padding: 4px;
+  cursor: pointer;
+  text-align: center;
+}
+
+.login-divider {
+  display: flex;
+  align-items: center;
+  text-align: center;
+  color: #C2C9D6;
+  font-size: 12px;
+  font-weight: 600;
+  margin: 26px 0 18px;
+
+  &::before,
+  &::after {
+    content: '';
+    flex: 1;
+    border-bottom: 1px solid #E8EBF2;
+  }
+
+  span {
+    padding: 0 12px;
+  }
+}
+
+.login-nav-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  text-align: left;
+  background: #F7F8FC;
+  border: 1px solid #E8EBF2;
+  border-radius: 18px;
+  padding: 14px 16px;
+  margin-bottom: 12px;
+  cursor: pointer;
+  transition: border-color 0.2s, background 0.2s;
+  font-family: inherit;
+
+  &:hover {
+    border-color: #6C5CE7;
+    background: #EEF2FF;
+  }
+
+  strong {
+    display: block;
+    font-size: 14px;
+    color: #1C2333;
+  }
+
+  small {
+    display: block;
+    font-size: 12px;
+    color: #8A94A6;
+    margin-top: 2px;
+  }
+}
+
+.login-nav-icon {
+  font-size: 20px;
+  line-height: 1;
+}

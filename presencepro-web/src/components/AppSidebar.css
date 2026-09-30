@@ -1,0 +1,235 @@
+/* ── Sidebar shell ───────────────────────────────────────────────────── */
+.app-sidebar {
+  width: 230px;
+  min-height: 100vh;
+  background: #FFFFFF;
+  border-right: 1px solid #E5E7EB;
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  transition: width 0.22s cubic-bezier(0.4, 0, 0.2, 1);
+  overflow: hidden;
+}
+.app-sidebar--collapsed { width: 64px; }
+
+/* ── Brand row ── matches Inst_SideBar ───────────────────────────────── */
+.app-sidebar-brand {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0px 12px 0px 4px;
+  border-bottom: 1px solid #F0F2FA;
+  min-height: 64px;
+  overflow: hidden;
+}
+
+/* Full logo image — same as Inst_SideBar */
+.app-sidebar-logo {
+  height: 60px;
+  width: auto;
+  display: block;
+  object-fit: contain;
+}
+
+/* ── Toggle button ── matches Inst_SideBar style ─────────────────────── */
+.app-sidebar-toggle {
+  flex-shrink: 0;
+  margin-left: auto;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  background: #F4F6FB;
+  border: 1px solid #E8EBF2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  color: #5A6479;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.app-sidebar-toggle:hover {
+  background: #EEF2FF;
+  color: #4834D4;
+  border-color: #C7D2FE;
+}
+
+/* Collapsed — toggle gets bigger + highlighted, brand row reflows */
+.app-sidebar--collapsed .app-sidebar-brand {
+  justify-content: space-between;
+  padding: 14px 8px;
+}
+.app-sidebar--collapsed .app-sidebar-toggle {
+  margin-left: 6px;
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: #EEF2FF;
+  color: #4834D4;
+  border-color: #C7D2FE;
+}
+
+/* ── Profile ─────────────────────────────────────────────────────────── */
+.app-sidebar-profile {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 12px;
+  border-bottom: 1px solid #F3F4F6;
+}
+
+.app-sidebar-avatar {
+  width: 38px;
+  height: 38px;
+  border-radius: 12px;
+  background: #4834D4;
+  color: #fff;
+  font-size: 16px;
+  font-weight: 800;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.app-sidebar-profile-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.app-sidebar-profile-name {
+  font-size: 13px;
+  font-weight: 700;
+  color: #111827;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.app-sidebar-profile-role { font-size: 11px; color: #6B7280; }
+
+.app-sidebar-depts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+  margin-top: 3px;
+}
+.app-sidebar-dept-tag {
+  font-size: 10px;
+  font-weight: 700;
+  background: #EEF2FF;
+  color: #4834D4;
+  border-radius: 5px;
+  padding: 1px 5px;
+}
+
+/* Collapsed profile — center avatar only */
+.app-sidebar--collapsed .app-sidebar-profile { justify-content: center; }
+.app-sidebar--collapsed .app-sidebar-profile-info { display: none; }
+
+/* ── Nav ─────────────────────────────────────────────────────────────── */
+.app-sidebar-nav {
+  flex: 1;
+  padding: 12px 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.app-sidebar-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border-radius: 10px;
+  font-size: 14px;
+  font-weight: 500;
+  color: #5A6479;
+  text-decoration: none;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+  position: relative;
+}
+.app-sidebar-nav-item:hover        { background: #F4F6FB; color: #1C2333; }
+.app-sidebar-nav-item--active      { background: #EEF2FF; color: #4834D4; font-weight: 700; }
+
+.app-sidebar-nav-icon  { display: flex; align-items: center; flex-shrink: 0; }
+
+.app-sidebar-nav-label {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  opacity: 1;
+  transition: opacity 0.12s;
+}
+
+.app-sidebar-nav-badge {
+  margin-left: auto;
+  background: #F59E0B;
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  border-radius: 20px;
+  padding: 1px 7px;
+  min-width: 20px;
+  text-align: center;
+  flex-shrink: 0;
+}
+
+/* Collapsed dot badge */
+.app-sidebar-nav-badge--dot {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 8px;
+  height: 8px;
+  min-width: unset;
+  padding: 0;
+  border-radius: 50%;
+}
+
+/* Collapsed nav — center icon, hide label */
+.app-sidebar--collapsed .app-sidebar-nav-item  { justify-content: center; padding: 10px 0; }
+.app-sidebar--collapsed .app-sidebar-nav-label { opacity: 0; width: 0; pointer-events: none; }
+.app-sidebar--collapsed .app-sidebar-nav-badge:not(.app-sidebar-nav-badge--dot) { display: none; }
+
+/* ── Logout ──────────────────────────────────────────────────────────── */
+.app-sidebar-logout {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 14px 20px;
+  border: none;
+  background: none;
+  color: #EF4444;
+  font-size: 14px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  border-top: 1px solid #F3F4F6;
+  width: 100%;
+  text-align: left;
+  transition: background 0.15s;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.app-sidebar-logout:hover { background: #FEF2F2; }
+
+.app-sidebar-logout span {
+  opacity: 1;
+  transition: opacity 0.12s;
+}
+
+.app-sidebar--collapsed .app-sidebar-logout {
+  justify-content: center;
+  padding: 14px 8px;
+}
+.app-sidebar--collapsed .app-sidebar-logout span {
+  opacity: 0;
+  width: 0;
+  pointer-events: none;
+}

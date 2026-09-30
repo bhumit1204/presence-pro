@@ -1,0 +1,80 @@
+{
+  "expo": {
+    "name": "PresencePro",
+    "slug": "presencepro-rn",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "image": "./assets/splash-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F3F4F6"
+    },
+
+    "ios": {
+      "supportsTablet": true
+    },
+
+    "android": {
+      "compileSdkVersion": 34,
+      "targetSdkVersion": 34,
+      "minSdkVersion": 23,
+
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#F3F4F6"
+      },
+
+      "package": "com.bhumit12.presenceprorn",
+
+      "permissions": [
+        "ACCESS_FINE_LOCATION",
+        "NEARBY_WIFI_DEVICES",
+        "ACCESS_WIFI_STATE",
+        "CHANGE_WIFI_STATE",
+        "ACCESS_NETWORK_STATE",
+        "INTERNET",
+        "BLUETOOTH_SCAN",
+        "BLUETOOTH_CONNECT",
+        "POST_NOTIFICATIONS"
+      ],
+
+      "usesCleartextTraffic": true
+    },
+
+    "web": {
+      "favicon": "./assets/favicon.png"
+    },
+
+    "plugins": [
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/icon.png",
+          "color": "#4834D4"
+        }
+      ],
+      [
+        "react-native-ble-plx",
+        {
+          "isBackgroundEnabled": false,
+          "modes": ["central"]
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "expo-web-browser",
+      "react-native-ble-manager",
+      "expo-font",
+      "expo-sharing"
+    ],
+
+    "extra": {
+      "eas": {
+        "projectId": "54acf372-a93e-44be-9b25-ddc4556e5bb0"
+      }
+    },
+
+    "owner": "bhumit12"
+  }
+}
