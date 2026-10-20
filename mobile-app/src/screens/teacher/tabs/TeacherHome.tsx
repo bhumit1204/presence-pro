@@ -1,3 +1,4 @@
+import { apiFetch } from "../../../services/api";
 import React, { useEffect, useState } from "react";
 import {
   View,
@@ -20,7 +21,7 @@ import Ionicons from "@expo/vector-icons/build/Ionicons";
 
 const PRIMARY = "#4834D4";
 const BG = "#F3F4F6";
-const API_URL = "http://10.132.90.56:5000";
+const API_URL = "https://presencepro.duckdns.org";
 
 type LectureStatus = "upcoming" | "live" | "idle";
 
@@ -70,7 +71,7 @@ export default function TeacherHome() {
   const fetchRequests = async () => {
     try {
       const session = await getUserSession();
-      const res  = await fetch(`${API_URL}/api/lectures/assign/requests?uid=${session.uid}`);
+      const res  = await apiFetch(`${API_URL}/api/lectures/assign/requests?uid=${session.uid}`);
       const data = await res.json();
       if (data.success) setRequests(data.requests || []);
     } catch (e) {
@@ -84,7 +85,7 @@ export default function TeacherHome() {
   const fetchSentAssignments = async () => {
     try {
       const session = await getUserSession();
-      const res  = await fetch(`${API_URL}/api/lectures/assign/sent?uid=${session.uid}`);
+      const res  = await apiFetch(`${API_URL}/api/lectures/assign/sent?uid=${session.uid}`);
       const data = await res.json();
       if (data.success) {
         // Only show pending ones — accepted/rejected/expired are silently cleared
@@ -99,7 +100,7 @@ export default function TeacherHome() {
   const handleRespond = async (assignment_id: string, action: "accept" | "reject") => {
     try {
       const session = await getUserSession();
-      const res  = await fetch(`${API_URL}/api/lectures/assign/respond`, {
+      const res  = await apiFetch(`${API_URL}/api/lectures/assign/respond`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ uid: session.uid, assignment_id, action }),
@@ -129,7 +130,7 @@ export default function TeacherHome() {
       const session = await getUserSession();
       if (!session?.uid) return;
 
-      const res  = await fetch(`${API_URL}/api/lectures/today?uid=${session.uid}`);
+      const res  = await apiFetch(`${API_URL}/api/lectures/today?uid=${session.uid}`);
       const json = await res.json();
 
       if (json.success) {
@@ -272,7 +273,7 @@ export default function TeacherHome() {
         teacher_coordinates:   coords,
       };
 
-      const res  = await fetch(`${API_URL}/api/lectures/start`, {
+      const res  = await apiFetch(`${API_URL}/api/lectures/start`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(payload),
@@ -317,7 +318,7 @@ export default function TeacherHome() {
           onPress: async () => {
             try {
               if (lectureSessionId) {
-                const res  = await fetch(`${API_URL}/api/lectures/stop`, {
+                const res  = await apiFetch(`${API_URL}/api/lectures/stop`, {
                   method: "POST",
                   headers: { "Content-Type": "application/json" },
                   body: JSON.stringify({ lecture_session_id: lectureSessionId }),
@@ -370,12 +371,15 @@ export default function TeacherHome() {
     if (method === "bio_geo") {
       navigation.navigate("BioGeoAttendance", { lectureSessionId, lecture: activeLecture });
     }
+    if (method === "multi") {
+      navigation.navigate("MultiAttendance", { lectureSessionId, lecture: activeLecture });
+    }
     if (method === "iot") {
       navigation.navigate("IoTAttendanceScreen", { lectureSessionId });
     }
     if (method === "qr") {
       try {
-        const res  = await fetch(`${API_URL}/api/lectures/attendance/start-qr`, {
+        const res  = await apiFetch(`${API_URL}/api/lectures/attendance/start-qr`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ lecture_session_id: lectureSessionId }),

@@ -6,6 +6,16 @@ const { S3Client, PutObjectCommand, DeleteObjectCommand } = require("@aws-sdk/cl
 const { v4: uuidv4 } = require("uuid");
 const path     = require("path");
 const { notify, getStudentUidsForSubject } = require("../services/notify");
+const { guard, allow, fromBody, fromQuery, fromParams } = require("../middleware/auth");
+const { TTLCache } = require("../utils/cache");
+const { queueConcurrent, rateLimit, byUidOrIp } = require("../utils/limiter");
+const { createCoalescer } = require("../utils/coalesce");
+const { looksLikeItsType } = require("../utils/upload");
+const { teacherOwnsSubject, studentEnrolled } = require("../utils/ownership");
+const { assignmentStudentsHandler } = require("../utils/assignmentStudents");
+const {
+  getDocsByIds, queryInChunks, commitInBatches, isIndexMissing, isAlreadyExists, tsISO,
+} = require("../utils/firestore");
 
 const r2 = new S3Client({
   region:   "auto",
@@ -21,7 +31,7 @@ const R2_PUBLIC = process.env.R2_PUBLIC_URL;
 
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 10 * 1024 * 1024 },
+  limits: { fileSize: 10 * 1024 * 1024, files: 10 },
   fileFilter: (_req, file, cb) => {
     const ALLOWED = [
       "application/pdf",
@@ -41,6 +51,57 @@ const upload = multer({
     }
   },
 });
+
+// ─── Load protection ─────────────────────────────────────────────
+// Every upload sits in RAM (up to 10 files x 10 MB). A whole class uploading in
+// the same minute must not exhaust the server, so uploads wait in a short queue
+// for one of N slots instead of all running at once.
+const UPLOAD_SLOTS = Math.max(2, Number(process.env.UPLOAD_CONCURRENCY) || 12);
+const uploadSlot   = queueConcurrent(UPLOAD_SLOTS, { maxWaitMs: 20_000, maxQueue: 600 });
+// Generous: a campus shares one public IP (and soft-auth mode has no uid yet).
+const uploadLimit  = rateLimit({ name: "asg-upload", windowMs: 60_000, max: 900, key: byUidOrIp,
+                                 message: "Too many uploads, please wait a moment." });
+const submitLimit  = rateLimit({ name: "asg-submit", windowMs: 60_000, max: 1500, key: byUidOrIp });
+
+// ─── Small caches (per process, short TTL, invalidated on every write) ───────
+const assignmentCache = new TTLCache({ max: 5000,  ttlMs: 10_000 });  // id -> doc data | null
+const listCache       = new TTLCache({ max: 3000,  ttlMs: 5_000 });   // "a|subject|course" / "n|subject|course"
+const studentCache    = new TTLCache({ max: 20000, ttlMs: 60_000 });  // uid -> {name, roll_no} | null
+const summaryCache    = new TTLCache({ max: 1000,  ttlMs: 3_000 });   // assignment id -> summary
+
+function getAssignment(id) {
+  return assignmentCache.memo(id, 10_000, async () => {
+    const s = await db.collection("assignments").doc(id).get();
+    return s.exists ? s.data() : null;
+  });
+}
+function dropAssignment(id) {
+  assignmentCache.del(id);
+  summaryCache.del(id);
+}
+function dropLists(subject_id, course_id) {
+  listCache.del(`a|${subject_id}|${course_id}`);
+  listCache.del(`n|${subject_id}|${course_id}`);
+}
+
+// submissions_count is incremented by every student submitting. Hundreds of
+// students submitting within a minute would otherwise fight over ONE document
+// (Firestore sustains ~1 write/s per document), so the changes are summed up
+// and written once per short window.
+const counter = createCoalescer(async (assignment_id, deltas) => {
+  const sum = deltas.reduce((s, x) => s + x.d, 0);
+  if (!sum) return;
+  try {
+    await db.collection("assignments").doc(assignment_id)
+      .update({ submissions_count: admin.firestore.FieldValue.increment(sum) });
+  } catch (e) {
+    if (e && (e.code === 5 || /NOT_FOUND/.test(e.message || ""))) return; // assignment deleted meanwhile
+    throw e;
+  }
+  assignmentCache.del(assignment_id);
+}, { windowMs: 400, maxItems: 5000, retries: 2 });
+const bumpCounter = (assignment_id, d) =>
+  counter.add(assignment_id, { d }).catch((e) => console.error("submissions_count update failed:", assignment_id, e.message));
 
 // ─── Upload a single buffer to R2 ────────────────────────────────
 // Path structure: {folder}/{entity_id}/{originalName}
@@ -77,6 +138,19 @@ async function deleteFromR2(key) {
   }
 }
 
+// Delete in the background, a few at a time. Only keys inside the folders this
+// module writes to are ever deleted (a forged key can no longer remove e.g. OD proofs).
+const R2_FOLDERS = ["assignments/", "announcements/", "submissions/"];
+function cleanupKeys(keys) {
+  const list = [...new Set((keys || []).filter((k) => typeof k === "string" && !k.includes("..") && R2_FOLDERS.some((f) => k.startsWith(f))))];
+  if (!list.length) return;
+  (async () => {
+    for (let i = 0; i < list.length; i += 5) {
+      await Promise.all(list.slice(i, i + 5).map(deleteFromR2));
+    }
+  })().catch(() => {});
+}
+
 // ─── Multer error handler ─────────────────────────────────────────
 function handleMulterError(err, res) {
   if (err instanceof multer.MulterError) {
@@ -89,6 +163,7 @@ function handleMulterError(err, res) {
 }
 
 // ─── Validate links array ─────────────────────────────────────────
+const BAD_SCHEME = /^\s*(javascript|data|vbscript|file):/i;
 function parseLinks(raw) {
   // raw can be a JSON string or an array sent via form-data
   if (!raw) return [];
@@ -96,14 +171,56 @@ function parseLinks(raw) {
     const arr = typeof raw === "string" ? JSON.parse(raw) : raw;
     if (!Array.isArray(arr)) return [];
     return arr
-      .filter((l) => l && typeof l.url === "string" && l.url.trim())
+      .slice(0, 20)
+      .filter((l) => l && typeof l.url === "string" && l.url.trim() && !BAD_SCHEME.test(l.url) && l.url.length <= 2000)
       .map((l) => ({
         url:   l.url.trim(),
-        label: l.label?.trim() || l.url.trim(),
+        label: (typeof l.label === "string" && l.label.trim().slice(0, 300)) || l.url.trim(),
       }));
   } catch {
     return [];
   }
+}
+
+// Attachments are pre-uploaded file objects { url, key, name, size, type }.
+// Keep what the client sent, but bound the count/size so a request cannot store junk.
+function cleanAttachments(raw) {
+  const arr = Array.isArray(raw) ? raw : [];
+  const out = [];
+  for (const a of arr.slice(0, 25)) {
+    if (!a || typeof a !== "object" || Array.isArray(a)) continue;
+    let size = 0;
+    try { size = JSON.stringify(a).length; } catch { continue; }
+    if (size > 4000) continue;
+    if (typeof a.url === "string" && BAD_SCHEME.test(a.url)) continue;
+    out.push(a);
+  }
+  return out;
+}
+// like the original: JSON string or array. Returns null when a string is not valid JSON.
+function parseAttachmentsLoose(raw) {
+  if (typeof raw === "string") {
+    try { return cleanAttachments(JSON.parse(raw)); } catch { return null; }
+  }
+  return cleanAttachments(raw);
+}
+
+const isId = (v) => typeof v === "string" && v.length > 0 && v.length <= 200 && !v.includes("/");
+const sortByTimeDesc = (docs, field) =>
+  docs.sort((a, b) => {
+    const ta = a.data()[field]?.toMillis?.() ?? 0;
+    const tb = b.data()[field]?.toMillis?.() ?? 0;
+    return tb - ta;
+  });
+
+function publicDate(v) {
+  return v?.toDate?.()?.toISOString() || null;
+}
+
+function wantedLimit(limit) {
+  const n = Number(limit);
+  // original: slice(0, NaN) -> empty list, negative -> from the end. Keep NaN -> [] but cap huge values.
+  return Number.isNaN(n) ? 0 : Math.min(n, 500);
 }
 
 // ═══════════════════════════════════════════════════════════════════
@@ -118,13 +235,17 @@ function parseLinks(raw) {
 // ═══════════════════════════════════════════════════════════════════
 router.post(
   "/upload",
+  uploadLimit,
+  uploadSlot,
   (req, res, next) => upload.array("files", 10)(req, res, (err) => {
     if (handleMulterError(err, res)) return;
     next();
   }),
   async (req, res) => {
+    let uploaded = [];
     try {
-      const { folder, entity_id } = req.body;
+      const { folder } = req.body;
+      let { entity_id } = req.body;
       const VALID_FOLDERS = ["assignments", "announcements", "submissions"];
 
       if (!folder || !VALID_FOLDERS.includes(folder)) {
@@ -138,11 +259,29 @@ router.post(
         return res.status(400).json({ success: false, error: "No files provided" });
       }
 
+      for (const f of req.files) {
+        if (!looksLikeItsType(f.buffer, f.mimetype)) {
+          return res.status(400).json({ success: false, error: `"${f.originalname}" does not match its file type` });
+        }
+      }
+
+      // entity ids are Firestore ids; anything else must not be able to climb out of the folder
+      entity_id = typeof entity_id === "string" && entity_id
+        ? entity_id.replace(/[^a-zA-Z0-9_\-]/g, "_").slice(0, 128)
+        : null;
+
       // entity_id creates a dedicated subfolder: assignments/assign_abc123/filename.pdf
       // This keeps all files for one entity together and prevents name collisions.
-      const uploaded = await Promise.all(
-        req.files.map((f) => uploadToR2(f.buffer, f.originalname, f.mimetype, folder, entity_id || null))
+      const results = await Promise.allSettled(
+        req.files.map((f) => uploadToR2(f.buffer, f.originalname, f.mimetype, folder, entity_id))
       );
+      uploaded = results.filter((r) => r.status === "fulfilled").map((r) => r.value);
+      const failed = results.find((r) => r.status === "rejected");
+      if (failed) {
+        // do not leave half of a batch behind in the bucket
+        cleanupKeys(uploaded.map((u) => u.key));
+        throw failed.reason;
+      }
 
       return res.status(201).json({ success: true, files: uploaded });
     } catch (error) {
@@ -172,7 +311,7 @@ router.post(
 //   attachments       JSON string → [{ url, key, name, size, type }]
 //   links             JSON string → [{ url, label }]
 // ─────────────────────────────────────────────────────────────────
-router.post("/announcements", async (req, res) => {
+router.post("/announcements", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
     const {
       teacher_id, course_id, subject_id,
@@ -188,17 +327,18 @@ router.post("/announcements", async (req, res) => {
         error: "teacher_id, course_id, subject_id, title and text are required",
       });
     }
-
-    // Parse attachments — either pre-uploaded objects or empty
-    let parsedAttachments = [];
-    try {
-      parsedAttachments = attachments
-        ? (typeof attachments === "string" ? JSON.parse(attachments) : attachments)
-        : [];
-    } catch {
-      parsedAttachments = [];
+    if (typeof title !== "string" || typeof text !== "string"
+        || typeof subject_id !== "string" || typeof course_id !== "string") {
+      return res.status(400).json({ success: false, error: "title, text, subject_id and course_id must be text" });
+    }
+    if (title.length > 300 || text.length > 20000) {
+      return res.status(400).json({ success: false, error: "Title or text is too long" });
     }
 
+    if (!allow(req, res, await teacherOwnsSubject(teacher_id, subject_id), "announce-subject")) return;
+
+    // Parse attachments — either pre-uploaded objects or empty
+    const parsedAttachments = parseAttachmentsLoose(attachments) || [];
     const parsedLinks = parseLinks(links);
 
     const ref = db.collection("announcements").doc();
@@ -218,23 +358,29 @@ router.post("/announcements", async (req, res) => {
       created_at:        now,
       updated_at:        now,
     });
+    dropLists(subject_id, course_id);
 
-    const announcementStudentIds = await getStudentUidsForSubject(subject_id);
-    notify({
-      userIds: announcementStudentIds,
-      title: "📢 New Announcement",
-      body: title.trim(),
-      data: { screen: "StudentWork", params: { subject_id, course_id } },
-    });
-
-    return res.status(201).json({
+    res.status(201).json({
       success:         true,
       announcement_id: ref.id,
       message:         "Announcement created",
     });
+
+    // Push notification is done after the response: the teacher does not wait for it.
+    try {
+      const ids = await getStudentUidsForSubject(subject_id);
+      notify({
+        userIds: ids,
+        title: "📢 New Announcement",
+        body: title.trim(),
+        data: { screen: "StudentWork", params: { subject_id, course_id } },
+      });
+    } catch (e) {
+      console.error("ANNOUNCEMENT NOTIFY ERROR:", e.message);
+    }
   } catch (error) {
     console.error("CREATE ANNOUNCEMENT ERROR:", error);
-    return res.status(500).json({ success: false, error: "Failed to create announcement" });
+    if (!res.headersSent) return res.status(500).json({ success: false, error: "Failed to create announcement" });
   }
 });
 
@@ -257,30 +403,36 @@ router.get("/announcements", async (req, res) => {
         error: "subject_id and course_id are required",
       });
     }
+    if (typeof subject_id !== "string" || typeof course_id !== "string") {
+      return res.status(400).json({ success: false, error: "subject_id and course_id are required" });
+    }
 
-    const snap = await db
-      .collection("announcements")
-      .where("subject_id", "==", subject_id)
-      .where("course_id",  "==", course_id)
-      .get();
+    // One Firestore read per subject per few seconds, however many students open the screen.
+    const all = await listCache.memo(`n|${subject_id}|${course_id}`, 5_000, async () => {
+      const snap = await db
+        .collection("announcements")
+        .where("subject_id", "==", subject_id)
+        .where("course_id",  "==", course_id)
+        .get();
 
-    let announcements = snap.docs.map((doc) => {
-      const d = doc.data();
-      return {
-        ...d,
-        created_at: d.created_at?.toDate?.()?.toISOString() || null,
-        updated_at: d.updated_at?.toDate?.()?.toISOString() || null,
-      };
+      const items = snap.docs.map((doc) => {
+        const d = doc.data();
+        return {
+          ...d,
+          created_at: tsISO(d.created_at),
+          updated_at: tsISO(d.updated_at),
+        };
+      });
+
+      // Sort in memory: pinned first, then by date desc — avoids composite index
+      items.sort((a, b) => {
+        if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1;
+        return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
+      });
+      return items;
     });
 
-    // Sort in memory: pinned first, then by date desc — avoids composite index
-    announcements.sort((a, b) => {
-      if (a.is_pinned !== b.is_pinned) return a.is_pinned ? -1 : 1;
-      return new Date(b.created_at || 0).getTime() - new Date(a.created_at || 0).getTime();
-    });
-
-    // Apply limit in memory
-    announcements = announcements.slice(0, Number(limit));
+    const announcements = all.slice(0, wantedLimit(limit));
 
     return res.json({ success: true, count: announcements.length, announcements });
   } catch (error) {
@@ -302,7 +454,7 @@ router.get("/announcements", async (req, res) => {
 //   links        JSON     full replacement array
 //   deleted_keys string[] R2 keys to delete (old files)
 // ─────────────────────────────────────────────────────────────────
-router.put("/announcements/:id", async (req, res) => {
+router.put("/announcements/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
     const { id } = req.params;
     const { teacher_id, title, text, is_pinned, attachments, links, deleted_keys } = req.body;
@@ -310,6 +462,7 @@ router.put("/announcements/:id", async (req, res) => {
     if (!teacher_id) {
       return res.status(400).json({ success: false, error: "teacher_id required" });
     }
+    if (!isId(id)) return res.status(404).json({ success: false, error: "Announcement not found" });
 
     const ref = db.collection("announcements").doc(id);
     const snap = await ref.get();
@@ -318,24 +471,35 @@ router.put("/announcements/:id", async (req, res) => {
       return res.status(404).json({ success: false, error: "Announcement not found" });
     }
 
-    if (snap.data().teacher_id !== teacher_id) {
+    const existing = snap.data();
+    if (existing.teacher_id !== teacher_id) {
       return res.status(403).json({ success: false, error: "Access denied" });
     }
 
     const updates = { updated_at: admin.firestore.FieldValue.serverTimestamp() };
-    if (title       !== undefined) updates.title       = title.trim();
-    if (text        !== undefined) updates.text        = text.trim();
+    if (title !== undefined) {
+      if (typeof title !== "string" || title.length > 300) return res.status(400).json({ success: false, error: "Invalid title" });
+      updates.title = title.trim();
+    }
+    if (text !== undefined) {
+      if (typeof text !== "string" || text.length > 20000) return res.status(400).json({ success: false, error: "Invalid text" });
+      updates.text = text.trim();
+    }
     if (is_pinned   !== undefined) updates.is_pinned   = Boolean(is_pinned);
     if (attachments !== undefined) {
-      updates.attachments = typeof attachments === "string" ? JSON.parse(attachments) : attachments;
+      const parsed = parseAttachmentsLoose(attachments);
+      if (parsed === null) return res.status(400).json({ success: false, error: "attachments must be valid JSON" });
+      updates.attachments = parsed;
     }
     if (links !== undefined) updates.links = parseLinks(links);
 
     await ref.update(updates);
+    dropLists(existing.subject_id, existing.course_id);
 
-    // Clean up deleted R2 files (best-effort, non-blocking)
+    // Clean up deleted R2 files (best-effort, non-blocking) — only files that belonged to this announcement
     if (Array.isArray(deleted_keys) && deleted_keys.length > 0) {
-      Promise.all(deleted_keys.map(deleteFromR2)).catch(() => {});
+      const own = new Set((existing.attachments || []).map((a) => a && a.key).filter(Boolean));
+      cleanupKeys(deleted_keys.filter((k) => own.has(k)));
     }
 
     return res.json({ success: true, message: "Announcement updated" });
@@ -351,7 +515,7 @@ router.put("/announcements/:id", async (req, res) => {
 //
 // Query: teacher_id  (required for ownership check)
 // ─────────────────────────────────────────────────────────────────
-router.delete("/announcements/:id", async (req, res) => {
+router.delete("/announcements/:id", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
   try {
     const { id } = req.params;
     const { teacher_id } = req.query;
@@ -359,6 +523,7 @@ router.delete("/announcements/:id", async (req, res) => {
     if (!teacher_id) {
       return res.status(400).json({ success: false, error: "teacher_id required" });
     }
+    if (!isId(id)) return res.status(404).json({ success: false, error: "Announcement not found" });
 
     const ref  = db.collection("announcements").doc(id);
     const snap = await ref.get();
@@ -367,18 +532,18 @@ router.delete("/announcements/:id", async (req, res) => {
       return res.status(404).json({ success: false, error: "Announcement not found" });
     }
 
-    if (snap.data().teacher_id !== teacher_id) {
+    const data = snap.data();
+    if (data.teacher_id !== teacher_id) {
       return res.status(403).json({ success: false, error: "Access denied" });
     }
 
-    const keys = (snap.data().attachments || []).map((a) => a.key).filter(Boolean);
+    const keys = (data.attachments || []).map((a) => a && a.key).filter(Boolean);
 
     await ref.delete();
+    dropLists(data.subject_id, data.course_id);
 
     // Clean up R2 files (best-effort)
-    if (keys.length > 0) {
-      Promise.all(keys.map(deleteFromR2)).catch(() => {});
-    }
+    cleanupKeys(keys);
 
     return res.json({ success: true, message: "Announcement deleted" });
   } catch (error) {
@@ -410,7 +575,7 @@ router.delete("/announcements/:id", async (req, res) => {
 //   attachments         array    [{ url, key, name, size, type }]  pre-uploaded
 //   links               array    [{ url, label }]
 // ─────────────────────────────────────────────────────────────────
-router.post("/", async (req, res) => {
+router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
     const {
       teacher_id, course_id, subject_id,
@@ -425,6 +590,14 @@ router.post("/", async (req, res) => {
         error: "teacher_id, course_id, subject_id, title, marks and due_date are required",
       });
     }
+    if (typeof title !== "string" || typeof subject_id !== "string" || typeof course_id !== "string"
+        || (instructions != null && typeof instructions !== "string")
+        || (questions != null && typeof questions !== "string")) {
+      return res.status(400).json({ success: false, error: "title, instructions, questions, subject_id and course_id must be text" });
+    }
+    if (title.length > 300 || (instructions || "").length > 20000 || (questions || "").length > 50000) {
+      return res.status(400).json({ success: false, error: "Title, instructions or questions are too long" });
+    }
 
     const marksNum = Number(marks);
     if (isNaN(marksNum) || marksNum < 1) {
@@ -436,15 +609,9 @@ router.post("/", async (req, res) => {
       return res.status(400).json({ success: false, error: "due_date must be a valid ISO date string" });
     }
 
-    let parsedAttachments = [];
-    try {
-      parsedAttachments = attachments
-        ? (typeof attachments === "string" ? JSON.parse(attachments) : attachments)
-        : [];
-    } catch {
-      parsedAttachments = [];
-    }
+    if (!allow(req, res, await teacherOwnsSubject(teacher_id, subject_id), "assignment-subject")) return;
 
+    const parsedAttachments = parseAttachmentsLoose(attachments) || [];
     const parsedLinks = parseLinks(links);
 
     const ref = db.collection("assignments").doc();
@@ -467,23 +634,28 @@ router.post("/", async (req, res) => {
       created_at:       now,
       updated_at:       now,
     });
+    dropLists(subject_id, course_id);
 
-    const assignmentStudentIds = await getStudentUidsForSubject(subject_id);
-    notify({
-      userIds: assignmentStudentIds,
-      title: "📝 New Assignment",
-      body: `${title.trim()} — Due ${new Date(due_date).toLocaleDateString()}`,
-      data: { screen: "StudentWork", params: { subject_id, course_id } },
-    });
-
-    return res.status(201).json({
+    res.status(201).json({
       success:       true,
       assignment_id: ref.id,
       message:       "Assignment created",
     });
+
+    try {
+      const ids = await getStudentUidsForSubject(subject_id);
+      notify({
+        userIds: ids,
+        title: "📝 New Assignment",
+        body: `${title.trim()} — Due ${new Date(due_date).toLocaleDateString()}`,
+        data: { screen: "StudentWork", params: { subject_id, course_id } },
+      });
+    } catch (e) {
+      console.error("ASSIGNMENT NOTIFY ERROR:", e.message);
+    }
   } catch (error) {
     console.error("CREATE ASSIGNMENT ERROR:", error);
-    return res.status(500).json({ success: false, error: "Failed to create assignment" });
+    if (!res.headersSent) return res.status(500).json({ success: false, error: "Failed to create assignment" });
   }
 });
 
@@ -503,30 +675,35 @@ router.get("/", async (req, res) => {
     if (!subject_id || !course_id) {
       return res.status(400).json({ success: false, error: "subject_id and course_id are required" });
     }
+    if (typeof subject_id !== "string" || typeof course_id !== "string") {
+      return res.status(400).json({ success: false, error: "subject_id and course_id are required" });
+    }
 
-    const snap = await db
-      .collection("assignments")
-      .where("subject_id", "==", subject_id)
-      .where("course_id",  "==", course_id)
-      .get();
+    const all = await listCache.memo(`a|${subject_id}|${course_id}`, 5_000, async () => {
+      const snap = await db
+        .collection("assignments")
+        .where("subject_id", "==", subject_id)
+        .where("course_id",  "==", course_id)
+        .get();
 
-    let assignments = snap.docs.map((doc) => {
-      const d = doc.data();
-      return {
-        ...d,
-        due_date:   d.due_date?.toDate?.()?.toISOString()   || null,
-        created_at: d.created_at?.toDate?.()?.toISOString() || null,
-        updated_at: d.updated_at?.toDate?.()?.toISOString() || null,
-      };
+      const items = snap.docs.map((doc) => {
+        const d = doc.data();
+        return {
+          ...d,
+          due_date:   tsISO(d.due_date),
+          created_at: tsISO(d.created_at),
+          updated_at: tsISO(d.updated_at),
+        };
+      });
+
+      // Sort by due_date desc in memory — avoids composite index
+      items.sort((a, b) =>
+        new Date(b.due_date || 0).getTime() - new Date(a.due_date || 0).getTime()
+      );
+      return items;
     });
 
-    // Sort by due_date desc in memory — avoids composite index
-    assignments.sort((a, b) =>
-      new Date(b.due_date || 0).getTime() - new Date(a.due_date || 0).getTime()
-    );
-
-    // Apply limit in memory
-    assignments = assignments.slice(0, Number(limit));
+    const assignments = all.slice(0, wantedLimit(limit));
 
     return res.json({ success: true, count: assignments.length, assignments });
   } catch (error) {
@@ -534,6 +711,66 @@ router.get("/", async (req, res) => {
     return res.status(500).json({ success: false, error: "Failed to fetch assignments" });
   }
 });
+
+// A grade the teacher has not returned yet must stay hidden from the student:
+// the marks and feedback are removed from what the student's app receives.
+// (Older submissions without a `returned` field count as returned.)
+function hideUnreturnedGrade(d) {
+  if (d.status === "graded" && d.returned === false) {
+    return { ...d, marks_obtained: null, feedback: null, grade_hidden: true };
+  }
+  return d;
+}
+
+// Shared by GET /my-submissions and GET /student/:student_uid (identical in the original).
+async function studentSubmissions(student_uid, subject_id) {
+  let subDocs;
+  try {
+    const snap = await db
+      .collection("submissions")
+      .where("student_uid", "==", student_uid)
+      .orderBy("submitted_at", "desc")
+      .get();
+    subDocs = snap.docs;
+  } catch (e) {
+    if (!isIndexMissing(e)) throw e;
+    console.warn("[assignments] composite index submissions(student_uid, submitted_at) missing - sorting in memory");
+    const snap = await db.collection("submissions").where("student_uid", "==", student_uid).get();
+    subDocs = sortByTimeDesc(snap.docs, "submitted_at");
+  }
+
+  // one batched read instead of one read per assignment, and only the fields we show
+  const assignmentIds = [...new Set(subDocs.map((d) => d.data().assignment_id))];
+  const fetched = await getDocsByIds("assignments", assignmentIds, ["title", "marks", "due_date", "subject_id", "course_id"]);
+  const assignmentMap = {};
+  for (const [aid, snap] of fetched) {
+    const a = snap.data();
+    assignmentMap[aid] = {
+      title:      a.title,
+      marks:      a.marks,
+      due_date:   tsISO(a.due_date),
+      subject_id: a.subject_id,
+      course_id:  a.course_id,
+    };
+  }
+
+  let submissions = subDocs.map((doc) => {
+    const d = hideUnreturnedGrade(doc.data());
+    return {
+      ...d,
+      submitted_at:       tsISO(d.submitted_at),
+      graded_at:          tsISO(d.graded_at),
+      assignment_details: assignmentMap[d.assignment_id] || null,
+    };
+  });
+
+  if (subject_id) {
+    submissions = submissions.filter(
+      (s) => s.assignment_details?.subject_id === subject_id
+    );
+  }
+  return submissions;
+}
 
 // ─────────────────────────────────────────────────────────────────
 // 📌 GET /api/assignments/my-submissions
@@ -545,55 +782,18 @@ router.get("/", async (req, res) => {
 //   student_uid   string  (required)
 //   subject_id    string  (optional filter)
 // ─────────────────────────────────────────────────────────────────
-router.get("/my-submissions", async (req, res) => {
+router.get("/my-submissions", guard.student(fromQuery("student_uid")), async (req, res) => {
   try {
     const { student_uid, subject_id } = req.query;
 
     if (!student_uid) {
       return res.status(400).json({ success: false, error: "student_uid required" });
     }
-
-    const subsSnap = await db
-      .collection("submissions")
-      .where("student_uid", "==", student_uid)
-      .orderBy("submitted_at", "desc")
-      .get();
-
-    const assignmentIds = [...new Set(subsSnap.docs.map((d) => d.data().assignment_id))];
-    const assignmentMap = {};
-
-    await Promise.all(
-      assignmentIds.map(async (aid) => {
-        const snap = await db.collection("assignments").doc(aid).get();
-        if (snap.exists) {
-          const a = snap.data();
-          assignmentMap[aid] = {
-            title:      a.title,
-            marks:      a.marks,
-            due_date:   a.due_date?.toDate?.()?.toISOString() || null,
-            subject_id: a.subject_id,
-            course_id:  a.course_id,
-          };
-        }
-      })
-    );
-
-    let submissions = subsSnap.docs.map((doc) => {
-      const d = doc.data();
-      return {
-        ...d,
-        submitted_at:       d.submitted_at?.toDate?.()?.toISOString() || null,
-        graded_at:          d.graded_at?.toDate?.()?.toISOString()    || null,
-        assignment_details: assignmentMap[d.assignment_id] || null,
-      };
-    });
-
-    if (subject_id) {
-      submissions = submissions.filter(
-        (s) => s.assignment_details?.subject_id === subject_id
-      );
+    if (typeof student_uid !== "string") {
+      return res.status(400).json({ success: false, error: "student_uid required" });
     }
 
+    const submissions = await studentSubmissions(student_uid, subject_id);
     return res.json({ success: true, count: submissions.length, submissions });
   } catch (error) {
     console.error("MY SUBMISSIONS ERROR:", error);
@@ -609,58 +809,26 @@ router.get("/my-submissions", async (req, res) => {
 //
 // Query: subject_id  (optional filter)
 // ─────────────────────────────────────────────────────────────────
-router.get("/student/:student_uid", async (req, res) => {
+router.get("/student/:student_uid", guard.selfOrTeacher(fromParams("student_uid")), async (req, res) => {
   try {
     const { student_uid } = req.params;
     const { subject_id }  = req.query;
 
-    const subsSnap = await db
-      .collection("submissions")
-      .where("student_uid", "==", student_uid)
-      .orderBy("submitted_at", "desc")
-      .get();
-
-    const assignmentIds = [...new Set(subsSnap.docs.map((d) => d.data().assignment_id))];
-    const assignmentMap = {};
-
-    await Promise.all(
-      assignmentIds.map(async (aid) => {
-        const snap = await db.collection("assignments").doc(aid).get();
-        if (snap.exists) {
-          const a = snap.data();
-          assignmentMap[aid] = {
-            title:      a.title,
-            marks:      a.marks,
-            due_date:   a.due_date?.toDate?.()?.toISOString() || null,
-            subject_id: a.subject_id,
-            course_id:  a.course_id,
-          };
-        }
-      })
-    );
-
-    let submissions = subsSnap.docs.map((doc) => {
-      const d = doc.data();
-      return {
-        ...d,
-        submitted_at:       d.submitted_at?.toDate?.()?.toISOString() || null,
-        graded_at:          d.graded_at?.toDate?.()?.toISOString()    || null,
-        assignment_details: assignmentMap[d.assignment_id] || null,
-      };
-    });
-
-    if (subject_id) {
-      submissions = submissions.filter(
-        (s) => s.assignment_details?.subject_id === subject_id
-      );
-    }
-
+    const submissions = await studentSubmissions(student_uid, subject_id);
     return res.json({ success: true, count: submissions.length, submissions });
   } catch (error) {
     console.error("STUDENT SUBMISSIONS ERROR:", error);
     return res.status(500).json({ success: false, error: "Failed to fetch student submissions" });
   }
 });
+
+// ─────────────────────────────────────────────────────────────────
+// 📌 GET /api/assignments/:id/students?teacher_id=
+// Enrolled students of an assignment's subject (used by the web register to
+// show "not submitted" rows). The original code had this handler in the web
+// teacher router by mistake; it is available at both URLs now.
+// ─────────────────────────────────────────────────────────────────
+router.get("/:id/students", guard.teacher(fromQuery("teacher_id")), assignmentStudentsHandler);
 
 // ─────────────────────────────────────────────────────────────────
 // 📌 GET /api/assignments/:id
@@ -672,20 +840,19 @@ router.get("/:id", async (req, res) => {
   try {
     const { id } = req.params;
 
-    const snap = await db.collection("assignments").doc(id).get();
+    const d = isId(id) ? await getAssignment(id) : null;
 
-    if (!snap.exists) {
+    if (!d) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
-    const d = snap.data();
     return res.json({
       success: true,
       assignment: {
         ...d,
-        due_date:   d.due_date?.toDate?.()?.toISOString()   || null,
-        created_at: d.created_at?.toDate?.()?.toISOString() || null,
-        updated_at: d.updated_at?.toDate?.()?.toISOString() || null,
+        due_date:   tsISO(d.due_date),
+        created_at: tsISO(d.created_at),
+        updated_at: tsISO(d.updated_at),
       },
     });
   } catch (error) {
@@ -710,7 +877,7 @@ router.get("/:id", async (req, res) => {
 //   links         array    full replacement
 //   deleted_keys  string[] R2 keys to delete
 // ─────────────────────────────────────────────────────────────────
-router.put("/:id", async (req, res) => {
+router.put("/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
     const { id } = req.params;
     const {
@@ -722,6 +889,7 @@ router.put("/:id", async (req, res) => {
     if (!teacher_id) {
       return res.status(400).json({ success: false, error: "teacher_id required" });
     }
+    if (!isId(id)) return res.status(404).json({ success: false, error: "Assignment not found" });
 
     const ref  = db.collection("assignments").doc(id);
     const snap = await ref.get();
@@ -730,15 +898,26 @@ router.put("/:id", async (req, res) => {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
-    if (snap.data().teacher_id !== teacher_id) {
+    const existing = snap.data();
+    if (existing.teacher_id !== teacher_id) {
       return res.status(403).json({ success: false, error: "Access denied" });
     }
 
     const updates = { updated_at: admin.firestore.FieldValue.serverTimestamp() };
 
-    if (title        !== undefined) updates.title        = title.trim();
-    if (instructions !== undefined) updates.instructions = instructions?.trim() || null;
-    if (questions    !== undefined) updates.questions    = questions?.trim()    || null;
+    const textOk = (v, max) => v === null || (typeof v === "string" && v.length <= max);
+    if (title !== undefined) {
+      if (typeof title !== "string" || title.length > 300) return res.status(400).json({ success: false, error: "Invalid title" });
+      updates.title = title.trim();
+    }
+    if (instructions !== undefined) {
+      if (!textOk(instructions, 20000)) return res.status(400).json({ success: false, error: "Invalid instructions" });
+      updates.instructions = instructions?.trim() || null;
+    }
+    if (questions !== undefined) {
+      if (!textOk(questions, 50000)) return res.status(400).json({ success: false, error: "Invalid questions" });
+      updates.questions = questions?.trim() || null;
+    }
     if (allow_late   !== undefined) updates.allow_late   = Boolean(allow_late);
 
     if (marks !== undefined) {
@@ -756,14 +935,19 @@ router.put("/:id", async (req, res) => {
     }
 
     if (attachments !== undefined) {
-      updates.attachments = typeof attachments === "string" ? JSON.parse(attachments) : attachments;
+      const parsed = parseAttachmentsLoose(attachments);
+      if (parsed === null) return res.status(400).json({ success: false, error: "attachments must be valid JSON" });
+      updates.attachments = parsed;
     }
     if (links !== undefined) updates.links = parseLinks(links);
 
     await ref.update(updates);
+    dropAssignment(id);
+    dropLists(existing.subject_id, existing.course_id);
 
     if (Array.isArray(deleted_keys) && deleted_keys.length > 0) {
-      Promise.all(deleted_keys.map(deleteFromR2)).catch(() => {});
+      const own = new Set((existing.attachments || []).map((a) => a && a.key).filter(Boolean));
+      cleanupKeys(deleted_keys.filter((k) => own.has(k)));
     }
 
     return res.json({ success: true, message: "Assignment updated" });
@@ -779,7 +963,7 @@ router.put("/:id", async (req, res) => {
 //
 // Query: teacher_id  (required)
 // ─────────────────────────────────────────────────────────────────
-router.delete("/:id", async (req, res) => {
+router.delete("/:id", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
   try {
     const { id } = req.params;
     const { teacher_id } = req.query;
@@ -787,6 +971,7 @@ router.delete("/:id", async (req, res) => {
     if (!teacher_id) {
       return res.status(400).json({ success: false, error: "teacher_id required" });
     }
+    if (!isId(id)) return res.status(404).json({ success: false, error: "Assignment not found" });
 
     const ref  = db.collection("assignments").doc(id);
     const snap = await ref.get();
@@ -795,34 +980,36 @@ router.delete("/:id", async (req, res) => {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
-    if (snap.data().teacher_id !== teacher_id) {
+    const data = snap.data();
+    if (data.teacher_id !== teacher_id) {
       return res.status(403).json({ success: false, error: "Access denied" });
     }
 
     // Collect all R2 keys — assignment attachments + all submission attachments
-    const r2Keys = (snap.data().attachments || []).map((a) => a.key).filter(Boolean);
+    const r2Keys = (data.attachments || []).map((a) => a && a.key).filter(Boolean);
 
     const subsSnap = await db
       .collection("submissions")
       .where("assignment_id", "==", id)
+      .select("attachments")
       .get();
 
     subsSnap.docs.forEach((doc) => {
       (doc.data().attachments || []).forEach((a) => {
-        if (a.key) r2Keys.push(a.key);
+        if (a && a.key) r2Keys.push(a.key);
       });
     });
 
-    // Firestore batch delete submissions
-    const batch = db.batch();
-    subsSnap.docs.forEach((doc) => batch.delete(doc.ref));
-    batch.delete(ref);
-    await batch.commit();
+    // Submissions first, the assignment last: if something fails halfway a retry can finish the job.
+    // (The original single batch broke for more than 500 submissions.)
+    const ops = subsSnap.docs.map((doc) => (batch) => batch.delete(doc.ref));
+    ops.push((batch) => batch.delete(ref));
+    await commitInBatches(ops);
+    dropAssignment(id);
+    dropLists(data.subject_id, data.course_id);
 
     // R2 cleanup (best-effort)
-    if (r2Keys.length > 0) {
-      Promise.all(r2Keys.map(deleteFromR2)).catch(() => {});
-    }
+    cleanupKeys(r2Keys);
 
     return res.json({ success: true, message: "Assignment and all submissions deleted" });
   } catch (error) {
@@ -837,6 +1024,21 @@ router.delete("/:id", async (req, res) => {
 // ───────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════
 
+// One submission per (assignment, student): the id is derived from both, so two
+// taps / two devices at the same moment cannot create two documents.
+// (Older submissions have random ids; they are found through the query below.)
+const submissionId = (assignment_id, student_uid) => `${assignment_id}__${student_uid}`;
+
+async function findSubmission(assignment_id, student_uid) {
+  const snap = await db
+    .collection("submissions")
+    .where("assignment_id", "==", assignment_id)
+    .where("student_uid",   "==", student_uid)
+    .limit(1)
+    .get();
+  return snap.empty ? null : snap.docs[0];
+}
+
 // ─────────────────────────────────────────────────────────────────
 // 📌 POST /api/assignments/:id/submit
 // Student submits to an assignment. Files must be pre-uploaded via
@@ -849,7 +1051,7 @@ router.delete("/:id", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // NOTE: Files must be pre-uploaded via POST /api/assignments/upload.
 // This endpoint accepts a JSON body with pre-uploaded attachment objects.
-router.post("/:id/submit", async (req, res) => {
+router.post("/:id/submit", submitLimit, guard.student(fromBody("student_uid")), async (req, res) => {
   try {
     const assignment_id = req.params.id;
     const { student_uid, attachments, links } = req.body;
@@ -857,30 +1059,24 @@ router.post("/:id/submit", async (req, res) => {
     if (!student_uid) {
       return res.status(400).json({ success: false, error: "student_uid required" });
     }
+    if (!isId(student_uid)) {
+      return res.status(400).json({ success: false, error: "student_uid required" });
+    }
 
     // ── 1. Fetch assignment ──────────────────────────────────────
-    const assignmentRef  = db.collection("assignments").doc(assignment_id);
-    const assignmentSnap = await assignmentRef.get();
+    const assignment = isId(assignment_id) ? await getAssignment(assignment_id) : null;
 
-    if (!assignmentSnap.exists) {
+    if (!assignment) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
-    const assignment = assignmentSnap.data();
-
     // ── 2. Duplicate check ───────────────────────────────────────
-    const dupSnap = await db
-      .collection("submissions")
-      .where("assignment_id", "==", assignment_id)
-      .where("student_uid",   "==", student_uid)
-      .limit(1)
-      .get();
-
-    if (!dupSnap.empty) {
+    const dup = await findSubmission(assignment_id, student_uid);
+    if (dup) {
       return res.status(409).json({
         success:       false,
         error:         "You have already submitted this assignment. Use the resubmit endpoint to update.",
-        submission_id: dupSnap.docs[0].id,
+        submission_id: dup.id,
       });
     }
 
@@ -897,7 +1093,7 @@ router.post("/:id/submit", async (req, res) => {
     }
 
     // ── 4. Validate pre-uploaded attachments + links ─────────────
-    const uploadedFiles = Array.isArray(attachments) ? attachments : [];
+    const uploadedFiles = cleanAttachments(attachments);
     const parsedLinks   = parseLinks(links);
 
     if (uploadedFiles.length === 0 && parsedLinks.length === 0) {
@@ -907,11 +1103,13 @@ router.post("/:id/submit", async (req, res) => {
       });
     }
 
-    // ── 5. Write submission + increment counter (transaction) ────
-    const subRef = db.collection("submissions").doc();
+    if (!allow(req, res, await studentEnrolled(student_uid, assignment.subject_id), "submit-enrolled")) return;
 
-    await db.runTransaction(async (t) => {
-      t.set(subRef, {
+    // ── 5. Write submission (create() fails if it already exists) ─
+    const subRef = db.collection("submissions").doc(submissionId(assignment_id, student_uid));
+
+    try {
+      await subRef.create({
         submission_id:  subRef.id,
         assignment_id,
         student_uid,
@@ -923,11 +1121,18 @@ router.post("/:id/submit", async (req, res) => {
         submitted_at:   admin.firestore.FieldValue.serverTimestamp(),
         graded_at:      null,
       });
+    } catch (e) {
+      if (isAlreadyExists(e)) {
+        return res.status(409).json({
+          success:       false,
+          error:         "You have already submitted this assignment. Use the resubmit endpoint to update.",
+          submission_id: subRef.id,
+        });
+      }
+      throw e;
+    }
 
-      t.update(assignmentRef, {
-        submissions_count: admin.firestore.FieldValue.increment(1),
-      });
-    });
+    bumpCounter(assignment_id, 1);   // written in the background, summed with other students' submissions
 
     return res.status(201).json({
       success:       true,
@@ -954,7 +1159,7 @@ router.post("/:id/submit", async (req, res) => {
 // ─────────────────────────────────────────────────────────────────
 // NOTE: New files must be pre-uploaded via POST /api/assignments/upload.
 // This endpoint accepts a JSON body with pre-uploaded attachment objects.
-router.put("/:id/resubmit", async (req, res) => {
+router.put("/:id/resubmit", submitLimit, guard.student(fromBody("student_uid")), async (req, res) => {
   try {
     const assignment_id = req.params.id;
     const { student_uid, attachments, links, deleted_keys } = req.body;
@@ -962,27 +1167,22 @@ router.put("/:id/resubmit", async (req, res) => {
     if (!student_uid) {
       return res.status(400).json({ success: false, error: "student_uid required" });
     }
+    if (!isId(student_uid)) {
+      return res.status(400).json({ success: false, error: "student_uid required" });
+    }
 
     // ── 1. Find existing submission ──────────────────────────────
-    const subSnap = await db
-      .collection("submissions")
-      .where("assignment_id", "==", assignment_id)
-      .where("student_uid",   "==", student_uid)
-      .limit(1)
-      .get();
+    const subDoc = await findSubmission(assignment_id, student_uid);
 
-    if (subSnap.empty) {
+    if (!subDoc) {
       return res.status(404).json({
         success: false,
         error:   "No existing submission found. Use the submit endpoint first.",
       });
     }
 
-    const subDoc  = subSnap.docs[0];
-    const subData = subDoc.data();
-
     // Block resubmission once graded
-    if (subData.status === "graded") {
+    if (subDoc.data().status === "graded") {
       return res.status(403).json({
         success: false,
         error:   "Submission has already been graded and cannot be changed",
@@ -990,12 +1190,11 @@ router.put("/:id/resubmit", async (req, res) => {
     }
 
     // ── 2. Fetch assignment for late check ───────────────────────
-    const assignmentSnap = await db.collection("assignments").doc(assignment_id).get();
-    if (!assignmentSnap.exists) {
+    const assignment = await getAssignment(assignment_id);
+    if (!assignment) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
-    const assignment = assignmentSnap.data();
     const now        = new Date();
     const dueDate    = assignment.due_date?.toDate?.();
     const isLate     = dueDate && now > dueDate;
@@ -1008,40 +1207,60 @@ router.put("/:id/resubmit", async (req, res) => {
     }
 
     // ── 3. Resolve new files and merge with existing ─────────────
-    const newFiles    = Array.isArray(attachments) ? attachments : [];
+    const newFiles    = cleanAttachments(attachments);
     const parsedLinks = parseLinks(links);
+    const requestedDeletes = Array.isArray(deleted_keys) ? deleted_keys : [];
 
-    let keysToDelete = [];
-    try {
-      keysToDelete = Array.isArray(deleted_keys) ? deleted_keys : [];
-    } catch { keysToDelete = []; }
+    // The graded-check and the write happen in one transaction, so a teacher
+    // grading at the same moment can never be overwritten by a resubmit.
+    const outcome = await db.runTransaction(async (t) => {
+      const fresh = await t.get(subDoc.ref);
+      if (!fresh.exists) return { code: "gone" };
+      const cur = fresh.data();
+      if (cur.status === "graded") return { code: "graded" };
 
-    const existingFiles = (subData.attachments || []).filter(
-      (a) => !keysToDelete.includes(a.key)
-    );
-    const mergedFiles = [...existingFiles, ...newFiles];
+      // only files that belong to this submission can be removed
+      const ownKeys = new Set((cur.attachments || []).map((a) => a && a.key).filter(Boolean));
+      const keysToDelete = requestedDeletes.filter((k) => ownKeys.has(k));
 
-    if (mergedFiles.length === 0 && parsedLinks.length === 0) {
+      const existingFiles = (cur.attachments || []).filter((a) => !keysToDelete.includes(a && a.key));
+      const mergedFiles = [...existingFiles, ...newFiles];
+
+      if (mergedFiles.length === 0 && parsedLinks.length === 0) return { code: "empty" };
+
+      t.update(subDoc.ref, {
+        attachments:    mergedFiles,
+        links:          parsedLinks,
+        status:         isLate ? "late" : "submitted",
+        submitted_at:   admin.firestore.FieldValue.serverTimestamp(),
+        graded_at:      null,
+        marks_obtained: null,
+        feedback:       null,
+      });
+      return { code: "ok", keysToDelete };
+    });
+
+    if (outcome.code === "gone") {
+      return res.status(404).json({
+        success: false,
+        error:   "No existing submission found. Use the submit endpoint first.",
+      });
+    }
+    if (outcome.code === "graded") {
+      return res.status(403).json({
+        success: false,
+        error:   "Submission has already been graded and cannot be changed",
+      });
+    }
+    if (outcome.code === "empty") {
       return res.status(400).json({
         success: false,
         error:   "Resubmission must include at least one file or link",
       });
     }
 
-    await subDoc.ref.update({
-      attachments:    mergedFiles,
-      links:          parsedLinks,
-      status:         isLate ? "late" : "submitted",
-      submitted_at:   admin.firestore.FieldValue.serverTimestamp(),
-      graded_at:      null,
-      marks_obtained: null,
-      feedback:       null,
-    });
-
     // Delete old R2 files (best-effort)
-    if (keysToDelete.length > 0) {
-      Promise.all(keysToDelete.map(deleteFromR2)).catch(() => {});
-    }
+    cleanupKeys(outcome.keysToDelete);
 
     return res.json({
       success:       true,
@@ -1061,7 +1280,7 @@ router.put("/:id/resubmit", async (req, res) => {
 //
 // Query: teacher_id  (required — ownership check)
 // ─────────────────────────────────────────────────────────────────
-router.get("/:id/submissions", async (req, res) => {
+router.get("/:id/submissions", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
   try {
     const assignment_id = req.params.id;
     const { teacher_id } = req.query;
@@ -1071,46 +1290,63 @@ router.get("/:id/submissions", async (req, res) => {
     }
 
     // Ownership check
-    const assignmentSnap = await db.collection("assignments").doc(assignment_id).get();
-    if (!assignmentSnap.exists) {
+    const assignment = isId(assignment_id) ? await getAssignment(assignment_id) : null;
+    if (!assignment) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
-    if (assignmentSnap.data().teacher_id !== teacher_id) {
+    if (assignment.teacher_id !== teacher_id) {
       return res.status(403).json({ success: false, error: "Access denied" });
     }
 
-    const subsSnap = await db
-      .collection("submissions")
-      .where("assignment_id", "==", assignment_id)
-      .orderBy("submitted_at", "desc")
-      .get();
+    let subDocs;
+    try {
+      const snap = await db
+        .collection("submissions")
+        .where("assignment_id", "==", assignment_id)
+        .orderBy("submitted_at", "desc")
+        .get();
+      subDocs = snap.docs;
+    } catch (e) {
+      if (!isIndexMissing(e)) throw e;
+      console.warn("[assignments] composite index submissions(assignment_id, submitted_at) missing - sorting in memory");
+      const snap = await db.collection("submissions").where("assignment_id", "==", assignment_id).get();
+      subDocs = sortByTimeDesc(snap.docs, "submitted_at");
+    }
 
-    // Batch-fetch student names
-    const studentUids = [...new Set(subsSnap.docs.map((d) => d.data().student_uid))];
+    // Student names: a few `in` queries in parallel (not one query per student),
+    // remembered for a minute because the same class is looked up again and again.
+    const studentUids = [...new Set(subDocs.map((d) => d.data().student_uid))];
     const studentMap  = {};
+    const missing = [];
+    for (const uid of studentUids) {
+      const hit = studentCache.has(uid) ? studentCache.get(uid) : undefined;
+      if (hit !== undefined) { if (hit) studentMap[uid] = hit; }
+      else missing.push(uid);
+    }
+    if (missing.length) {
+      const docs = await queryInChunks(missing, (c) =>
+        db.collection("students").where("uid", "in", c).select("uid", "name", "first_name", "last_name", "roll_no")
+      );
+      for (const doc of docs) {
+        const s = doc.data();
+        if (studentMap[s.uid]) continue; // first match wins (as `limit(1)` did)
+        studentMap[s.uid] = {
+          name:    s.name    || `${s.first_name} ${s.last_name}`,
+          roll_no: s.roll_no || null,
+        };
+      }
+      for (const uid of missing) studentCache.set(uid, studentMap[uid] || null, 60_000);
+    }
 
-    await Promise.all(
-      studentUids.map(async (uid) => {
-        const snap = await db.collection("students").where("uid", "==", uid).limit(1).get();
-        if (!snap.empty) {
-          const s = snap.docs[0].data();
-          studentMap[uid] = {
-            name:    s.name    || `${s.first_name} ${s.last_name}`,
-            roll_no: s.roll_no || null,
-          };
-        }
-      })
-    );
-
-    const submissions = subsSnap.docs.map((doc) => {
+    const submissions = subDocs.map((doc) => {
       const d = doc.data();
       return {
         ...d,
         student_name:  studentMap[d.student_uid]?.name    || null,
         student_roll:  studentMap[d.student_uid]?.roll_no || null,
-        submitted_at:  d.submitted_at?.toDate?.()?.toISOString() || null,
-        graded_at:     d.graded_at?.toDate?.()?.toISOString()    || null,
+        submitted_at:  tsISO(d.submitted_at),
+        graded_at:     tsISO(d.graded_at),
       };
     });
 
@@ -1131,7 +1367,7 @@ router.get("/:id/submissions", async (req, res) => {
 //
 // Query: student_uid  (required)
 // ─────────────────────────────────────────────────────────────────
-router.get("/:id/my-submission", async (req, res) => {
+router.get("/:id/my-submission", guard.student(fromQuery("student_uid")), async (req, res) => {
   try {
     const assignment_id = req.params.id;
     const { student_uid } = req.query;
@@ -1139,25 +1375,23 @@ router.get("/:id/my-submission", async (req, res) => {
     if (!student_uid) {
       return res.status(400).json({ success: false, error: "student_uid required" });
     }
+    if (typeof student_uid !== "string") {
+      return res.status(400).json({ success: false, error: "student_uid required" });
+    }
 
-    const subSnap = await db
-      .collection("submissions")
-      .where("assignment_id", "==", assignment_id)
-      .where("student_uid",   "==", student_uid)
-      .limit(1)
-      .get();
+    const doc = await findSubmission(assignment_id, student_uid);
 
-    if (subSnap.empty) {
+    if (!doc) {
       return res.json({ success: true, submission: null });
     }
 
-    const d = subSnap.docs[0].data();
+    const d = hideUnreturnedGrade(doc.data());
     return res.json({
       success: true,
       submission: {
         ...d,
-        submitted_at: d.submitted_at?.toDate?.()?.toISOString() || null,
-        graded_at:    d.graded_at?.toDate?.()?.toISOString()    || null,
+        submitted_at: tsISO(d.submitted_at),
+        graded_at:    tsISO(d.graded_at),
       },
     });
   } catch (error) {
@@ -1172,77 +1406,100 @@ router.get("/:id/my-submission", async (req, res) => {
 // ───────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════
 
-router.post("/grade/:submission_id", async (req, res) => {
-  try {
-    const { submission_id } = req.params;
-    const { teacher_id, marks_obtained, feedback, returned } = req.body;
+// POST and PUT /grade/:submission_id were two copies of the same logic; they only
+// differ in two error texts and in the reply / push notification.
+async function gradeSubmission(req, res, { isUpdate }) {
+  const { submission_id } = req.params;
+  const { teacher_id, marks_obtained, feedback, returned } = req.body;
 
-    if (!teacher_id || marks_obtained === undefined) {
-      return res.status(400).json({
-        success: false,
-        error:   "teacher_id and marks_obtained are required",
-      });
-    }
-
-    const marksNum = Number(marks_obtained);
-    if (isNaN(marksNum) || marksNum < 0) {
-      return res.status(400).json({ success: false, error: "marks_obtained must be a non-negative number" });
-    }
-
-    // ── 1. Fetch submission ──────────────────────────────────────
-    const subRef  = db.collection("submissions").doc(submission_id);
-    const subSnap = await subRef.get();
-
-    if (!subSnap.exists) {
-      return res.status(404).json({ success: false, error: "Submission not found" });
-    }
-
-    const sub = subSnap.data();
-
-    // ── 2. Fetch assignment for ownership + max marks check ──────
-    const assignmentSnap = await db.collection("assignments").doc(sub.assignment_id).get();
-
-    if (!assignmentSnap.exists) {
-      return res.status(404).json({ success: false, error: "Assignment not found" });
-    }
-
-    const assignment = assignmentSnap.data();
-
-    if (assignment.teacher_id !== teacher_id) {
-      return res.status(403).json({ success: false, error: "Access denied" });
-    }
-
-    if (marksNum > assignment.marks) {
-      return res.status(400).json({
-        success: false,
-        error:   `marks_obtained (${marksNum}) cannot exceed assignment total marks (${assignment.marks})`,
-      });
-    }
-
-    // ── 3. Write grade ───────────────────────────────────────────
-    await subRef.update({
-      marks_obtained: marksNum,
-      feedback:       feedback?.trim() || null,
-      returned:       returned === true || returned === "true",
-      status:         "graded",
-      graded_at:      admin.firestore.FieldValue.serverTimestamp(),
+  if (!teacher_id || marks_obtained === undefined) {
+    return res.status(400).json({
+      success: false,
+      error:   "teacher_id and marks_obtained are required",
     });
+  }
 
+  const marksNum = Number(marks_obtained);
+  if (isNaN(marksNum) || marksNum < 0) {
+    return res.status(400).json({ success: false, error: "marks_obtained must be a non-negative number" });
+  }
+  if (feedback != null && (typeof feedback !== "string" || feedback.length > 5000)) {
+    return res.status(400).json({ success: false, error: "feedback must be text (max 5000 characters)" });
+  }
+  if (!isId(submission_id)) {
+    return res.status(404).json({ success: false, error: "Submission not found" });
+  }
+
+  // ── 1. Fetch submission ──────────────────────────────────────
+  const subRef  = db.collection("submissions").doc(submission_id);
+  const subSnap = await subRef.get();
+
+  if (!subSnap.exists) {
+    return res.status(404).json({ success: false, error: "Submission not found" });
+  }
+
+  const sub = subSnap.data();
+
+  // ── 2. Fetch assignment for ownership + max marks check ──────
+  const assignment = await getAssignment(sub.assignment_id);
+
+  if (!assignment) {
+    return res.status(404).json({ success: false, error: "Assignment not found" });
+  }
+
+  if (assignment.teacher_id !== teacher_id) {
+    return res.status(403).json({ success: false, error: "Access denied" });
+  }
+
+  if (marksNum > assignment.marks) {
+    return res.status(400).json({
+      success: false,
+      error:   isUpdate
+        ? `marks_obtained cannot exceed assignment total marks (${assignment.marks})`
+        : `marks_obtained (${marksNum}) cannot exceed assignment total marks (${assignment.marks})`,
+    });
+  }
+
+  // ── 3. Write grade ───────────────────────────────────────────
+  const isReturned = returned === true || returned === "true";
+  const wasReturned = sub.returned === true;
+  await subRef.update({
+    marks_obtained: marksNum,
+    feedback:       feedback?.trim() || null,
+    returned:       isReturned,
+    status:         "graded",
+    graded_at:      admin.firestore.FieldValue.serverTimestamp(),
+  });
+  summaryCache.del(sub.assignment_id);
+
+  // Tell the student only when the grade becomes visible to them, so a hidden
+  // grade is not leaked through the push notification.
+  if (isReturned && !wasReturned) {
     notify({
       userIds: [sub.student_uid],
       title: "Assignment Graded",
       body: `You scored ${marksNum}/${assignment.marks} on "${assignment.title}"`,
       data: { screen: "StudentWork" },
     });
+  }
 
-    return res.json({
-      success:        true,
-      submission_id,
-      marks_obtained: marksNum,
-      out_of:         assignment.marks,
-      returned:       returned === true || returned === "true",
-      message:        "Submission graded",
-    });
+  if (isUpdate) {
+    return res.json({ success: true, submission_id, marks_obtained: marksNum, returned: isReturned, message: "Grade updated" });
+  }
+
+  return res.json({
+    success:        true,
+    submission_id,
+    marks_obtained: marksNum,
+    out_of:         assignment.marks,
+    returned:       isReturned,
+    message:        "Submission graded",
+  });
+}
+
+router.post("/grade/:submission_id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
+  try {
+    return await gradeSubmission(req, res, { isUpdate: false });
   } catch (error) {
     console.error("GRADE ERROR:", error);
     return res.status(500).json({ success: false, error: "Failed to grade submission" });
@@ -1254,58 +1511,9 @@ router.post("/grade/:submission_id", async (req, res) => {
 // Teacher updates an already-graded submission.
 // Same body as POST /grade.
 // ─────────────────────────────────────────────────────────────────
-router.put("/grade/:submission_id", async (req, res) => {
+router.put("/grade/:submission_id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
-    const { submission_id } = req.params;
-    const { teacher_id, marks_obtained, feedback, returned } = req.body;
-
-    if (!teacher_id || marks_obtained === undefined) {
-      return res.status(400).json({ success: false, error: "teacher_id and marks_obtained are required" });
-    }
-
-    const marksNum = Number(marks_obtained);
-    if (isNaN(marksNum) || marksNum < 0) {
-      return res.status(400).json({ success: false, error: "marks_obtained must be a non-negative number" });
-    }
-
-    const subRef  = db.collection("submissions").doc(submission_id);
-    const subSnap = await subRef.get();
-
-    if (!subSnap.exists) {
-      return res.status(404).json({ success: false, error: "Submission not found" });
-    }
-
-    const assignmentSnap = await db
-      .collection("assignments")
-      .doc(subSnap.data().assignment_id)
-      .get();
-
-    if (!assignmentSnap.exists) {
-      return res.status(404).json({ success: false, error: "Assignment not found" });
-    }
-
-    const assignment = assignmentSnap.data();
-
-    if (assignment.teacher_id !== teacher_id) {
-      return res.status(403).json({ success: false, error: "Access denied" });
-    }
-
-    if (marksNum > assignment.marks) {
-      return res.status(400).json({
-        success: false,
-        error:   `marks_obtained cannot exceed assignment total marks (${assignment.marks})`,
-      });
-    }
-
-    await subRef.update({
-      marks_obtained: marksNum,
-      feedback:       feedback?.trim() || null,
-      returned:       returned === true || returned === "true",  // ← ADD THIS
-      status:         "graded",
-      graded_at:      admin.firestore.FieldValue.serverTimestamp(),
-    });
-
-    return res.json({ success: true, submission_id, marks_obtained: marksNum, message: "Grade updated" });
+    return await gradeSubmission(req, res, { isUpdate: true });
   } catch (error) {
     console.error("UPDATE GRADE ERROR:", error);
     return res.status(500).json({ success: false, error: "Failed to update grade" });
@@ -1316,7 +1524,7 @@ router.put("/grade/:submission_id", async (req, res) => {
 // 📌 GET /api/assignments/:id/summary
 // Teacher gets a grading summary for an assignment.
 // ─────────────────────────────────────────────────────────────────
-router.get("/:id/summary", async (req, res) => {
+router.get("/:id/summary", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
   try {
     const { id } = req.params;
     const { teacher_id } = req.query;
@@ -1325,41 +1533,39 @@ router.get("/:id/summary", async (req, res) => {
       return res.status(400).json({ success: false, error: "teacher_id required" });
     }
 
-    const assignmentSnap = await db.collection("assignments").doc(id).get();
-    if (!assignmentSnap.exists) {
+    const assignment = isId(id) ? await getAssignment(id) : null;
+    if (!assignment) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
-    if (assignmentSnap.data().teacher_id !== teacher_id) {
+    if (assignment.teacher_id !== teacher_id) {
       return res.status(403).json({ success: false, error: "Access denied" });
     }
 
-    const subsSnap = await db
-      .collection("submissions")
-      .where("assignment_id", "==", id)
-      .get();
+    const summary = await summaryCache.memo(id, 3_000, async () => {
+      // only the two fields the numbers need
+      const subsSnap = await db
+        .collection("submissions")
+        .where("assignment_id", "==", id)
+        .select("status", "marks_obtained")
+        .get();
 
-    const subs = subsSnap.docs.map((d) => d.data());
+      const subs = subsSnap.docs.map((d) => d.data());
 
-    const total_submissions = subs.length;
-    const graded            = subs.filter((s) => s.status === "graded").length;
-    const late              = subs.filter((s) => s.status === "late").length;
-    const pending           = total_submissions - graded;
-    const gradedSubs        = subs.filter((s) => s.marks_obtained !== null);
-    const avg_marks         = gradedSubs.length
-      ? parseFloat((gradedSubs.reduce((sum, s) => sum + s.marks_obtained, 0) / gradedSubs.length).toFixed(2))
-      : null;
+      const total_submissions = subs.length;
+      const graded            = subs.filter((s) => s.status === "graded").length;
+      const late              = subs.filter((s) => s.status === "late").length;
+      const pending           = total_submissions - graded;
+      const gradedSubs        = subs.filter((s) => s.marks_obtained !== null && s.marks_obtained !== undefined);
+      const avg_marks         = gradedSubs.length
+        ? parseFloat((gradedSubs.reduce((sum, s) => sum + s.marks_obtained, 0) / gradedSubs.length).toFixed(2))
+        : null;
+      return { total_submissions, graded, pending, late, avg_marks };
+    });
 
     return res.json({
       success: true,
-      summary: {
-        total_submissions,
-        graded,
-        pending,
-        late,
-        avg_marks,
-        total_marks: assignmentSnap.data().marks,
-      },
+      summary: { ...summary, total_marks: assignment.marks },
     });
   } catch (error) {
     console.error("SUMMARY ERROR:", error);
@@ -1375,7 +1581,7 @@ router.get("/:id/summary", async (req, res) => {
 // JSON body:
 //   student_uid   string  (required)
 // ─────────────────────────────────────────────────────────────────
-router.post("/:id/unsubmit", async (req, res) => {
+router.post("/:id/unsubmit", submitLimit, guard.student(fromBody("student_uid")), async (req, res) => {
   try {
     const assignment_id = req.params.id;
     const { student_uid } = req.body;
@@ -1383,38 +1589,37 @@ router.post("/:id/unsubmit", async (req, res) => {
     if (!student_uid) {
       return res.status(400).json({ success: false, error: "student_uid required" });
     }
+    if (!isId(student_uid)) {
+      return res.status(400).json({ success: false, error: "student_uid required" });
+    }
 
     // Find submission
-    const subSnap = await db
-      .collection("submissions")
-      .where("assignment_id", "==", assignment_id)
-      .where("student_uid",   "==", student_uid)
-      .limit(1)
-      .get();
+    const subDoc = await findSubmission(assignment_id, student_uid);
 
-    if (subSnap.empty) {
+    if (!subDoc) {
       return res.status(404).json({ success: false, error: "No submission found to unsubmit" });
     }
 
-    const subDoc  = subSnap.docs[0];
-    const subData = subDoc.data();
+    // status check + delete in one transaction (a grade written meanwhile wins)
+    const outcome = await db.runTransaction(async (t) => {
+      const fresh = await t.get(subDoc.ref);
+      if (!fresh.exists) return "gone";
+      if (fresh.data().status === "graded") return "graded";
+      t.delete(subDoc.ref);
+      return "ok";
+    });
 
-    if (subData.status === "graded") {
+    if (outcome === "graded") {
       return res.status(403).json({
         success: false,
         error:   "Submission has already been graded and cannot be unsubmitted",
       });
     }
+    if (outcome === "gone") {
+      return res.status(404).json({ success: false, error: "No submission found to unsubmit" });
+    }
 
-    // Delete the submission document and decrement counter atomically
-    const assignmentRef = db.collection("assignments").doc(assignment_id);
-
-    await db.runTransaction(async (t) => {
-      t.delete(subDoc.ref);
-      t.update(assignmentRef, {
-        submissions_count: admin.firestore.FieldValue.increment(-1),
-      });
-    });
+    bumpCounter(assignment_id, -1);
 
     return res.json({ success: true, message: "Submission retracted successfully" });
   } catch (error) {
@@ -1422,5 +1627,8 @@ router.post("/:id/unsubmit", async (req, res) => {
     return res.status(500).json({ success: false, error: "Failed to unsubmit" });
   }
 });
+
+// Let the process flush pending counter updates when it is asked to stop.
+router.flushPending = () => counter.flushAll();
 
 module.exports = router;

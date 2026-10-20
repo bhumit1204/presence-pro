@@ -1,3 +1,4 @@
+import { apiFetch } from "../../../services/api";
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
@@ -30,7 +31,7 @@ const BORDER       = "#E5E7EB";
 const OD_COLOR     = "#7C3AED";
 const OD_SOFT      = "#EDE9FE";
 
-const API_URL = "http://10.132.90.56:5000";
+const API_URL = "https://presencepro.duckdns.org";
 
 interface Subject {
   subject_id?: string;
@@ -58,7 +59,7 @@ function ODPendingBadge({ teacherId, subjectId }: { teacherId: string; subjectId
     let cancelled = false;
     (async () => {
       try {
-        const res  = await fetch(`${API_URL}/api/od/teacher/${teacherId}?subject_id=${subjectId}`);
+        const res  = await apiFetch(`${API_URL}/api/od/teacher/${teacherId}?subject_id=${subjectId}`);
         const json = await res.json();
         if (!cancelled && json.success) setCount(json.summary?.pending ?? 0);
       } catch { /* silent */ }
@@ -106,7 +107,7 @@ export default function TeacherReports() {
       if (!session?.teacher_id) return;
       setTeacherId(session.teacher_id);
 
-      const res  = await fetch(
+      const res  = await apiFetch(
         `${API_URL}/api/lectures/teachers/subjects?teacher_id=${session.teacher_id}`
       );
       const data = await res.json();
@@ -132,7 +133,7 @@ export default function TeacherReports() {
       try {
         setSearching(true);
         const subjectId = (selectedSubject as any).subject_id || "";
-        const res = await fetch(
+        const res = await apiFetch(
           `${API_URL}/api/reports/students/search?teacher_id=${teacherId}&subject_id=${subjectId}&query=${encodeURIComponent(text)}`
         );
         const data = await res.json();
@@ -160,7 +161,7 @@ export default function TeacherReports() {
       }
 
       const subjectId = (selectedSubject as any)?.subject_id || "";
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_URL}/api/reports/students/by-qr?uid=${payload.uid}&teacher_id=${teacherId}&subject_id=${subjectId}`
       );
       const result = await res.json();

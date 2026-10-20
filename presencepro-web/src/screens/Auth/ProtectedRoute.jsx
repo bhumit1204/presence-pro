@@ -23,11 +23,48 @@
 
 import { useEffect } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
-import { isLoggedIn, getSessionUser, dashboardPathForRole } from "../../services/session";
+import {
+  isLoggedIn,
+  getSessionUser,
+  getUserSession,
+  dashboardPathForRole,
+} from "../../services/session";
+import { useSessionRefresh } from "../../services/refreshSession";
+
+// A head is a teacher with extra powers, so teacher routes accept them too.
+// Head = is_head flag, hod/head_teacher role, or a teacher whose profile has
+// head_of set (that's what the institute app writes, e.g. head_of: "MCA").
+function isHeadUser(user) {
+  const profile = getUserSession()?.profile;
+  return (
+    !!user?.is_head ||
+    user?.role === "hod" ||
+    user?.role === "head_teacher" ||
+    (user?.role === "teacher" && !!String(profile?.head_of || "").trim())
+  );
+}
+
+function roleMatches(user, r) {
+  if (r === "head")    return isHeadUser(user);
+  if (r === "teacher") return user?.role === "teacher" || isHeadUser(user);
+  return user?.role === r;
+}
+
+// Heads land on the normal teacher pages; Manage is just extra sidebar items.
+function homePath(user) {
+  return isHeadUser(user) && user?.role !== "student"
+    ? "/dashboard/teacher"
+    : dashboardPathForRole(user);
+}
 
 export default function ProtectedRoute({ children, role = null }) {
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Re-syncs role / head status from the server (mount, every minute, tab
+  // focus). The version changes when the session does, re-running the guard
+  // below — so a head removed by the institute is moved off Manage pages.
+  const sessionVersion = useSessionRefresh();
 
   useEffect(() => {
     // Not logged in → back to login
@@ -41,19 +78,14 @@ export default function ProtectedRoute({ children, role = null }) {
       const user         = getSessionUser();
       const allowedRoles = Array.isArray(role) ? role : [role];
 
-      // HOD/head pages: allow both "hod" role AND teacher with is_head
-      const isAllowed =
-        allowedRoles.some((r) => {
-          if (r === "head") return user.role === "hod" || (user.role === "teacher" && user.is_head);
-          return user.role === r;
-        });
+      const isAllowed = allowedRoles.some((r) => roleMatches(user, r));
 
       if (!isAllowed) {
         // Redirect to their correct dashboard rather than login
-        navigate(dashboardPathForRole(user), { replace: true });
+        navigate(homePath(user), { replace: true });
       }
     }
-  }, [location.pathname]);
+  }, [location.pathname, sessionVersion]);
 
   // If not logged in, render nothing while redirect fires
   if (!isLoggedIn()) return null;
@@ -62,10 +94,7 @@ export default function ProtectedRoute({ children, role = null }) {
   if (role) {
     const user         = getSessionUser();
     const allowedRoles = Array.isArray(role) ? role : [role];
-    const isAllowed    = allowedRoles.some((r) => {
-      if (r === "head") return user.role === "hod" || (user.role === "teacher" && user.is_head);
-      return user.role === r;
-    });
+    const isAllowed    = allowedRoles.some((r) => roleMatches(user, r));
     if (!isAllowed) return null;
   }
 

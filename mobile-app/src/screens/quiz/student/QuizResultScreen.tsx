@@ -1,147 +1,84 @@
+// screens/quiz/student/QuizResultScreen.tsx — shown right after a quiz is submitted
 import React from "react";
-import { View, Text, StyleSheet, TouchableOpacity } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useRoute, useNavigation } from "@react-navigation/native";
-import {
-  PRIMARY, BG, GREEN, GREEN_LIGHT,
-  AMBER, AMBER_LIGHT, RED, RED_LIGHT, GREY,
-  GradedAnswer,
-} from "./components/studentQuizConstants";
+import { StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { useNavigation, useRoute } from "@react-navigation/native";
+import { Button, Chip, IconBadge, Screen, SP, T, TONE, Tone, font } from "../../../components/ui";
+import type { GradedAnswer } from "./components/studentQuizConstants";
 
 export default function QuizResultScreen() {
   const navigation = useNavigation<any>();
-  const route      = useNavigation<any>();
-  const { result, quiz_title } = (useRoute<any>()).params as {
-    result: {
-      total_marks:    number;
-      marks_obtained: number;
-      percentage:     number;
-      graded_answers: GradedAnswer[];
-    };
-    quiz_title: string;
+  const params = (useRoute<any>().params || {}) as {
+    result?: { total_marks?: number; marks_obtained?: number; percentage?: number; graded_answers?: GradedAnswer[] };
+    quiz_title?: string;
   };
+  const result = params.result || {};
 
-  const pct      = result.percentage;
-  const color    = pct >= 75 ? GREEN : pct >= 50 ? AMBER : RED;
-  const bgColor  = pct >= 75 ? GREEN_LIGHT : pct >= 50 ? AMBER_LIGHT : RED_LIGHT;
-  const message  = pct >= 75 ? "Great work!" : pct >= 50 ? "Good effort!" : "Keep practising";
+  const pct = Math.max(0, Math.min(100, Number(result.percentage) || 0));
+  const obtained = Number(result.marks_obtained) || 0;
+  const total = Number(result.total_marks) || 0;
+  const tone: Tone = pct >= 75 ? "success" : pct >= 50 ? "warning" : "danger";
+  const message = pct >= 75 ? "Great work" : pct >= 50 ? "Good effort" : "Keep practising";
+  const c = TONE[tone];
+
+  const graded = Array.isArray(result.graded_answers) ? result.graded_answers : [];
+  const correct = graded.filter((a) => a.is_correct).length;
+  const wrong = graded.length - correct;
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      <View style={S.container}>
-
-        {/* Big tick circle */}
-        <View style={[S.tickCircle, { backgroundColor: bgColor, borderColor: color }]}>
-          <Text style={[S.tickIcon, { color }]}>✓</Text>
-        </View>
-
-        <Text style={S.submittedLabel}>Submitted!</Text>
-        <Text style={S.quizTitle}>{quiz_title}</Text>
-
-        {/* Score card */}
-        <View style={[S.scoreCard, { borderColor: color }]}>
-          <Text style={[S.percentage, { color }]}>{pct.toFixed(1)}%</Text>
-          <Text style={S.marks}>
-            {result.marks_obtained.toFixed(1)} / {result.total_marks} marks
+    <Screen edges={["top", "bottom"]}>
+      <View style={st.wrap}>
+        <IconBadge icon="checkmark-circle" tone="success" size={92} />
+        <Text style={[font.h1, { marginTop: SP.xl }]}>Quiz submitted</Text>
+        {!!params.quiz_title && (
+          <Text style={[font.body, { textAlign: "center", marginTop: 4 }]} numberOfLines={2}>
+            {params.quiz_title}
           </Text>
-          <Text style={[S.message, { color }]}>{message}</Text>
+        )}
+
+        <View style={[st.card, { borderColor: c.fg }]}>
+          <Text style={[st.pct, { color: c.fg }]}>{pct.toFixed(1)}%</Text>
+          <Text style={st.marks}>
+            {obtained.toFixed(1)} / {total} marks
+          </Text>
+          <View style={[st.msg, { backgroundColor: c.bg }]}>
+            <Ionicons name={pct >= 50 ? "trophy" : "fitness"} size={15} color={c.fg} />
+            <Text style={[st.msgText, { color: c.fg }]}>{message}</Text>
+          </View>
+          {graded.length > 0 && (
+            <View style={st.chips}>
+              <Chip label={`${correct} correct`} tone="success" icon="checkmark" />
+              <Chip label={`${wrong} incorrect`} tone="danger" icon="close" />
+            </View>
+          )}
         </View>
 
-        <TouchableOpacity
-          style={[S.doneBtn, { backgroundColor: color }]}
+        <Button
+          label="Back to dashboard"
+          icon="home-outline"
           onPress={() => navigation.navigate("StudentDashboard")}
-          activeOpacity={0.85}
-        >
-          <Text style={S.doneBtnTxt}>Back to Dashboard</Text>
-        </TouchableOpacity>
-
+          style={{ alignSelf: "stretch", marginTop: SP.xl }}
+        />
       </View>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
-const S = StyleSheet.create({
-  safe:      { flex: 1, backgroundColor: BG },
-  container: {
-    flex: 1,
-    alignItems: "center",
-    justifyContent: "center",
-    paddingHorizontal: 32,
-    gap: 16,
-  },
-
-  tickCircle: {
-    width: 110,
-    height: 110,
-    borderRadius: 55,
-    borderWidth: 3,
-    alignItems: "center",
-    justifyContent: "center",
-    marginBottom: 8,
-  },
-  tickIcon: {
-    fontSize: 56,
-    fontWeight: "900",
-    lineHeight: 68,
-  },
-
-  submittedLabel: {
-    fontSize: 28,
-    fontWeight: "900",
-    color: "#111827",
-  },
-  quizTitle: {
-    fontSize: 15,
-    color: GREY,
-    fontWeight: "600",
-    textAlign: "center",
-    marginTop: -8,
-  },
-
-  scoreCard: {
-    width: "100%",
-    backgroundColor: "#FFF",
-    borderRadius: 20,
+const st = StyleSheet.create({
+  wrap: { flex: 1, alignItems: "center", justifyContent: "center", paddingHorizontal: SP.xl },
+  card: {
+    alignSelf: "stretch",
+    backgroundColor: T.surface,
+    borderRadius: 24,
     borderWidth: 2,
-    padding: 24,
+    padding: SP.xl,
     alignItems: "center",
     gap: 6,
-    marginTop: 8,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    elevation: 3,
+    marginTop: SP.xl,
   },
-  percentage: {
-    fontSize: 52,
-    fontWeight: "900",
-    lineHeight: 60,
-  },
-  marks: {
-    fontSize: 18,
-    fontWeight: "700",
-    color: "#374151",
-  },
-  message: {
-    fontSize: 14,
-    fontWeight: "700",
-    marginTop: 4,
-  },
-
-  doneBtn: {
-    width: "100%",
-    height: 54,
-    borderRadius: 16,
-    alignItems: "center",
-    justifyContent: "center",
-    marginTop: 8,
-    shadowOpacity: 0.25,
-    shadowRadius: 10,
-    elevation: 4,
-  },
-  doneBtnTxt: {
-    color: "#FFF",
-    fontWeight: "800",
-    fontSize: 16,
-  },
+  pct: { fontSize: 52, fontWeight: "900", lineHeight: 60 },
+  marks: { fontSize: 17, fontWeight: "700", color: T.sub },
+  msg: { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 999, marginTop: 6 },
+  msgText: { fontSize: 13.5, fontWeight: "700" },
+  chips: { flexDirection: "row", gap: SP.sm, marginTop: SP.md },
 });

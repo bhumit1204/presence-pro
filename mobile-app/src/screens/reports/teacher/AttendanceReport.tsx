@@ -1,864 +1,337 @@
-import React, { useEffect, useState, useCallback } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  ActivityIndicator,
-  TouchableOpacity,
-  Alert,
-  Modal,
-  TextInput,
-} from "react-native";
+// screens/reports/teacher/AttendanceReport.tsx — one student's attendance in one subject.
+// Used by the teacher (StudentReportDetail, isTeacher) and by the student app (isTeacher false).
+
+import React, { useMemo, useState } from "react";
+import { ActivityIndicator, Alert, KeyboardAvoidingView, Modal, Platform, Pressable, ScrollView, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import AttendanceCalendar from "../../../components/AttendanceCalendar";
 import { useNavigation } from "@react-navigation/native";
-
-const PRIMARY = "#4834D4";
-const PRIMARY_SOFT = "#EEF2FF";
-const BG = "#F3F4F6";
-const WHITE = "#FFFFFF";
-const GREY = "#6B7280";
-const DARK = "#111827";
-const GREEN = "#10B981";
-const AMBER = "#F59E0B";
-const RED = "#EF4444";
-const BORDER   = "#E5E7EB";
-const OD_COLOR = "#7C3AED";
-const OD_SOFT  = "#EDE9FE";
-
-const API_URL = "http://10.132.90.56:5000";
+import { apiFetch } from "../../../services/api";
+import AttendanceCalendar from "../../../components/AttendanceCalendar";
+import { Banner, Button, Card, Chip, EmptyState, ProgressBar, SectionLabel, Segmented, SP, T, TextField, Tone, font } from "../../../components/ui";
+import { API_URL, IconName, LoadBoundary, StatRow, attTone, enc, fmtDate, num, toYMD, useReport } from "./ReportShared";
 
 interface Props {
-  studentUid:  string;
+  studentUid: string;
   studentName: string;
-  subjectId:   string;
+  subjectId: string;
   subjectName?: string;
-  teacherId:   string;
-  courseId?:   string;
-  isTeacher?:  boolean;   // true when rendered inside teacher's StudentReportDetail
+  teacherId: string;
+  courseId?: string;
+  isTeacher?: boolean;
 }
 
-// "date" mode = single date filter (from_date only, no to_date).
-// Summary card never changes — it always reflects the full picture.
 type FilterMode = "all" | "date" | "range";
-type AttendanceStatus = "present" | "absent";
+type Picker = "from" | "to" | "manualStart" | "manualEnd" | null;
 
-// Which calendar picker is currently open
-type PickerTarget = "from" | "to" | "manualStart" | "manualEnd" | null;
+const STATUS: Record<string, { tone: Tone; icon: IconName; label: string }> = {
+  present: { tone: "success", icon: "checkmark-circle", label: "Present" },
+  absent: { tone: "danger", icon: "close-circle", label: "Absent" },
+  late: { tone: "warning", icon: "time", label: "Late" },
+  od: { tone: "primary", icon: "shield-checkmark", label: "On duty" },
+};
+const MSG: Record<string, string> = {
+  success: "Attendance is satisfactory.",
+  warning: "Attendance is below 75%.",
+  danger: "Critical: attendance is very low.",
+  neutral: "No attendance recorded yet.",
+};
 
 export default function AttendanceReport({ studentUid, studentName, subjectId, subjectName, teacherId, courseId, isTeacher }: Props) {
   const navigation = useNavigation<any>();
-  // ── Data ──────────────────────────────────────────────────────────────────
-  const [data, setData] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const today = toYMD(new Date());
 
-  // ── Filter state ──────────────────────────────────────────────────────────
-  const [filterMode, setFilterMode] = useState<FilterMode>("all");
-  // from/to are passed to the API to filter the records list only.
-  // The summary card always reflects the full picture.
+  const [mode, setMode] = useState<FilterMode>("all");
   const [fromDate, setFromDate] = useState<string | null>(null);
   const [toDate, setToDate] = useState<string | null>(null);
+  const [picker, setPicker] = useState<Picker>(null);
 
-  // ── Manual attendance modal ───────────────────────────────────────────────
-  const [manualModalVisible, setManualModalVisible] = useState(false);
-  const [manualStartDate, setManualStartDate] = useState("");   // required
-  const [manualEndDate, setManualEndDate] = useState("");       // optional
-  const [manualStatus, setManualStatus] = useState<AttendanceStatus>("present");
-  const [manualNote, setManualNote] = useState("");
-  const [savingManual, setSavingManual] = useState(false);
+  const [manualOpen, setManualOpen] = useState(false);
+  const [mStart, setMStart] = useState("");
+  const [mEnd, setMEnd] = useState("");
+  const [mStatus, setMStatus] = useState<"present" | "absent">("present");
+  const [mNote, setMNote] = useState("");
+  const [mError, setMError] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
 
-  // ── Calendar picker state ─────────────────────────────────────────────────
-  const [activePicker, setActivePicker] = useState<PickerTarget>(null);
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Fetch attendance data.
-  // The API always returns the full summary regardless of date params.
-  // Date params only affect the records[] list.
-  // ─────────────────────────────────────────────────────────────────────────
-  const fetchData = useCallback(async () => {
-    try {
-      setLoading(true);
-      let url =
-        `${API_URL}/api/reports/student/${studentUid}/attendance` +
-        `?teacher_id=${teacherId}&subject_id=${subjectId}`;
-      if (fromDate) url += `&from_date=${fromDate}`;
-      if (toDate)   url += `&to_date=${toDate}`;
-
-      const res = await fetch(url);
-      const json = await res.json();
-      if (json.success) setData(json);
-    } catch (e) {
-      console.log("ATTENDANCE FETCH:", e);
-    } finally {
-      setLoading(false);
+  // The summary always covers everything; the date filter only narrows the record list.
+  const rangeInvalid = mode === "range" && !!fromDate && !!toDate && toDate < fromDate;
+  const url = useMemo(() => {
+    if (!studentUid || !subjectId || !teacherId || rangeInvalid) return null;
+    let u = `${API_URL}/api/reports/student/${enc(studentUid)}/attendance?teacher_id=${enc(teacherId)}&subject_id=${enc(subjectId)}`;
+    if (mode === "date" && fromDate) u += `&from_date=${fromDate}&to_date=${fromDate}`;
+    if (mode === "range") {
+      if (fromDate) u += `&from_date=${fromDate}`;
+      if (toDate) u += `&to_date=${toDate}`;
     }
-  }, [studentUid, teacherId, subjectId, fromDate, toDate]);
+    return u;
+  }, [studentUid, subjectId, teacherId, mode, fromDate, toDate, rangeInvalid]);
+  const report = useReport(url);
 
-  useEffect(() => { fetchData(); }, [fetchData]);
+  const records: any[] = report.data?.records ?? [];
+  const summary = report.data?.summary ?? {};
+  const pct: number | null = summary.percentage ?? null;
+  const tone = attTone(pct);
+  const odCount = num(summary.od, records.filter((r) => r.status === "od").length);
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Filter mode helpers
-  // ─────────────────────────────────────────────────────────────────────────
-  const applyFilter = (mode: FilterMode) => {
-    setFilterMode(mode);
-    if (mode === "all") {
+  const changeMode = (m: FilterMode) => {
+    setMode(m);
+    if (m === "all") {
       setFromDate(null);
       setToDate(null);
-    } else if (mode === "date") {
-      // Reset to_date — only a single date is used
-      setToDate(null);
-    }
+    } else if (m === "date") setToDate(null);
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Calendar picker handler
-  // ─────────────────────────────────────────────────────────────────────────
-  const handleDateSelect = (selected: { year: number; month: number; date: number }) => {
-    const formatted = `${selected.year}-${String(selected.month).padStart(2, "0")}-${String(selected.date).padStart(2, "0")}`;
-
-    switch (activePicker) {
-      case "from":
-        setFromDate(formatted);
-        break;
-      case "to":
-        setToDate(formatted);
-        break;
-      case "manualStart":
-        setManualStartDate(formatted);
-        break;
-      case "manualEnd":
-        setManualEndDate(formatted);
-        break;
-    }
-    setActivePicker(null);
+  const onPick = (sel: { year: number; month: number; date: number }) => {
+    const ymd = `${sel.year}-${String(sel.month).padStart(2, "0")}-${String(sel.date).padStart(2, "0")}`;
+    if (picker === "from") setFromDate(ymd);
+    else if (picker === "to") setToDate(ymd);
+    else if (picker === "manualStart") {
+      setMStart(ymd);
+      if (mEnd && mEnd < ymd) setMEnd("");
+    } else if (picker === "manualEnd") setMEnd(ymd);
+    setPicker(null);
   };
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // Save manual attendance
-  // Sends start date (required) + optional end date.
-  // Backend iterates the range, skips Sundays, upserts one record per date
-  // into attendance_records.
-  // ─────────────────────────────────────────────────────────────────────────
-  const handleManualSave = async () => {
-    if (!manualStartDate) {
-      Alert.alert("Error", "Please select a start date.");
-      return;
-    }
-    if (manualEndDate && manualEndDate < manualStartDate) {
-      Alert.alert("Error", "End date cannot be before start date.");
-      return;
-    }
+  const closeManual = () => {
+    setManualOpen(false);
+    setPicker(null);
+    setMError(null);
+  };
+
+  const saveManual = async () => {
+    setMError(null);
+    if (!mStart) return setMError("Choose a start date.");
+    if (mStart > today || (mEnd && mEnd > today)) return setMError("You cannot mark attendance for a future date.");
+    if (mEnd && mEnd < mStart) return setMError("The end date cannot be before the start date.");
+    setSaving(true);
     try {
-      setSavingManual(true);
-      const body: any = {
-        teacher_id: teacherId,
-        subject_id: subjectId,
-        student_uid: studentUid,
-        date: manualStartDate,
-        status: manualStatus,
-        note: manualNote || null,
-      };
-      if (manualEndDate) body.end_date = manualEndDate;
-
-      const res = await fetch(`${API_URL}/api/reports/attendance/manual`, {
+      const body: any = { teacher_id: teacherId, subject_id: subjectId, student_uid: studentUid, date: mStart, status: mStatus, note: mNote.trim() || null };
+      if (mEnd) body.end_date = mEnd;
+      const res = await apiFetch(`${API_URL}/api/reports/attendance/manual`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify(body),
       });
-      const json = await res.json();
-      if (json.success) {
-        Alert.alert("Success", json.message);
-        setManualModalVisible(false);
-        setManualStartDate("");
-        setManualEndDate("");
-        setManualNote("");
-        setManualStatus("present");
-        fetchData();
-      } else {
-        Alert.alert("Error", json.error || "Failed to save attendance.");
-      }
+      let json: any = null;
+      try {
+        json = JSON.parse(await res.text());
+      } catch {}
+      if (!res.ok || !json?.success) return setMError(json?.error || "Could not save attendance.");
+      closeManual();
+      setMStart("");
+      setMEnd("");
+      setMNote("");
+      setMStatus("present");
+      Alert.alert("Saved", json.message || "Attendance updated.");
+      report.reload(true);
     } catch {
-      Alert.alert("Error", "Could not save attendance.");
+      setMError("Could not reach the server. Check your connection.");
     } finally {
-      setSavingManual(false);
+      setSaving(false);
     }
   };
 
-  const resetManualModal = () => {
-    setManualModalVisible(false);
-    setManualStartDate("");
-    setManualEndDate("");
-    setManualNote("");
-    setManualStatus("present");
-  };
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // Misc helpers
-  // ─────────────────────────────────────────────────────────────────────────
-  const getStatusColor = (status: string) => {
-    if (status === "present") return GREEN;
-    if (status === "od")      return OD_COLOR;
-    return RED;
-  };
-  const getStatusIcon  = (status: string) => {
-    if (status === "present") return "checkmark-circle";
-    if (status === "od")      return "shield-checkmark";
-    return "close-circle";
-  };
-  const getStatusLabel = (status: string) => {
-    if (status === "present") return "Present";
-    if (status === "od")      return "OD";
-    return "Absent";
-  };
-
-  if (loading) {
-    return (
-      <View style={S.center}>
-        <ActivityIndicator size="large" color={PRIMARY} />
-      </View>
-    );
-  }
-
-  const allRecords = data?.records || [];
-  const summary    = data?.summary || {};
-
-  // Split OD records out so they render separately
-  const odRecords      = allRecords.filter((r: any) => r.status === "od");
-  const regularRecords = allRecords.filter((r: any) => r.status !== "od");
-  const records = regularRecords; // used by existing filter-aware display
-
-  // Summary always shows the full-picture percentage (unaffected by filter)
-  const pct = summary.percentage ?? 0;
-  const pctColor = pct >= 75 ? GREEN : pct >= 50 ? AMBER : RED;
-  const summaryOdCount = summary.od ?? odRecords.length; // prefer backend summary, fall back to list
+  const manualPreview = !mStart ? null : mEnd && mEnd >= mStart ? `Marking ${fmtDate(mStart)} to ${fmtDate(mEnd)} (Sundays skipped)` : `Marking ${fmtDate(mStart)}`;
 
   return (
-    <View style={S.container}>
-
-      {/* ── Summary Card ─────────────────────────────────────────────────── */}
-      <View style={S.summaryCard}>
-        <View style={S.summaryLeft}>
-          <Text style={[S.summaryPct, { color: pctColor }]}>{pct}%</Text>
-          <Text style={S.summaryLabel}>Attendance</Text>
-          <Text style={S.summaryDetail}>
-            {summary.present ?? 0} present of {summary.total_lectures ?? 0} lectures
-          </Text>
-        </View>
-        <View style={S.summaryRight}>
-          {[
-            { label: "Present", value: summary.present ?? 0, color: GREEN },
-            { label: "Absent",  value: summary.absent  ?? 0, color: RED   },
-            ...(summaryOdCount > 0
-              ? [{ label: "OD", value: summaryOdCount, color: OD_COLOR }]
-              : []),
-          ].map((item) => (
-            <View key={item.label} style={S.summaryItem}>
-              <Text style={[S.summaryItemVal, { color: item.color }]}>{item.value}</Text>
-              <Text style={S.summaryItemLabel}>{item.label}</Text>
-            </View>
-          ))}
-        </View>
-      </View>
-
-      {/* ── Progress Bar ─────────────────────────────────────────────────── */}
-      <View style={S.progressBar}>
-        <View style={[S.progressFill, { width: `${Math.min(pct, 100)}%`, backgroundColor: pctColor }]} />
-      </View>
-      <Text style={[S.pctWarning, { color: pctColor }]}>
-        {pct >= 75
-          ? "✓ Attendance is satisfactory"
-          : pct >= 50
-          ? "⚠ Attendance is below 75%"
-          : "✗ Critical — attendance very low"}
-      </Text>
-
-      {/* ── Filter Bar ───────────────────────────────────────────────────── */}
-      <View style={S.filterBar}>
-        {(["all", "date", "range"] as FilterMode[]).map((mode) => (
-          <TouchableOpacity
-            key={mode}
-            style={[S.filterChip, filterMode === mode && S.filterChipActive]}
-            onPress={() => applyFilter(mode)}
-          >
-            <Text style={[S.filterChipText, filterMode === mode && S.filterChipTextActive]}>
-              {mode === "all" ? "All" : mode === "date" ? "By Date" : "Date Range"}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
-      {/* ── By Date: single date picker ──────────────────────────────────── */}
-      {filterMode === "date" && (
-        <View style={S.rangeRow}>
-          <TouchableOpacity
-            style={[S.dateInput, { flex: 1 }]}
-            onPress={() => setActivePicker("from")}
-          >
-            <Ionicons name="calendar-outline" size={14} color={GREY} />
-            <Text style={[S.dateInputText, !fromDate && { color: "#9CA3AF" }]}>
-              {fromDate || "Select date"}
-            </Text>
-          </TouchableOpacity>
-          {fromDate && (
-            <TouchableOpacity
-              style={S.clearBtn}
-              onPress={() => { setFromDate(null); setToDate(null); }}
-            >
-              <Ionicons name="close-circle" size={18} color={GREY} />
-            </TouchableOpacity>
-          )}
-        </View>
-      )}
-
-      {/* ── Date Range: from + to pickers ────────────────────────────────── */}
-      {filterMode === "range" && (
-        <View style={S.rangeRow}>
-          <TouchableOpacity
-            style={S.dateInput}
-            onPress={() => setActivePicker("from")}
-          >
-            <Ionicons name="calendar-outline" size={14} color={GREY} />
-            <Text style={[S.dateInputText, !fromDate && { color: "#9CA3AF" }]}>
-              {fromDate || "From date"}
-            </Text>
-          </TouchableOpacity>
-          <Text style={{ color: GREY, fontWeight: "700" }}>→</Text>
-          <TouchableOpacity
-            style={S.dateInput}
-            onPress={() => setActivePicker("to")}
-          >
-            <Ionicons name="calendar-outline" size={14} color={GREY} />
-            <Text style={[S.dateInputText, !toDate && { color: "#9CA3AF" }]}>
-              {toDate || "To date"}
-            </Text>
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* ── OD Request Button ────────────────────────────────────────────── */}
-      {!isTeacher ? (
-        <TouchableOpacity
-          style={S.odBtn}
-          onPress={() => navigation.navigate("ODLeaveRequest", {
-            studentUid,
-            studentName,
-            subjectId,
-            subjectName: subjectName || subjectId,
-            teacherId,
-            courseId: courseId || "",
-          })}
-        >
-          <Ionicons name="shield-checkmark-outline" size={16} color={OD_COLOR} />
-          <Text style={S.odBtnText}>Request OD Leave</Text>
-          {summaryOdCount > 0 && (
-            <View style={S.odCountBadge}>
-              <Text style={S.odCountText}>{summaryOdCount} approved</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      ) : (
-        <TouchableOpacity
-          style={S.odBtn}
-          onPress={() => navigation.navigate("ODRequestsTeacher", {
-            teacherId,
-            subjectId,
-            subjectName: subjectName || subjectId,
-            courseId: courseId || "",
-          })}
-        >
-          <Ionicons name="shield-checkmark-outline" size={16} color={OD_COLOR} />
-          <Text style={S.odBtnText}>View OD Requests</Text>
-          {summaryOdCount > 0 && (
-            <View style={S.odCountBadge}>
-              <Text style={S.odCountText}>{summaryOdCount} approved</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      )}
-
-      {/* ── Manual Attendance Button ──────────────────────────────────────── */}
-      <TouchableOpacity style={S.manualBtn} onPress={() => setManualModalVisible(true)}>
-        <Ionicons name="create-outline" size={16} color={PRIMARY} />
-        <Text style={S.manualBtnText}>Add / Edit Attendance Manually</Text>
-      </TouchableOpacity>
-
-      {/* ── Records List ─────────────────────────────────────────────────── */}
-      <Text style={S.sectionTitle}>
-        Attendance Records ({records.length}
-        {filterMode !== "all" ? " — filtered" : ""})</Text>
-
-      {records.length === 0 ? (
-        <View style={S.empty}>
-          <Ionicons name="calendar-outline" size={40} color={BORDER} />
-          <Text style={S.emptyText}>No attendance records found</Text>
-        </View>
-      ) : (
-        records.map((record: any, idx: number) => (
-          <View key={record.attendance_id || idx} style={S.recordCard}>
-            <View style={[S.recordDot, { backgroundColor: getStatusColor(record.status) }]} />
-            <View style={S.recordInfo}>
-              <Text style={S.recordDate}>
-                {new Date(record.date).toLocaleDateString("en-IN", {
-                  weekday: "short", day: "numeric", month: "short", year: "numeric",
-                })}
-              </Text>
-              {record.marked_by === "manual" && (
-                <Text style={S.manualTag}>Manual Entry</Text>
-              )}
-            </View>
-            <View style={[S.statusBadge, { backgroundColor: getStatusColor(record.status) + "18" }]}>
-              <Ionicons
-                name={getStatusIcon(record.status) as any}
-                size={13}
-                color={getStatusColor(record.status)}
-              />
-              <Text style={[S.statusText, { color: getStatusColor(record.status) }]}>
-                {getStatusLabel(record.status)}
+    <View style={{ gap: SP.md }}>
+      <LoadBoundary report={report} label="Loading attendance">
+        <Card>
+          <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+            <View>
+              <Text style={{ fontSize: 38, fontWeight: "800", letterSpacing: -1, color: tone === "neutral" ? T.ink : T[tone] }}>{pct != null ? `${pct}%` : "-"}</Text>
+              <Text style={font.small}>
+                {num(summary.present)} present of {num(summary.total_lectures)} classes
               </Text>
             </View>
+            {report.loading && <ActivityIndicator color={T.primary} />}
           </View>
-        ))
-      )}
-
-      {/* ── OD Records Section ───────────────────────────────────────────── */}
-      {odRecords.length > 0 && (
-        <>
-          <View style={S.odSectionHeader}>
-            <Ionicons name="shield-checkmark" size={15} color={OD_COLOR} />
-            <Text style={S.odSectionTitle}>OD Records ({odRecords.length})</Text>
+          <View style={{ marginTop: SP.md, gap: 6 }}>
+            <ProgressBar value={pct != null ? pct / 100 : 0} tone={tone === "neutral" ? "primary" : tone} height={8} />
+            <Text style={[font.small, { color: tone === "neutral" ? T.muted : T[tone], fontWeight: "700" }]}>{MSG[tone]}</Text>
           </View>
-          <View style={S.odInfoBanner}>
-            <Text style={S.odInfoText}>
-              These dates are marked as On Duty (OD) and count towards your attendance.
-            </Text>
-          </View>
-          {odRecords.map((record: any, idx: number) => (
-            <View key={record.attendance_id || `od-${idx}`} style={S.odCard}>
-              <View style={S.odDot} />
-              <View style={S.recordInfo}>
-                <Text style={S.recordDate}>
-                  {new Date(record.date).toLocaleDateString("en-IN", {
-                    weekday: "short", day: "numeric", month: "short", year: "numeric",
-                  })}
-                </Text>
-                {record.note && (
-                  <Text style={S.odNote} numberOfLines={1}>{record.note}</Text>
-                )}
-              </View>
-              <View style={S.odBadge}>
-                <Ionicons name="shield-checkmark" size={13} color={OD_COLOR} />
-                <Text style={S.odBadgeText}>OD</Text>
-              </View>
-            </View>
-          ))}
-        </>
-      )}
+        </Card>
 
-      {/* ══════════════════════════════════════════════════════════════════════
-          Manual Attendance Modal
-          - manualStartDate: required (single date or range start)
-          - manualEndDate:   optional (range end — backend skips Sundays)
-      ══════════════════════════════════════════════════════════════════════ */}
-      <Modal
-        visible={manualModalVisible}
-        animationType="slide"
-        transparent
-        onRequestClose={resetManualModal}
-      >
-        <View style={S.modalOverlay}>
-          <View style={S.modalContent}>
-            {/* Header */}
-            <View style={S.modalHeader}>
-              <Text style={S.modalTitle}>Add Manual Attendance</Text>
-              <TouchableOpacity onPress={resetManualModal}>
-                <Ionicons name="close" size={22} color={DARK} />
-              </TouchableOpacity>
-            </View>
+        <StatRow
+          items={[
+            { value: num(summary.present), label: "Present", tone: "success" },
+            { value: num(summary.absent), label: "Absent", tone: "danger" },
+            ...(num(summary.late) > 0 ? [{ value: num(summary.late), label: "Late", tone: "warning" as Tone }] : []),
+            ...(odCount > 0 ? [{ value: odCount, label: "On duty", tone: "primary" as Tone }] : []),
+          ]}
+        />
 
-            <Text style={S.modalStudent}>{studentName}</Text>
-
-            {/* Start Date (required) */}
-            <Text style={S.inputLabel}>Start Date <Text style={{ color: RED }}>*</Text></Text>
-            <TouchableOpacity
-              style={S.textInput}
-              onPress={() => setActivePicker("manualStart")}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Ionicons name="calendar-outline" size={16} color={GREY} />
-                <Text style={{ color: manualStartDate ? DARK : "#9CA3AF", fontSize: 14 }}>
-                  {manualStartDate || "Select start date"}
-                </Text>
-              </View>
-            </TouchableOpacity>
-
-            {/* End Date (optional) */}
-            <Text style={S.inputLabel}>
-              End Date{" "}
-              <Text style={{ color: GREY, fontWeight: "400", textTransform: "none" }}>
-                (optional — marks entire range, skips Sundays)
-              </Text>
-            </Text>
-            <TouchableOpacity
-              style={S.textInput}
-              onPress={() => setActivePicker("manualEnd")}
-            >
-              <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
-                <Ionicons name="calendar-outline" size={16} color={GREY} />
-                <Text style={{ color: manualEndDate ? DARK : "#9CA3AF", fontSize: 14 }}>
-                  {manualEndDate || "Select end date (optional)"}
-                </Text>
-                {manualEndDate ? (
-                  <TouchableOpacity
-                    style={{ marginLeft: "auto" }}
-                    onPress={() => setManualEndDate("")}
-                  >
-                    <Ionicons name="close-circle" size={16} color={GREY} />
-                  </TouchableOpacity>
-                ) : null}
-              </View>
-            </TouchableOpacity>
-
-            {/* Date range preview */}
-            {manualStartDate && (
-              <Text style={S.rangePreview}>
-                {manualEndDate && manualEndDate >= manualStartDate
-                  ? `Marking from ${manualStartDate} to ${manualEndDate} (Sundays skipped)`
-                  : `Marking single date: ${manualStartDate}`}
-              </Text>
-            )}
-
-            {/* Status */}
-            <Text style={S.inputLabel}>Status</Text>
-            <View style={S.statusRow}>
-              {(["present", "absent"] as AttendanceStatus[]).map((s) => (
-                <TouchableOpacity
-                  key={s}
-                  style={[
-                    S.statusChip,
-                    manualStatus === s && {
-                      backgroundColor: getStatusColor(s),
-                      borderColor: getStatusColor(s),
-                    },
-                  ]}
-                  onPress={() => setManualStatus(s)}
-                >
-                  <Text style={[S.statusChipText, manualStatus === s && { color: WHITE }]}>
-                    {s.charAt(0).toUpperCase() + s.slice(1)}
-                  </Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            {/* Note */}
-            <Text style={S.inputLabel}>Note (optional)</Text>
-            <TextInput
-              style={[S.textInput, { height: 70 }]}
-              value={manualNote}
-              onChangeText={setManualNote}
-              placeholder="Reason or note..."
-              placeholderTextColor="#9CA3AF"
-              multiline
-              textAlignVertical="top"
+        {isTeacher ? (
+          <>
+            <ActionRow
+              icon="shield-checkmark-outline"
+              label="View OD requests"
+              badge={odCount > 0 ? `${odCount} approved` : undefined}
+              onPress={() => navigation.navigate("ODRequestsTeacher", { teacherId, subjectId, subjectName: subjectName || subjectId, courseId: courseId || "" })}
             />
+            <Button label="Add or edit attendance manually" icon="create-outline" variant="secondary" onPress={() => setManualOpen(true)} />
+          </>
+        ) : (
+          <ActionRow
+            icon="shield-checkmark-outline"
+            label="Request OD leave"
+            badge={odCount > 0 ? `${odCount} approved` : undefined}
+            onPress={() => navigation.navigate("ODLeaveRequest", { studentUid, studentName, subjectId, subjectName: subjectName || subjectId, teacherId, courseId: courseId || "" })}
+          />
+        )}
 
-            <TouchableOpacity
-              style={[S.saveBtn, savingManual && { opacity: 0.6 }]}
-              onPress={handleManualSave}
-              disabled={savingManual}
-            >
-              {savingManual
-                ? <ActivityIndicator size="small" color={WHITE} />
-                : <Text style={S.saveBtnText}>Save Attendance</Text>
-              }
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
+        <SectionLabel style={{ marginTop: SP.sm, marginBottom: 0 }}>Records</SectionLabel>
+        <Segmented<FilterMode>
+          options={[{ value: "all", label: "All" }, { value: "date", label: "By date" }, { value: "range", label: "Range" }]}
+          value={mode}
+          onChange={changeMode}
+        />
 
-      {/* ══════════════════════════════════════════════════════════════════════
-          Shared Calendar Modal
-          Used by: filter from/to AND manual start/end date pickers.
-          activePicker determines what gets updated.
-      ══════════════════════════════════════════════════════════════════════ */}
-      <Modal
-        visible={activePicker !== null}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setActivePicker(null)}
-      >
-        <View style={S.calendarOverlay}>
-          <View style={S.calendarSheet}>
-            <View style={S.calendarHeader}>
-              <Text style={S.calendarTitle}>
-                {activePicker === "from"        ? "Select From Date"
-                 : activePicker === "to"        ? "Select To Date"
-                 : activePicker === "manualStart" ? "Select Start Date"
-                 : "Select End Date"}
-              </Text>
-              <TouchableOpacity onPress={() => setActivePicker(null)}>
-                <Ionicons name="close" size={22} color={DARK} />
-              </TouchableOpacity>
+        {mode === "date" && (
+          <DateButton value={fromDate} placeholder="Choose a date" onPress={() => setPicker("from")} onClear={fromDate ? () => setFromDate(null) : undefined} />
+        )}
+        {mode === "range" && (
+          <View style={{ flexDirection: "row", gap: SP.sm }}>
+            <View style={{ flex: 1 }}>
+              <DateButton value={fromDate} placeholder="From" onPress={() => setPicker("from")} onClear={fromDate ? () => setFromDate(null) : undefined} />
             </View>
-            <AttendanceCalendar onDateSelect={handleDateSelect} />
+            <View style={{ flex: 1 }}>
+              <DateButton value={toDate} placeholder="To" onPress={() => setPicker("to")} onClear={toDate ? () => setToDate(null) : undefined} />
+            </View>
           </View>
-        </View>
+        )}
+        {rangeInvalid && <Banner tone="danger">The end date is before the start date.</Banner>}
+
+        {records.length === 0 ? (
+          <EmptyState icon="calendar-outline" title="No records" text={mode === "all" ? "Nothing has been recorded yet." : "No records in this period."} />
+        ) : (
+          <View style={{ gap: SP.sm }}>
+            <Text style={font.small}>
+              {records.length} record{records.length === 1 ? "" : "s"}
+              {mode !== "all" ? " in this period" : ""}
+            </Text>
+            {records.map((r, i) => {
+              const cfg = STATUS[r.status] ?? STATUS.absent;
+              return (
+                <Card key={r.attendance_id || `${r.date}-${i}`} style={{ paddingVertical: SP.md }}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: SP.md }}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={font.h3}>{fmtDate(r.date, true)}</Text>
+                      {r.marked_by === "manual" && <Text style={[font.small, { color: T.primary, marginTop: 2 }]}>Entered manually</Text>}
+                      {!!r.note && (
+                        <Text style={[font.small, { marginTop: 2 }]} numberOfLines={2}>
+                          {r.note}
+                        </Text>
+                      )}
+                    </View>
+                    <Chip label={cfg.label} tone={cfg.tone} icon={cfg.icon} />
+                  </View>
+                </Card>
+              );
+            })}
+            {odCount > 0 && <Text style={font.small}>On duty days count towards {isTeacher ? "the student's" : "your"} attendance.</Text>}
+          </View>
+        )}
+      </LoadBoundary>
+
+      {/* Date filter picker */}
+      <Modal visible={picker === "from" || picker === "to"} transparent animationType="fade" onRequestClose={() => setPicker(null)}>
+        <CalendarSheet title={picker === "to" ? "Choose end date" : mode === "date" ? "Choose date" : "Choose start date"} onClose={() => setPicker(null)} onSelect={onPick} />
       </Modal>
 
+      {/* Manual attendance (teacher only). The calendar swaps in inside this same modal, so modals are never nested. */}
+      <Modal visible={manualOpen} transparent animationType="slide" onRequestClose={closeManual}>
+        {picker === "manualStart" || picker === "manualEnd" ? (
+          <CalendarSheet title={picker === "manualStart" ? "Choose start date" : "Choose end date"} onClose={() => setPicker(null)} onSelect={onPick} />
+        ) : (
+          <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.5)", justifyContent: "flex-end" }}>
+            <View style={{ backgroundColor: T.surface, borderTopLeftRadius: 26, borderTopRightRadius: 26, maxHeight: "90%" }}>
+              <ScrollView contentContainerStyle={{ padding: SP.xl, gap: SP.lg, paddingBottom: 36 }} keyboardShouldPersistTaps="handled">
+                <View style={{ flexDirection: "row", alignItems: "center" }}>
+                  <View style={{ flex: 1 }}>
+                    <Text style={font.h2}>Manual attendance</Text>
+                    <Text style={[font.small, { marginTop: 2 }]}>{studentName}</Text>
+                  </View>
+                  <Pressable onPress={closeManual} hitSlop={10} accessibilityLabel="Close">
+                    <Ionicons name="close" size={24} color={T.ink} />
+                  </Pressable>
+                </View>
+
+                <Banner tone="info" icon="information-circle-outline">
+                  Only days on which a lecture was held can be marked. Other days in a range are skipped.
+                </Banner>
+
+                <View>
+                  <Text style={fieldLabel}>Start date</Text>
+                  <DateButton value={mStart || null} placeholder="Choose start date" onPress={() => setPicker("manualStart")} />
+                </View>
+                <View>
+                  <Text style={fieldLabel}>End date (optional)</Text>
+                  <DateButton value={mEnd || null} placeholder="Single day only" onPress={() => setPicker("manualEnd")} onClear={mEnd ? () => setMEnd("") : undefined} />
+                </View>
+                {!!manualPreview && <Banner tone="primary" icon="information-circle-outline">{manualPreview}</Banner>}
+
+                <View>
+                  <Text style={fieldLabel}>Status</Text>
+                  <Segmented<"present" | "absent"> options={[{ value: "present", label: "Present", icon: "checkmark" }, { value: "absent", label: "Absent", icon: "close" }]} value={mStatus} onChange={setMStatus} />
+                </View>
+
+                <TextField label="Note (optional)" value={mNote} onChangeText={setMNote} placeholder="Reason or remark" multiline minHeight={72} autoCapitalize="sentences" autoCorrect maxLength={200} />
+
+                {!!mError && <Banner tone="danger">{mError}</Banner>}
+                <Button label="Save attendance" icon="checkmark" onPress={saveManual} loading={saving} />
+              </ScrollView>
+            </View>
+          </KeyboardAvoidingView>
+        )}
+      </Modal>
     </View>
   );
 }
 
-// ─────────────────────────────────────────────────────────────────────────────
-// Styles
-// ─────────────────────────────────────────────────────────────────────────────
-const S = StyleSheet.create({
-  container: { gap: 12 },
-  center: { paddingVertical: 60, alignItems: "center" },
-  empty: { paddingVertical: 40, alignItems: "center", gap: 10 },
-  emptyText: { fontSize: 14, color: GREY },
+const fieldLabel = { fontSize: 12.5, fontWeight: "700" as const, color: T.sub, marginBottom: 7 };
 
-  summaryCard: {
-    backgroundColor: WHITE,
-    borderRadius: 20,
-    padding: 20,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    borderWidth: 1,
-    borderColor: BORDER,
-    elevation: 1,
-  },
-  summaryLeft: { gap: 4 },
-  summaryPct: { fontSize: 36, fontWeight: "800" },
-  summaryLabel: { fontSize: 12, fontWeight: "700", color: GREY, textTransform: "uppercase" },
-  summaryDetail: { fontSize: 12, color: GREY },
-  summaryRight: { flexDirection: "row", gap: 16 },
-  summaryItem: { alignItems: "center" },
-  summaryItemVal: { fontSize: 20, fontWeight: "800" },
-  summaryItemLabel: { fontSize: 11, color: GREY, fontWeight: "600" },
+function DateButton({ value, placeholder, onPress, onClear }: { value: string | null; placeholder: string; onPress: () => void; onClear?: () => void }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", backgroundColor: T.surface, borderWidth: 1.5, borderColor: T.line, borderRadius: 14, minHeight: 50 }}>
+      <Pressable onPress={onPress} style={{ flex: 1, flexDirection: "row", alignItems: "center", gap: 8, paddingHorizontal: 12, paddingVertical: 12 }} accessibilityRole="button">
+        <Ionicons name="calendar-outline" size={17} color={T.muted} />
+        <Text style={{ fontSize: 14, color: value ? T.ink : T.muted }} numberOfLines={1}>
+          {value ? fmtDate(value) : placeholder}
+        </Text>
+      </Pressable>
+      {onClear && (
+        <Pressable onPress={onClear} hitSlop={8} style={{ paddingHorizontal: 12 }} accessibilityLabel="Clear date">
+          <Ionicons name="close-circle" size={18} color={T.muted} />
+        </Pressable>
+      )}
+    </View>
+  );
+}
 
-  progressBar: { height: 8, backgroundColor: "#E5E7EB", borderRadius: 4, overflow: "hidden" },
-  progressFill: { height: "100%", borderRadius: 4 },
-  pctWarning: { fontSize: 12, fontWeight: "700", marginTop: -4 },
+function ActionRow({ icon, label, badge, onPress }: { icon: IconName; label: string; badge?: string; onPress: () => void }) {
+  return (
+    <Pressable onPress={onPress} accessibilityRole="button" style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: SP.md, backgroundColor: T.primarySoft, borderRadius: 14, padding: SP.lg }, pressed && { opacity: 0.7 }]}>
+      <Ionicons name={icon} size={18} color={T.primary} />
+      <Text style={{ flex: 1, fontSize: 14, fontWeight: "700", color: T.primary }}>{label}</Text>
+      {!!badge && <Chip label={badge} tone="primary" />}
+      <Ionicons name="chevron-forward" size={16} color={T.primary} />
+    </Pressable>
+  );
+}
 
-  filterBar: { flexDirection: "row", gap: 8 },
-  filterChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: WHITE,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  filterChipActive: { backgroundColor: PRIMARY_SOFT, borderColor: PRIMARY },
-  filterChipText: { fontSize: 12, fontWeight: "600", color: GREY },
-  filterChipTextActive: { color: PRIMARY },
-
-  rangeRow: { flexDirection: "row", gap: 10, alignItems: "center" },
-  dateInput: {
-    flex: 1,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: WHITE,
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  dateInputText: { fontSize: 13, color: DARK },
-  clearBtn: { padding: 4 },
-
-  manualBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: PRIMARY_SOFT,
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: "#C7D2FE",
-  },
-  manualBtnText: { fontSize: 14, fontWeight: "700", color: PRIMARY },
-
-  sectionTitle: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: GREY,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    marginTop: 4,
-  },
-
-  recordCard: {
-    backgroundColor: WHITE,
-    borderRadius: 14,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderWidth: 1,
-    borderColor: BORDER,
-    elevation: 1,
-  },
-  recordDot: { width: 10, height: 10, borderRadius: 5 },
-  recordInfo: { flex: 1 },
-  recordDate: { fontSize: 14, fontWeight: "600", color: DARK },
-  manualTag: {
-    fontSize: 10,
-    fontWeight: "700",
-    color: PRIMARY,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-    marginTop: 2,
-  },
-  statusBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
-  },
-  statusText: { fontSize: 11, fontWeight: "700" },
-
-  // Manual modal
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  modalContent: {
-    backgroundColor: WHITE,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: 24,
-    gap: 14,
-    paddingBottom: 40,
-  },
-  modalHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  modalTitle: { fontSize: 18, fontWeight: "800", color: DARK },
-  modalStudent: { fontSize: 14, color: PRIMARY, fontWeight: "700" },
-  inputLabel: {
-    fontSize: 12,
-    fontWeight: "700",
-    color: GREY,
-    textTransform: "uppercase",
-    letterSpacing: 0.5,
-  },
-  textInput: {
-    backgroundColor: BG,
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 14,
-    color: DARK,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  rangePreview: {
-    fontSize: 12,
-    color: PRIMARY,
-    fontWeight: "600",
-    backgroundColor: PRIMARY_SOFT,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-  },
-  statusRow: { flexDirection: "row", gap: 10 },
-  statusChip: {
-    flex: 1,
-    paddingVertical: 12,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: BORDER,
-    alignItems: "center",
-    backgroundColor: WHITE,
-  },
-  statusChipText: { fontSize: 13, fontWeight: "700", color: GREY },
-  saveBtn: {
-    backgroundColor: PRIMARY,
-    borderRadius: 50,
-    paddingVertical: 16,
-    alignItems: "center",
-    marginTop: 4,
-  },
-  saveBtnText: { color: WHITE, fontWeight: "700", fontSize: 15 },
-
-  // Calendar picker modal
-  calendarOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "center",
-    padding: 20,
-  },
-  calendarSheet: {
-    backgroundColor: WHITE,
-    borderRadius: 20,
-    padding: 16,
-    gap: 12,
-  },
-  calendarHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  calendarTitle: { fontSize: 16, fontWeight: "700", color: DARK },
-
-  // OD button
-  odBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: OD_SOFT,
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: OD_COLOR + "44",
-  },
-  odBtnText:     { fontSize: 14, fontWeight: "700", color: OD_COLOR, flex: 1 },
-  odCountBadge:  { backgroundColor: OD_COLOR, borderRadius: 10, paddingHorizontal: 8, paddingVertical: 2 },
-  odCountText:   { fontSize: 10, fontWeight: "700", color: WHITE },
-
-  // OD section
-  odSectionHeader: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    marginTop: 4,
-  },
-  odSectionTitle: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: OD_COLOR,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-  },
-  odInfoBanner: {
-    backgroundColor: OD_SOFT,
-    borderRadius: 10,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderWidth: 1,
-    borderColor: OD_COLOR + "33",
-  },
-  odInfoText:  { fontSize: 12, color: "#4C1D95", lineHeight: 16 },
-  odCard: {
-    backgroundColor: OD_SOFT + "88",
-    borderRadius: 14,
-    padding: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderWidth: 1,
-    borderColor: OD_COLOR + "33",
-    elevation: 0,
-  },
-  odDot: { width: 10, height: 10, borderRadius: 5, backgroundColor: OD_COLOR },
-  odNote: { fontSize: 11, color: OD_COLOR, marginTop: 2, fontStyle: "italic" },
-  odBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 10,
-    backgroundColor: OD_COLOR + "18",
-  },
-  odBadgeText: { fontSize: 11, fontWeight: "700", color: OD_COLOR },
-});
+function CalendarSheet({ title, onClose, onSelect }: { title: string; onClose: () => void; onSelect: (s: { year: number; month: number; date: number }) => void }) {
+  return (
+    <View style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.5)", justifyContent: "center", padding: SP.xl }}>
+      <View style={{ backgroundColor: T.surface, borderRadius: 22, padding: SP.lg, gap: SP.md }}>
+        <View style={{ flexDirection: "row", alignItems: "center" }}>
+          <Text style={[font.h3, { flex: 1 }]}>{title}</Text>
+          <Pressable onPress={onClose} hitSlop={10} accessibilityLabel="Close calendar">
+            <Ionicons name="close" size={22} color={T.ink} />
+          </Pressable>
+        </View>
+        <AttendanceCalendar onDateSelect={onSelect} />
+      </View>
+    </View>
+  );
+}

@@ -1,5 +1,5 @@
 // @ts-nocheck
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { signInWithEmailAndPassword, sendPasswordResetEmail } from "firebase/auth";
 import { auth } from "../../services/firebase";
@@ -7,6 +7,8 @@ import {
   saveUserSession,
   saveUserProfile,
   isLoggedIn,
+  getSessionUser,
+  getUserSession,
   dashboardPathForRole,
 } from "../../services/session";
 import "./LoginScreen.css";
@@ -23,12 +25,29 @@ export default function LoginScreen() {
   const [error,    setError]    = useState("");
   const [resetMsg, setResetMsg] = useState("");
 
-  // If already logged in, skip straight to the right dashboard
-  if (isLoggedIn()) {
-    // Deferred navigate — let the component mount first
-    setTimeout(() => navigate(dashboardPathForRole(), { replace: true }), 0);
-    return null;
-  }
+  // If already logged in, skip straight to the right dashboard.
+  // Never redirect back to "/" (this page) - that was an endless loop for
+  // roles like head_teacher that dashboardPathForRole() doesn't know.
+  const sessionUser = isLoggedIn() ? getSessionUser() : null;
+  const sessionProfile = isLoggedIn() ? getUserSession()?.profile : null;
+  const sessionIsHead =
+    !!sessionUser?.is_head ||
+    sessionUser?.role === "hod" ||
+    sessionUser?.role === "head_teacher" ||
+    (sessionUser?.role === "teacher" && !!String(sessionProfile?.head_of || "").trim());
+  const homeTarget = !sessionUser
+    ? null
+    : sessionIsHead
+      ? "/dashboard/teacher"
+      : dashboardPathForRole(sessionUser);
+
+  useEffect(() => {
+    if (homeTarget && homeTarget !== "/") {
+      navigate(homeTarget, { replace: true });
+    }
+  }, [homeTarget]);
+
+  if (homeTarget && homeTarget !== "/") return null;
 
   const handleLogin = async (e) => {
     e.preventDefault();
@@ -64,12 +83,16 @@ export default function LoginScreen() {
       //    ONLY use role field from the backend — designation values like
       //    "head" belong to the institute dashboard and must not bleed in here.
       //    Backend sets userData.role to "hod" or "head_teacher" for heads.
+      //    A teacher whose profile has head_of set (e.g. "MCA") is also a head —
+      //    that field is what the institute app writes when assigning a head.
       const userWithHead = {
         ...data.user,
         is_head:
           !!data.user.is_head ||
           data.user.role === "hod" ||
-          data.user.role === "head_teacher",
+          data.user.role === "head_teacher" ||
+          (data.user.role === "teacher" &&
+            !!String(data.profile?.head_of || "").trim()),
       };
 
       // 4. Persist session — user + token + profile
@@ -79,7 +102,13 @@ export default function LoginScreen() {
       if (data.profile) saveUserProfile(data.profile);
 
       // 6. Navigate to role-appropriate page
-      navigate(dashboardPathForRole(userWithHead), { replace: true });
+      //    Heads use the teacher pages (Manage shows up in the sidebar).
+      navigate(
+        userWithHead.is_head && userWithHead.role !== "student"
+          ? "/dashboard/teacher"
+          : dashboardPathForRole(userWithHead),
+        { replace: true },
+      );
 
     } catch (err) {
       console.error("WEB LOGIN ERROR:", err);

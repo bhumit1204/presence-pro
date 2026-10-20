@@ -1,177 +1,94 @@
-import React, { useState } from "react";
-import {
-  View,
-  Text,
-  TouchableOpacity,
-  Modal,
-  FlatList,
-  StyleSheet
-} from "react-native";
-
-const PRIMARY = "#4834D4";
-const BG = "#F3F4F6";
+// src/components/SubjectDropdown.tsx
+// Subject picker. Same props; subjects may also carry course_name / subject_id, and the list is searchable.
+import React, { useMemo, useState } from "react";
+import { Pressable, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { EmptyState, Sheet, TextField, T, R, SP, font, shadow } from "./ui";
 
 interface Subject {
   subject_name: string;
   subject_code: string;
+  subject_id?: string;
+  course_name?: string;
+  [k: string]: any;
 }
 
 interface Props {
   subjects: Subject[];
   selectedSubject: Subject | null;
   onSelect: (subject: Subject) => void;
+  placeholder?: string;
 }
 
-export default function SubjectDropdown({
-  subjects,
-  selectedSubject,
-  onSelect
-}: Props) {
+const keyOf = (s: Subject, i: number) => s.subject_id || s.subject_code || String(i);
 
-  const [visible, setVisible] = useState(false);
+export default function SubjectDropdown({ subjects, selectedSubject, onSelect, placeholder = "Select subject" }: Props) {
+  const [open, setOpen] = useState(false);
+  const [q, setQ] = useState("");
 
-  const handleSelect = (subject: Subject) => {
-    onSelect(subject);
-    setVisible(false);
+  const list = useMemo(() => {
+    const query = q.trim().toLowerCase();
+    if (!query) return subjects;
+    return subjects.filter((s) => `${s.subject_name} ${s.subject_code} ${s.course_name || ""}`.toLowerCase().includes(query));
+  }, [subjects, q]);
+
+  const close = () => {
+    setOpen(false);
+    setQ("");
   };
 
   return (
     <>
-      {/* Dropdown Button */}
-      <TouchableOpacity
-        style={styles.dropdown}
-        onPress={() => setVisible(true)}
+      <Pressable
+        onPress={() => setOpen(true)}
+        accessibilityRole="button"
+        accessibilityLabel={selectedSubject ? `Subject: ${selectedSubject.subject_name}. Tap to change.` : placeholder}
+        style={[{ backgroundColor: T.surface, borderRadius: R.lg, paddingVertical: 14, paddingHorizontal: SP.lg, flexDirection: "row", alignItems: "center", gap: SP.md }, shadow]}
       >
-        <Text style={styles.dropdownText}>
-          {selectedSubject
-            ? `${selectedSubject.subject_name} (${selectedSubject.subject_code})`
-            : "Select Subject"}
-        </Text>
-
-        <Text style={styles.arrow}>⌄</Text>
-      </TouchableOpacity>
-
-      {/* Modal */}
-      <Modal visible={visible} transparent animationType="slide">
-        <View style={styles.overlay}>
-
-          <View style={styles.modal}>
-
-            <Text style={styles.title}>Select Subject</Text>
-
-            <FlatList
-              data={subjects}
-              keyExtractor={(item) => item.subject_code}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.subjectItem}
-                  onPress={() => handleSelect(item)}
-                >
-                  <Text style={styles.subjectName}>
-                    {item.subject_name}
-                  </Text>
-
-                  <Text style={styles.subjectCode}>
-                    {item.subject_code}
-                  </Text>
-                </TouchableOpacity>
-              )}
-            />
-
-            <TouchableOpacity
-              style={styles.closeBtn}
-              onPress={() => setVisible(false)}
-            >
-              <Text style={styles.closeText}>Cancel</Text>
-            </TouchableOpacity>
-
-          </View>
-
+        <View style={{ width: 36, height: 36, borderRadius: 11, backgroundColor: T.primarySoft, alignItems: "center", justifyContent: "center" }}>
+          <Ionicons name="book-outline" size={18} color={T.primary} />
         </View>
-      </Modal>
+        <View style={{ flex: 1 }}>
+          <Text style={[font.h3, !selectedSubject && { color: T.muted }]} numberOfLines={1}>
+            {selectedSubject ? selectedSubject.subject_name : placeholder}
+          </Text>
+          {!!selectedSubject && (
+            <Text style={font.small} numberOfLines={1}>
+              {[selectedSubject.subject_code, selectedSubject.course_name].filter(Boolean).join("  |  ")}
+            </Text>
+          )}
+        </View>
+        <Ionicons name="chevron-down" size={18} color={T.muted} />
+      </Pressable>
+
+      <Sheet visible={open} onClose={close} title="Choose a subject">
+        {subjects.length > 5 && <TextField value={q} onChangeText={setQ} placeholder="Search subject or code" icon="search" style={{ marginBottom: SP.sm }} />}
+        {list.length === 0 ? (
+          <EmptyState icon="book-outline" title="No subjects" text={q ? "Nothing matches your search." : "No subject is assigned to you yet. Ask your admin."} />
+        ) : (
+          <View style={{ paddingBottom: SP.md }}>
+            {list.map((item, i) => {
+              const on = !!selectedSubject && keyOf(selectedSubject, 0) === keyOf(item, 0);
+              return (
+                <Pressable
+                  key={keyOf(item, i)}
+                  onPress={() => {
+                    onSelect(item);
+                    close();
+                  }}
+                  style={[{ flexDirection: "row", alignItems: "center", gap: SP.md, padding: SP.md, borderRadius: R.md }, on && { backgroundColor: T.primarySoft }]}
+                >
+                  <View style={{ flex: 1 }}>
+                    <Text style={[font.h3, on && { color: T.primary }]}>{item.subject_name}</Text>
+                    <Text style={font.small}>{[item.subject_code, item.course_name].filter(Boolean).join("  |  ")}</Text>
+                  </View>
+                  {on && <Ionicons name="checkmark-circle" size={20} color={T.primary} />}
+                </Pressable>
+              );
+            })}
+          </View>
+        )}
+      </Sheet>
     </>
   );
 }
-
-const styles = StyleSheet.create({
-
-  dropdown: {
-    backgroundColor: "#FFF",
-    borderRadius: 16,
-    paddingVertical: 16,
-    paddingHorizontal: 18,
-
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 10,
-    elevation: 3
-  },
-
-  dropdownText: {
-    fontSize: 15,
-    fontWeight: "600",
-    color: "#1F2937"
-  },
-
-  arrow: {
-    fontSize: 20,
-    color: "#6B7280"
-  },
-
-  overlay: {
-    flex: 1,
-    justifyContent: "flex-end",
-    backgroundColor: "rgba(0,0,0,0.4)"
-  },
-
-  modal: {
-    backgroundColor: "#FFF",
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 20,
-    maxHeight: "60%"
-  },
-
-  title: {
-    fontSize: 18,
-    fontWeight: "700",
-    marginBottom: 16,
-    color: "#111827"
-  },
-
-  subjectItem: {
-    paddingVertical: 14,
-    borderBottomWidth: 1,
-    borderBottomColor: "#F1F5F9"
-  },
-
-  subjectName: {
-    fontSize: 16,
-    fontWeight: "600",
-    color: "#1F2937"
-  },
-
-  subjectCode: {
-    fontSize: 13,
-    color: "#6B7280",
-    marginTop: 2
-  },
-
-  closeBtn: {
-    marginTop: 14,
-    padding: 14,
-    borderRadius: 14,
-    backgroundColor: BG,
-    alignItems: "center"
-  },
-
-  closeText: {
-    fontSize: 15,
-    fontWeight: "600"
-  }
-});

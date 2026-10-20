@@ -1,10 +1,11 @@
+// src/components/AttendanceCard.tsx
+// The "class right now" card, used by the teacher Today tab and by the student dashboard.
+// Props are unchanged from the previous version.
 import React, { useState } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from "react-native";
+import { Platform, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import AttendanceModal from "./AttendanceModal";
-
-const PRIMARY = "#4834D4";
-const DANGER = "#FF4757";
-const SUCCESS = "#2ECC71";
+import { Banner, Button, Chip, LiveBadge, T, SP, font } from "./ui";
 
 interface AttendanceCardProps {
   lecture: any;
@@ -17,9 +18,25 @@ interface AttendanceCardProps {
   markingStatus?: "open" | "closed";
   markingMethod?: string | null;
   alreadyMarked?: boolean;
+  markPending?: boolean; // marked, but the room check was unsure -> waiting for the teacher
   onMarkAttendance?: () => void;
   isStarting?: boolean;
 }
+
+const fmtTimer = (sec: number) => {
+  const h = Math.floor(sec / 3600);
+  const m = Math.floor((sec % 3600) / 60).toString().padStart(2, "0");
+  const s = (sec % 60).toString().padStart(2, "0");
+  return h > 0 ? `${h}:${m}:${s}` : `${m}:${s}`;
+};
+
+const METHOD_NAME: Record<string, string> = {
+  code: "digit code",
+  qr: "QR code",
+  bio_geo: "biometric",
+  iot: "IoT device",
+  multi: "multi method",
+};
 
 export default function AttendanceCard({
   lecture,
@@ -32,145 +49,104 @@ export default function AttendanceCard({
   markingStatus,
   markingMethod,
   alreadyMarked,
+  markPending = false,
   onMarkAttendance,
   isStarting = false,
 }: AttendanceCardProps) {
-
-  const [isModalVisible, setIsModalVisible] = useState(false);
-
-  const formatTimer = (seconds: number) => {
-    const m = Math.floor(seconds / 60).toString().padStart(2, "0");
-    const s = (seconds % 60).toString().padStart(2, "0");
-    return `${m}:${s}`;
-  };
-
+  const [pickerOpen, setPickerOpen] = useState(false);
   if (!lecture) return null;
 
+  const live = lectureState === "ongoing";
+
   return (
-    <View style={styles.innerContainer}>
+    <View style={{ width: "100%" }}>
       <AttendanceModal
-        visible={isModalVisible}
-        onClose={() => setIsModalVisible(false)}
-        onSelectMethod={(method) => {
-          setIsModalVisible(false);
-          onMethodSelected(method);
+        visible={pickerOpen}
+        onClose={() => setPickerOpen(false)}
+        onSelectMethod={(m) => {
+          setPickerOpen(false);
+          onMethodSelected(m);
         }}
       />
 
-      {/* STATUS */}
-      <View style={styles.topRow}>
-        <View style={styles.statusBadge}>
-          <View
-            style={[
-              styles.statusDot,
-              { backgroundColor: lectureState === "idle" ? "orange" : DANGER },
-            ]}
-          />
-          <Text style={styles.statusText}>
-            {lectureState === "idle" ? "Up Next" : "Live Now"}
-          </Text>
-        </View>
-        <Text style={styles.timeRangeText}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between" }}>
+        {live ? <LiveBadge label="LIVE NOW" /> : <Chip label="Up next" tone="warning" icon="time-outline" />}
+        <Text style={{ fontSize: 12, fontWeight: "700", color: T.muted }}>
           {lecture.start_time} - {lecture.end_time}
         </Text>
       </View>
 
-      <View style={{ height: 16 }} />
+      <Text style={[font.h1, { marginTop: SP.lg }]} numberOfLines={2}>
+        {lecture.subject_name}
+      </Text>
+      <View style={{ flexDirection: "row", alignItems: "center", gap: 6, marginTop: 4 }}>
+        <Ionicons name="location-outline" size={14} color={T.muted} />
+        <Text style={font.body}>{lecture.room ? `Room ${lecture.room}` : "Room not set"}</Text>
+        {lecture.is_temporary ? <Chip label="Covering" tone="info" style={{ marginLeft: 6 }} /> : null}
+      </View>
 
-      <Text style={styles.subjectName}>{lecture.subject_name}</Text>
-      <Text style={styles.roomText}>Room {lecture.room}</Text>
-
-      <View style={{ height: 24 }} />
-
-      {/* ========================= */}
-      {/* 🔥 TEACHER UI */}
-      {/* ========================= */}
-
-      {userRole === "teacher" && lectureState === "idle" && (
-        <TouchableOpacity
-          style={[styles.startBtn, isStarting && { opacity: 0.75 }]}
-          onPress={onStartLecture}
-          disabled={isStarting}
-        >
-          {isStarting ? (
-            <ActivityIndicator size="small" color="#FFF" />
-          ) : (
-            <Text style={styles.startBtnText}>Start Lecture</Text>
-          )}
-        </TouchableOpacity>
+      {live && (
+        <View style={{ alignItems: "center", marginTop: SP.xl }}>
+          <Text style={font.label}>Class running for</Text>
+          <Text
+            style={{
+              fontSize: 46,
+              fontWeight: "800",
+              color: T.primary,
+              letterSpacing: -1,
+              fontFamily: Platform.select({ ios: "Menlo", default: "monospace" }),
+            }}
+            accessibilityLabel={`Class running for ${fmtTimer(timerSeconds)}`}
+          >
+            {fmtTimer(timerSeconds)}
+          </Text>
+        </View>
       )}
 
-      {userRole === "teacher" && lectureState === "ongoing" && (
+      <View style={{ height: SP.xl }} />
+
+      {userRole === "teacher" && !live && (
         <>
-          <Text style={styles.timerLabel}>Session Duration</Text>
-          <Text style={styles.timerValue}>{formatTimer(timerSeconds)}</Text>
-
-          <View style={{ height: 20 }} />
-
-          <TouchableOpacity
-            style={styles.attendanceBtn}
-            onPress={() => setIsModalVisible(true)}
-          >
-            <Text style={styles.btnText}>Start Attendance</Text>
-          </TouchableOpacity>
-
-          <View style={{ height: 12 }} />
-
-          <TouchableOpacity
-            style={styles.endBtn}
-            onPress={onEndLecture}
-          >
-            <Text style={styles.endBtnText}>End Class</Text>
-          </TouchableOpacity>
+          <Button label="Start lecture" icon="play" onPress={onStartLecture} loading={isStarting} />
+          <Text style={[font.small, { textAlign: "center", marginTop: SP.sm }]}>
+            Starting uses your location so students can be checked against the room.
+          </Text>
         </>
       )}
 
-      {/* ========================= */}
-      {/* 🔥 STUDENT UI */}
-      {/* ========================= */}
+      {userRole === "teacher" && live && (
+        <View style={{ gap: SP.sm }}>
+          <Button label="Take attendance" icon="checkmark-done" variant="success" onPress={() => setPickerOpen(true)} />
+          <Button label="End class" icon="stop-circle-outline" variant="dangerSoft" onPress={onEndLecture} />
+        </View>
+      )}
 
-      {userRole === "student" && (
+      {userRole === "student" && live && (
         <>
-          {lectureState === "ongoing" && (
+          {alreadyMarked ? (
+            <Button label="Attendance marked" icon="checkmark-circle" variant="success" disabled />
+          ) : markPending ? (
             <>
-              <Text style={styles.timerLabel}>Session Duration</Text>
-              <Text style={styles.timerValue}>
-                {formatTimer(timerSeconds)}
-              </Text>
-
-              <View style={{ height: 20 }} />
-
-              {alreadyMarked ? (
-                <TouchableOpacity
-                  style={[styles.attendanceBtn, { backgroundColor: SUCCESS }]}
-                  disabled
-                >
-                  <Text style={styles.btnText}>Attendance Marked ✓</Text>
-                </TouchableOpacity>
-
-              ) : markingStatus === "open" ? (
-                <TouchableOpacity
-                  style={styles.attendanceBtn}
-                  activeOpacity={0.85}
-                  onPress={() => {
-                    if (onMarkAttendance) {
-                      onMarkAttendance();
-                    }
-                  }}
-                >
-                  <Text style={styles.btnText}>
-                    Mark Attendance
-                  </Text>
-                </TouchableOpacity>
-
-              ) : (
-                <TouchableOpacity
-                  style={[styles.attendanceBtn, { opacity: 0.4 }]}
-                  disabled
-                >
-                  <Text style={styles.btnText}>Attendance Locked</Text>
-                </TouchableOpacity>
+              <Banner tone="warning" title="Waiting for your teacher">
+                We could not confirm you are in the room. Your teacher will review it.
+              </Banner>
+              {markingStatus === "open" && (
+                <Button label="Try again" icon="refresh" variant="secondary" style={{ marginTop: SP.sm }} onPress={() => onMarkAttendance?.()} />
               )}
+            </>
+          ) : markingStatus === "open" ? (
+            <>
+              <Button label="Mark attendance" icon="finger-print" onPress={() => onMarkAttendance?.()} />
+              {!!markingMethod && (
+                <Text style={[font.small, { textAlign: "center", marginTop: SP.sm }]}>
+                  Your teacher is using {METHOD_NAME[markingMethod] || markingMethod}.
+                </Text>
+              )}
+            </>
+          ) : (
+            <>
+              <Button label="Attendance not open yet" icon="lock-closed-outline" variant="secondary" disabled />
+              <Text style={[font.small, { textAlign: "center", marginTop: SP.sm }]}>The button unlocks when your teacher starts attendance.</Text>
             </>
           )}
         </>
@@ -178,130 +154,3 @@ export default function AttendanceCard({
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-  innerContainer: {
-    width: '100%',
-  },
-  topRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  statusDot: {
-    width: 8,
-    height: 8,
-    borderRadius: 4,
-    marginRight: 8,
-  },
-  statusText: {
-    fontWeight: 'bold',
-    fontSize: 12,
-    color: '#616161',
-  },
-  timeRangeText: {
-    fontWeight: 'bold',
-    fontSize: 12,
-    color: '#BDBDBD',
-  },
-  subjectName: {
-    fontSize: 22,
-    fontWeight: '900', // Extra bold
-    color: '#2D3436',
-    lineHeight: 26,
-  },
-  lockedText: {
-  marginTop: 10,
-  fontSize: 13,
-  color: "#9CA3AF",
-  fontWeight: "600",
-  textAlign: "center",
-},
-  roomRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  roomText: {
-    fontSize: 14,
-    color: '#757575',
-    fontWeight: '600',
-  },
-  divider: {
-    height: 1,
-    backgroundColor: '#F5F5F5',
-    width: '100%',
-  },
-  
-  /* BUTTONS */
-  startBtn: {
-    width: '100%',
-    height: 55,
-    backgroundColor: PRIMARY,
-    borderRadius: 18,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 10,
-    shadowColor: PRIMARY,
-    shadowOpacity: 0.4,
-    shadowOffset: {width: 0, height: 4},
-  },
-  startBtnText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#FFF',
-  },
-
-  /* ONGOING STATE STYLES */
-  timerLabel: {
-    fontSize: 12,
-    color: '#BDBDBD',
-    fontWeight: 'bold',
-    textAlign: 'center',
-  },
-  timerValue: {
-    fontSize: 48,
-    fontWeight: '900',
-    color: PRIMARY,
-    textAlign: 'center',
-    letterSpacing: -2,
-    fontFamily: 'monospace', // Closest to Flutter monospace
-  },
-  attendanceBtn: {
-    width: '100%',
-    height: 55,
-    backgroundColor: SUCCESS,
-    borderRadius: 18,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    elevation: 10,
-    shadowColor: SUCCESS,
-    shadowOpacity: 0.4,
-    shadowOffset: {width: 0, height: 4},
-  },
-  btnText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: '#FFF',
-  },
-  endBtn: {
-    width: '100%',
-    height: 50,
-    borderWidth: 2,
-    borderColor: DANGER,
-    borderRadius: 18,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-  },
-  endBtnText: {
-    fontSize: 16,
-    fontWeight: 'bold',
-    color: DANGER,
-  },
-});

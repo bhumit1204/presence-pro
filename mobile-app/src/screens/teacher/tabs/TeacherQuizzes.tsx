@@ -1,3 +1,4 @@
+import { apiFetch } from "../../../services/api";
 import React, { useEffect, useState } from "react";
 import {
   View,
@@ -15,7 +16,7 @@ import { useFocusEffect } from "@react-navigation/native";
 
 const PRIMARY = "#4834D4";
 const BG = "#F3F4F6";
-const API_URL = "http://10.132.90.56:5000";
+const API_URL = "https://presencepro.duckdns.org";
 
 interface Subject {
   subject_name: string;
@@ -36,7 +37,7 @@ export default function TeacherQuizzes() {
     try {
       const session = await getUserSession();
 
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_URL}/api/lectures/teachers/subjects?teacher_id=${session.teacher_id}`
       );
 
@@ -53,7 +54,7 @@ export default function TeacherQuizzes() {
     try {
       const session = await getUserSession();
 
-      const res = await fetch(
+      const res = await apiFetch(
         `${API_URL}/api/quizzes/teacher/${session.teacher_id}`
       );
 

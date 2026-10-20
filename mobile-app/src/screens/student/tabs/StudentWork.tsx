@@ -1,20 +1,25 @@
+import { apiFetch, API_BASE } from "../../../services/api";
 import React, { useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
   ActivityIndicator, RefreshControl,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { auth } from "../../../services/firebase";
 import { Ionicons } from "@expo/vector-icons";
+import { Button, Card, Chip, EmptyState, Screen, SP, T, Tone, font } from "../../../components/ui";
 
-const PRIMARY   = "#4834D4";
-const BG        = "#F3F4F6";
-const GREY      = "#6B7280";
-const RED       = "#EF4444";
-const AMBER     = "#F59E0B";
-const API_URL   = "http://10.132.90.56:5000";
-const COLORS    = ["#4834D4","#10B981","#F59E0B","#EF4444","#8B5CF6","#EC4899","#06B6D4","#84CC16"];
+const API_URL = API_BASE;
+const COLORS: { fg: string; bg: string }[] = [
+  { fg: T.primary, bg: T.primarySoft },
+  { fg: T.success, bg: T.successSoft },
+  { fg: T.warning, bg: T.warningSoft },
+  { fg: T.danger,  bg: T.dangerSoft  },
+  { fg: "#7C3AED",  bg: "#EDE9FE"    },
+  { fg: "#DB2777",  bg: "#FCE7F3"    },
+  { fg: "#0891B2",  bg: "#CFFAFE"    },
+  { fg: "#65A30D",  bg: "#ECFCCB"    },
+];
 
 interface Subject {
   subject_id:   string;
@@ -43,9 +48,9 @@ async function fetchSubjectBadge(
   uid:        string
 ): Promise<SubjectBadge> {
   const [assignRes, announceRes, subRes] = await Promise.all([
-    fetch(`${API_URL}/api/assignments?subject_id=${subject_id}&course_id=${course_id}`),
-    fetch(`${API_URL}/api/assignments/announcements?subject_id=${subject_id}&course_id=${course_id}`),
-    fetch(`${API_URL}/api/assignments/my-submissions?student_uid=${uid}&subject_id=${subject_id}`),
+    apiFetch(`${API_URL}/api/assignments?subject_id=${subject_id}&course_id=${course_id}`),
+    apiFetch(`${API_URL}/api/assignments/announcements?subject_id=${subject_id}&course_id=${course_id}`),
+    apiFetch(`${API_URL}/api/assignments/my-submissions?student_uid=${uid}&subject_id=${subject_id}`),
   ]);
 
   const [assignData, announceData, subData] = await Promise.all([
@@ -102,7 +107,7 @@ export default function StudentWork() {
       const uid = auth.currentUser?.uid;
       if (!uid) { setError("Not logged in"); return; }
 
-      const subjectsRes = await fetch(`${API_URL}/api/lectures/student/subjects?uid=${uid}`);
+      const subjectsRes = await apiFetch(`${API_URL}/api/lectures/student/subjects?uid=${uid}`);
       let subjects: Subject[] = [];
 
       if (subjectsRes.ok) {
@@ -170,10 +175,10 @@ export default function StudentWork() {
   const studentUid = auth.currentUser?.uid;
 
   return (
-    <SafeAreaView style={S.safe}>
+    <Screen edges={["top"]}>
       <View style={S.header}>
-        <Text style={S.title}>Classwork</Text>
-        <Text style={S.subtitle}>Your assignments &amp; announcements</Text>
+        <Text style={font.display}>Classwork</Text>
+        <Text style={[font.body, { marginTop: 2 }]}>Your assignments and announcements</Text>
       </View>
 
       <ScrollView
@@ -183,33 +188,25 @@ export default function StudentWork() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={() => { setRefreshing(true); fetchSubjects(true); }}
-            colors={[PRIMARY]}
+            colors={[T.primary]}
           />
         }
       >
         {loading ? (
           <View style={S.center}>
-            <ActivityIndicator size="large" color={PRIMARY} />
-            <Text style={S.loadingText}>Loading subjects…</Text>
+            <ActivityIndicator size="large" color={T.primary} />
+            <Text style={font.small}>Loading subjects</Text>
           </View>
         ) : error ? (
           <View style={S.errorBox}>
-            <Ionicons name="alert-circle-outline" size={36} color="#DC2626" />
-            <Text style={S.errorTitle}>Couldn't load subjects</Text>
-            <Text style={S.errorMsg}>{error}</Text>
-            <TouchableOpacity style={S.retryBtn} onPress={() => fetchSubjects()}>
-              <Text style={S.retryText}>Try Again</Text>
-            </TouchableOpacity>
+            <EmptyState icon="alert-circle-outline" title="Couldn't load subjects" text={error} />
+            <Button label="Try again" icon="refresh" size="md" onPress={() => fetchSubjects()} style={{ alignSelf: "center", paddingHorizontal: 28 }} />
           </View>
         ) : courseGroups.length === 0 ? (
-          <View style={S.empty}>
-            <Ionicons name="library-outline" size={52} color={GREY} />
-            <Text style={S.emptyTitle}>No subjects enrolled</Text>
-            <Text style={S.emptyText}>You haven't been enrolled in any subjects yet.</Text>
-          </View>
+          <EmptyState icon="library-outline" title="No subjects enrolled" text="You haven't been enrolled in any subjects yet." />
         ) : (
           courseGroups.map((course, ci) => {
-            const expanded   = expandedCourses.has(course.course_id);
+            const expanded    = expandedCourses.has(course.course_id);
             const courseColor = COLORS[ci % COLORS.length];
 
             // Aggregate badges across all subjects in this course
@@ -220,215 +217,110 @@ export default function StudentWork() {
             return (
               <View key={course.course_id} style={S.courseSection}>
 
-                {/* ── Course header ── */}
-                <TouchableOpacity
-                  style={[S.courseHeader, { borderLeftColor: courseColor }]}
-                  onPress={() => toggleCourse(course.course_id)}
-                  activeOpacity={0.82}
-                >
-                  <View style={[S.courseAvatar, { backgroundColor: courseColor + "1A" }]}>
-                    <Text style={[S.courseAvatarText, { color: courseColor }]}>
-                      {course.course_name.charAt(0)}
-                    </Text>
-                  </View>
-
-                  <View style={S.courseInfo}>
-                    <Text style={S.courseName} numberOfLines={1}>{course.course_name}</Text>
-                    <Text style={S.courseSubCount}>
-                      {course.subjects.length} subject{course.subjects.length !== 1 ? "s" : ""}
-                    </Text>
-                  </View>
-
-                  {/* Course-level badge summary (shown when collapsed) */}
-                  {!expanded && !badgesLoading && (
-                    <View style={S.courseBadgeRow}>
-                      {courseMissing > 0 && (
-                        <View style={[S.courseBadge, { backgroundColor: "#FEF2F2" }]}>
-                          <View style={[S.badgeDot, { backgroundColor: RED }]} />
-                          <Text style={[S.courseBadgeText, { color: RED }]}>{courseMissing} missing</Text>
-                        </View>
-                      )}
-                      {coursePending > 0 && (
-                        <View style={[S.courseBadge, { backgroundColor: "#FFFBEB" }]}>
-                          <View style={[S.badgeDot, { backgroundColor: AMBER }]} />
-                          <Text style={[S.courseBadgeText, { color: AMBER }]}>{coursePending} due</Text>
-                        </View>
-                      )}
-                      {courseHasNew && coursePending === 0 && courseMissing === 0 && (
-                        <View style={[S.courseBadge, { backgroundColor: "#EEF2FF" }]}>
-                          <View style={[S.badgeDot, { backgroundColor: PRIMARY }]} />
-                          <Text style={[S.courseBadgeText, { color: PRIMARY }]}>new</Text>
-                        </View>
-                      )}
+                {/* Course header */}
+                <TouchableOpacity onPress={() => toggleCourse(course.course_id)} activeOpacity={0.82}>
+                  <Card style={S.courseHeader}>
+                    <View style={[S.courseAvatar, { backgroundColor: courseColor.bg }]}>
+                      <Text style={[S.courseAvatarText, { color: courseColor.fg }]}>
+                        {course.course_name.charAt(0)}
+                      </Text>
                     </View>
-                  )}
 
-                  <Ionicons
-                    name={expanded ? "chevron-up" : "chevron-down"}
-                    size={18}
-                    color={courseColor}
-                  />
+                    <View style={{ flex: 1 }}>
+                      <Text style={font.h3} numberOfLines={1}>{course.course_name}</Text>
+                      <Text style={font.small}>
+                        {course.subjects.length} subject{course.subjects.length !== 1 ? "s" : ""}
+                      </Text>
+                    </View>
+
+                    {!expanded && !badgesLoading && (
+                      <View style={S.courseBadgeRow}>
+                        {courseMissing > 0 && <Chip label={`${courseMissing} missing`} tone="danger" />}
+                        {coursePending > 0 && <Chip label={`${coursePending} due`} tone="warning" />}
+                        {courseHasNew && coursePending === 0 && courseMissing === 0 && <Chip label="new" tone="primary" />}
+                      </View>
+                    )}
+
+                    <Ionicons name={expanded ? "chevron-up" : "chevron-down"} size={18} color={T.muted} />
+                  </Card>
                 </TouchableOpacity>
 
-                {/* ── Subject rows ── */}
-                {expanded && course.subjects.map((sub) => {
-                  const subColor = COLORS[globalIdx++ % COLORS.length];
-                  const badge    = badges[sub.subject_id];
+                {/* Subject rows */}
+                {expanded && (
+                  <View style={S.subjectList}>
+                    {course.subjects.map((sub) => {
+                      const subColor = COLORS[globalIdx++ % COLORS.length];
+                      const badge    = badges[sub.subject_id];
 
-                  const hasMissing  = (badge?.missingCount  || 0) > 0;
-                  const hasPending  = (badge?.pendingCount   || 0) > 0;
-                  const hasNew      = badge?.hasNewAnnouncement ?? false;
-                  const showBadge   = !badgesLoading && (hasMissing || hasPending || hasNew);
+                      const hasMissing  = (badge?.missingCount  || 0) > 0;
+                      const hasPending  = (badge?.pendingCount   || 0) > 0;
+                      const hasNew      = badge?.hasNewAnnouncement ?? false;
+                      const showBadge   = !badgesLoading && (hasMissing || hasPending || hasNew);
 
-                  return (
-                    <TouchableOpacity
-                      key={sub.subject_id}
-                      style={S.subjectRow}
-                      onPress={() => navigation.navigate("StudentSubjectFeed", {
-                        subject: sub, course, student_uid: studentUid,
-                      })}
-                      activeOpacity={0.82}
-                    >
-                      {/* Left avatar */}
-                      <View style={[S.subDot, { backgroundColor: subColor + "20", borderColor: subColor }]}>
-                        <Text style={[S.subDotText, { color: subColor }]}>
-                          {sub.subject_name.charAt(0)}
-                        </Text>
-                      </View>
+                      return (
+                        <TouchableOpacity
+                          key={sub.subject_id}
+                          onPress={() => navigation.navigate("StudentSubjectFeed", {
+                            subject: sub, course, student_uid: studentUid,
+                          })}
+                          activeOpacity={0.82}
+                        >
+                          <Card flat padded={false} style={S.subjectRow}>
+                            <View style={[S.subDot, { backgroundColor: subColor.bg }]}>
+                              <Text style={[S.subDotText, { color: subColor.fg }]}>
+                                {sub.subject_name.charAt(0)}
+                              </Text>
+                            </View>
 
-                      {/* Name + badge pills */}
-                      <View style={S.subjectMeta}>
-                        <Text style={S.subjectName} numberOfLines={2}>{sub.subject_name}</Text>
+                            <View style={{ flex: 1 }}>
+                              <Text style={font.h3} numberOfLines={2}>{sub.subject_name}</Text>
 
-                        {showBadge && (
-                          <View style={S.pillRow}>
-                            {hasMissing && (
-                              <View style={[S.pill, S.pillRed]}>
-                                <Text style={[S.pillText, { color: RED }]}>
-                                  {badge!.missingCount} missing
-                                </Text>
-                              </View>
-                            )}
-                            {hasPending && (
-                              <View style={[S.pill, S.pillAmber]}>
-                                <Text style={[S.pillText, { color: AMBER }]}>
-                                  {badge!.pendingCount} pending
-                                </Text>
-                              </View>
-                            )}
-                            {hasNew && !hasMissing && !hasPending && (
-                              <View style={[S.pill, S.pillPrimary]}>
-                                <Text style={[S.pillText, { color: PRIMARY }]}>new post</Text>
-                              </View>
-                            )}
-                          </View>
-                        )}
+                              {showBadge && (
+                                <View style={S.pillRow}>
+                                  {hasMissing && <Chip label={`${badge!.missingCount} missing`} tone="danger" />}
+                                  {hasPending && <Chip label={`${badge!.pendingCount} pending`} tone="warning" />}
+                                  {hasNew && !hasMissing && !hasPending && <Chip label="new post" tone="primary" />}
+                                </View>
+                              )}
 
-                        {badgesLoading && (
-                          <ActivityIndicator size="small" color={GREY} style={{ marginTop: 4 }} />
-                        )}
-                      </View>
+                              {badgesLoading && (
+                                <ActivityIndicator size="small" color={T.muted} style={{ marginTop: 4, alignSelf: "flex-start" }} />
+                              )}
+                            </View>
 
-                      {/* Indicator dot + chevron */}
-                      <View style={S.subjectRight}>
-                        {showBadge && (
-                          <View style={[
-                            S.indicatorDot,
-                            { backgroundColor: hasMissing ? RED : hasPending ? AMBER : PRIMARY },
-                          ]} />
-                        )}
-                        <Ionicons name="chevron-forward" size={15} color={GREY} />
-                      </View>
-                    </TouchableOpacity>
-                  );
-                })}
+                            <Ionicons name="chevron-forward" size={16} color={T.muted} />
+                          </Card>
+                        </TouchableOpacity>
+                      );
+                    })}
+                  </View>
+                )}
               </View>
             );
           })
         )}
-        <View style={{ height: 40 }} />
+        <View style={{ height: 120 }} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
 const S = StyleSheet.create({
-  safe:   { flex: 1, backgroundColor: BG },
-  header: { paddingHorizontal: 20, paddingTop: 16, marginBottom: 10 },
-  title:  { fontSize: 28, fontWeight: "800", color: "#111827" },
-  subtitle: { fontSize: 14, color: GREY, marginTop: 4 },
-  list:   { paddingHorizontal: 20, paddingTop: 4 },
+  header: { paddingHorizontal: SP.xl, paddingTop: SP.lg, marginBottom: SP.md },
+  list:   { paddingHorizontal: SP.xl, paddingTop: SP.xs },
 
-  // ── Course ─────────────────────────────────────────────────────
-  courseSection: { marginBottom: 12 },
-  courseHeader: {
-    backgroundColor: "#FFF", borderRadius: 16, padding: 14,
-    flexDirection: "row", alignItems: "center", gap: 12,
-    borderWidth: 1, borderColor: "#E5E7EB", borderLeftWidth: 3,
-    shadowColor: "#000", shadowOpacity: 0.04, shadowRadius: 6, elevation: 2,
-  },
-  courseAvatar: { width: 42, height: 42, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  center:   { paddingTop: 80, alignItems: "center", gap: SP.md },
+  errorBox: { paddingTop: 30, gap: SP.sm },
+
+  courseSection: { marginBottom: SP.md },
+  courseHeader:  { flexDirection: "row", alignItems: "center", gap: SP.md, padding: SP.md },
+  courseAvatar:  { width: 44, height: 44, borderRadius: 14, alignItems: "center", justifyContent: "center" },
   courseAvatarText: { fontSize: 18, fontWeight: "800" },
-  courseInfo: { flex: 1 },
-  courseName: { fontSize: 15, fontWeight: "700", color: "#111827" },
-  courseSubCount: { fontSize: 12, color: GREY, marginTop: 2 },
+  courseBadgeRow: { flexDirection: "row", gap: 5, flexWrap: "wrap", justifyContent: "flex-end", maxWidth: 120 },
 
-  courseBadgeRow: { flexDirection: "row", gap: 5, flexWrap: "wrap", alignItems: "center", marginRight: 4 },
-  courseBadge: { flexDirection: "row", alignItems: "center", gap: 4, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 3 },
-  courseBadgeText: { fontSize: 11, fontWeight: "700" },
-  badgeDot: { width: 5, height: 5, borderRadius: 3 },
-
-  // ── Subject row ────────────────────────────────────────────────
-  subjectRow: {
-    backgroundColor: "#FFF",
-    marginTop: 3,
-    marginLeft: 14,
-    borderRadius: 13,
-    paddingVertical: 12,
-    paddingHorizontal: 14,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-    shadowColor: "#000",
-    shadowOpacity: 0.02,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  subDot: {
-    width: 38, height: 38, borderRadius: 11,
-    alignItems: "center", justifyContent: "center", borderWidth: 1.5,
-    flexShrink: 0,
-  },
-  subDotText: { fontSize: 14, fontWeight: "800" },
-
-  subjectMeta: { flex: 1 },
-  subjectName: { fontSize: 14, fontWeight: "600", color: "#111827", lineHeight: 20 },
-
-  // Pill badges inside subject row
-  pillRow: { flexDirection: "row", gap: 5, marginTop: 5, flexWrap: "wrap" },
-  pill: { borderRadius: 5, paddingHorizontal: 7, paddingVertical: 2 },
-  pillRed:     { backgroundColor: "#FEF2F2" },
-  pillAmber:   { backgroundColor: "#FFFBEB" },
-  pillPrimary: { backgroundColor: "#EEF2FF" },
-  pillText: { fontSize: 11, fontWeight: "700" },
-
-  // Right side: dot + chevron
-  subjectRight: { flexDirection: "row", alignItems: "center", gap: 6, flexShrink: 0 },
-  indicatorDot: { width: 8, height: 8, borderRadius: 4 },
-
-  // ── States ─────────────────────────────────────────────────────
-  center: { paddingTop: 80, alignItems: "center", gap: 12 },
-  loadingText: { fontSize: 14, color: GREY },
-
-  errorBox: { alignItems: "center", paddingTop: 60, gap: 10 },
-  errorTitle: { fontSize: 17, fontWeight: "700", color: "#111827" },
-  errorMsg: { fontSize: 13, color: GREY, textAlign: "center", paddingHorizontal: 20 },
-  retryBtn: { backgroundColor: PRIMARY, borderRadius: 12, paddingHorizontal: 24, paddingVertical: 10, marginTop: 6 },
-  retryText: { color: "#FFF", fontWeight: "700", fontSize: 14 },
-
-  empty: { alignItems: "center", paddingTop: 80, gap: 10 },
-  emptyTitle: { fontSize: 18, fontWeight: "700", color: "#111827", marginTop: 6 },
-  emptyText: { fontSize: 14, color: GREY, textAlign: "center" },
+  subjectList: { marginTop: SP.sm, marginLeft: SP.lg, gap: SP.sm },
+  subjectRow:  { flexDirection: "row", alignItems: "center", gap: SP.md, paddingVertical: SP.md, paddingHorizontal: SP.md },
+  subDot:      { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  subDotText:  { fontSize: 15, fontWeight: "800" },
+  pillRow:     { flexDirection: "row", gap: 5, marginTop: 5, flexWrap: "wrap" },
 });

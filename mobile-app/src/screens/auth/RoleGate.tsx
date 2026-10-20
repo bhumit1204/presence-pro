@@ -1,192 +1,173 @@
 // src/screens/auth/RoleGate.tsx
-import { useEffect, useState } from "react";
-import { View, Text, ActivityIndicator, StyleSheet } from "react-native";
+// Decides where a signed-in user goes. Never leaves a half-signed-in user behind:
+// blocked / failed states offer Retry and Sign out.
+//   - no collection scans (the old fallback downloaded every teacher document)
+//   - no ID token is stored
+//   - pending / rejected / disabled accounts are stopped here
+
+import { ActivityIndicator, View } from "react-native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { doc, getDoc, collection, query, where, getDocs, limit } from "firebase/firestore";
 import { useNavigation } from "@react-navigation/native";
 import { auth, db } from "../../services/firebase";
-import { doc, getDoc, collection, query, where, getDocs, limit } from "firebase/firestore";
-import { saveUserSession, savePushToken } from "../../services/session";
+import { saveUserSession, savePushToken, signOutAndClear } from "../../services/session";
 import { registerForPushNotifications } from "../../services/notifications";
+import Logo from "../../components/Logo";
+import { Button, ResultView, Screen, T } from "../../components/ui";
 
-const PRIMARY = "#4834D4";
-const BG = "#F3F4F6";
-const CARD = "#FFFFFF";
+type Phase =
+  | { kind: "loading" }
+  | { kind: "inactive" }
+  | { kind: "pending" }
+  | { kind: "rejected" }
+  | { kind: "error"; message: string };
 
 export default function RoleGate() {
   const navigation = useNavigation<any>();
+  const [phase, setPhase] = useState<Phase>({ kind: "loading" });
+  const alive = useRef(true);
 
-  const [loading, setLoading] = useState(true);
-  const [inactive, setInactive] = useState(false);
+  const toAuth = useCallback(() => navigation.replace("Auth"), [navigation]);
+
+  const init = useCallback(async () => {
+    setPhase({ kind: "loading" });
+    try {
+      const user = auth.currentUser;
+      if (!user) return toAuth();
+
+      const snap = await getDoc(doc(db, "users", user.uid));
+      if (!alive.current) return;
+      if (!snap.exists()) {
+        await signOutAndClear();
+        return toAuth();
+      }
+      const data = snap.data() as any;
+
+      if (data?.is_active === false) return setPhase({ kind: "inactive" });
+      const approval = String(data?.approval_status || "").toLowerCase();
+      if (approval === "pending") return setPhase({ kind: "pending" });
+      if (approval === "rejected") return setPhase({ kind: "rejected" });
+
+      // hod / head_teacher accounts are plain teachers here (same app, same screens)
+      const rawRole = String(data?.role || "student").toLowerCase();
+      const role = ["hod", "head_teacher", "head teacher", "teacher"].includes(rawRole) ? "teacher" : "student";
+
+      let teacher_id: string | null = null;
+      if (role === "teacher") {
+        const byUser = await getDocs(query(collection(db, "teachers"), where("user_id", "==", user.uid), limit(1)));
+        if (!byUser.empty) {
+          teacher_id = byUser.docs[0].id;
+        } else {
+          // teacher documents created by an admin may use the uid as the document id
+          const direct = await getDoc(doc(db, "teachers", user.uid));
+          if (direct.exists()) teacher_id = direct.id;
+        }
+      }
+      if (!alive.current) return;
+
+      await saveUserSession({
+        uid: user.uid,
+        role,
+        is_active: data?.is_active ?? true,
+        approval_status: data?.approval_status ?? null,
+        teacher_id,
+        student_id: role === "student" ? user.uid : null,
+      });
+
+      // best effort: never block navigation on the push token
+      registerForPushNotifications()
+        .then((token) => {
+          if (token) savePushToken(user.uid, role, token);
+        })
+        .catch(() => {});
+
+      navigation.replace(role === "teacher" ? "TeacherDashboard" : "StudentDashboard");
+    } catch (e: any) {
+      if (!alive.current) return;
+      const offline = /network|unavailable|offline/i.test(String(e?.code || e?.message || ""));
+      setPhase({
+        kind: "error",
+        message: offline
+          ? "Could not reach the server. Check your internet connection and try again."
+          : "We could not load your account. Please try again.",
+      });
+    }
+  }, [navigation, toAuth]);
 
   useEffect(() => {
-    const init = async () => {
-      try {
-        const user = auth.currentUser;
-
-        if (!user) {
-          navigation.replace("Auth");
-          return;
-        }
-
-        const snap = await getDoc(doc(db, "users", user.uid));
-
-        if (!snap.exists()) {
-          navigation.replace("Auth");
-          return;
-        }
-
-        const data = snap.data();
-
-        if (data?.is_active === false) {
-          setInactive(true);
-          setLoading(false);
-          return;
-        }
-
-        const baseRole = (data?.role || "student").toLowerCase();
-
-        let finalRole = baseRole;
-        let teacher_id: string | null = null;
-        let student_id: string | null = null;
-
-        if (baseRole === "teacher") {
-          // Primary lookup: by user_id field
-          let teacherDoc = null;
-          const snap1 = await getDocs(
-            query(collection(db, "teachers"), where("user_id", "==", user.uid), limit(1))
-          );
-          if (!snap1.empty) {
-            teacherDoc = snap1.docs[0];
-          } else {
-            // Fallback: some HOD docs may have been created by admin without user_id set,
-            // or with whitespace. Scan all teacher docs and match trimmed uid.
-            const allSnap = await getDocs(collection(db, "teachers"));
-            const matched = allSnap.docs.find(
-              (d) => (d.data().user_id || "").trim() === user.uid.trim()
-            );
-            if (matched) teacherDoc = matched;
-          }
-
-          if (teacherDoc) {
-            const teacherData = teacherDoc.data();
-            // Use doc.id as the authoritative teacher_id
-            teacher_id = teacherDoc.id;
-
-            // Resolve role: explicit field first, then designation fallback for legacy docs
-            const resolvedRole: string | null = teacherData.role ||
-              (teacherData.designation?.toLowerCase() === "hod" ? "hod" :
-               teacherData.designation?.toLowerCase() === "head teacher" ? "head_teacher" : null);
-
-            if (resolvedRole === "hod" || resolvedRole === "head_teacher") {
-              finalRole = resolvedRole;
-            }
-          }
-        }
-
-        if (baseRole === "student") {
-          student_id = user.uid;
-        }
-
-        const idToken = await user.getIdToken();
-        await saveUserSession(
-          {
-            uid: user.uid,
-            role: finalRole,
-            is_active: data?.is_active ?? true,
-            approval_status: data?.approval_status ?? null,
-            teacher_id,
-            student_id,
-          },
-          idToken
-        );
-
-        // ── Register push token after session is saved ──
-        // Best-effort: never block navigation on failure
-        registerForPushNotifications()
-          .then((token) => {
-            if (token) {
-              // Use "teacher" for all teacher roles for the backend lookup
-              const roleForToken =
-                finalRole === "student" ? "student" : "teacher";
-              savePushToken(user.uid, roleForToken, token);
-            }
-          })
-          .catch(() => {});
-
-        if (finalRole === "hod" || finalRole === "head_teacher") {
-          navigation.replace("HODDashboard");
-        } else if (finalRole === "teacher") {
-          navigation.replace("TeacherDashboard");
-        } else {
-          navigation.replace("StudentDashboard");
-        }
-      } catch (e) {
-        console.log("RoleGate error:", e);
-        navigation.replace("Auth");
-      } finally {
-        setLoading(false);
-      }
-    };
-
+    alive.current = true;
     init();
-  }, []);
+    return () => {
+      alive.current = false;
+    };
+  }, [init]);
 
-  if (loading) {
-    return (
-      <View style={styles.center}>
-        <ActivityIndicator size="large" color={PRIMARY} />
-        <Text style={styles.msg}>Loading your workspace...</Text>
-      </View>
-    );
-  }
+  const signOutBtn = (
+    <Button
+      label="Sign out"
+      icon="log-out-outline"
+      variant="secondary"
+      onPress={async () => {
+        await signOutAndClear();
+        toAuth();
+      }}
+    />
+  );
 
-  if (inactive) {
-    return (
-      <View style={styles.center}>
-        <View style={styles.card}>
-          <Text style={styles.title}>Account Disabled</Text>
-          <Text style={styles.text}>
-            Your account is currently inactive. Please contact your institute
-            administrator.
-          </Text>
+  return (
+    <Screen>
+      {phase.kind === "loading" && (
+        <View style={{ flex: 1, alignItems: "center", justifyContent: "center", gap: 28 }}>
+          <Logo width={220} />
+          <ActivityIndicator size="large" color={T.primary} />
         </View>
-      </View>
-    );
-  }
-
-  return null;
+      )}
+      {phase.kind === "inactive" && (
+        <ResultView
+          icon="lock-closed"
+          tone="danger"
+          title="Account disabled"
+          message="Your account is currently inactive. Please contact your institute administrator."
+          actions={signOutBtn}
+        />
+      )}
+      {phase.kind === "pending" && (
+        <ResultView
+          icon="time"
+          tone="warning"
+          title="Waiting for approval"
+          message="Your registration has been received. You can sign in once your institute approves it."
+          actions={
+            <>
+              <Button label="Check again" icon="refresh" onPress={init} />
+              {signOutBtn}
+            </>
+          }
+        />
+      )}
+      {phase.kind === "rejected" && (
+        <ResultView
+          icon="close-circle"
+          tone="danger"
+          title="Registration not approved"
+          message="Your registration was not approved. Please contact your institute."
+          actions={signOutBtn}
+        />
+      )}
+      {phase.kind === "error" && (
+        <ResultView
+          icon="cloud-offline"
+          tone="danger"
+          title="Something went wrong"
+          message={phase.message}
+          actions={
+            <>
+              <Button label="Try again" icon="refresh" onPress={init} />
+              {signOutBtn}
+            </>
+          }
+        />
+      )}
+    </Screen>
+  );
 }
-
-const styles = StyleSheet.create({
-  center: {
-    flex: 1,
-    backgroundColor: BG,
-    justifyContent: "center",
-    alignItems: "center",
-    paddingHorizontal: 24,
-  },
-  card: {
-    width: "100%",
-    backgroundColor: CARD,
-    borderRadius: 24,
-    padding: 28,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-  },
-  title: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: PRIMARY,
-    marginBottom: 12,
-    textAlign: "center",
-  },
-  text: {
-    fontSize: 15,
-    color: "#374151",
-    textAlign: "center",
-    lineHeight: 22,
-  },
-  msg: {
-    marginTop: 12,
-    color: "#6B7280",
-  },
-});

@@ -1,636 +1,469 @@
-import React, { useEffect, useState, useRef } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
-  Alert,
-  Platform,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+// screens/reports/teacher/MarkAttendance.tsx — weekly attendance register (Monday to Saturday) for one subject.
+// Fixes: changing week used to wipe unsaved edits; a date that failed to load looked "unrecorded" and could be
+// overwritten; one request per student was fired all at once; the table needed horizontal scrolling and a fixed height;
+// the next-week arrow let you open weeks that are entirely in the future.
+
+import React, { useCallback, useEffect, useMemo, useState } from "react";
+import { ActivityIndicator, Alert, Pressable, ScrollView, StyleSheet, Text, View, useWindowDimensions } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useNavigation, useRoute } from "@react-navigation/native";
-
-const PRIMARY = "#4834D4";
-const PRIMARY_SOFT = "#EEF2FF";
-const BG = "#F3F4F6";
-const WHITE = "#FFFFFF";
-const GREY = "#6B7280";
-const DARK = "#111827";
-const GREEN = "#10B981";
-const AMBER = "#F59E0B";
-const RED = "#EF4444";
-const BORDER = "#E5E7EB";
-const CELL_W = 52;
-const ROW_H = 52;
-
-const API_URL = "http://10.132.90.56:5000";
-
-// ── Date helpers ────────────────────────────────────────────────────────────
-function toYMD(d: Date): string {
-  const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${y}-${m}-${dd}`;
-}
-
-function getWeekDates(anchor: Date): string[] {
-  // Monday-Saturday of the week containing anchor
-  const day = anchor.getDay(); // 0=Sun
-  const monday = new Date(anchor);
-  monday.setDate(anchor.getDate() - ((day === 0 ? 7 : day) - 1));
-  const dates: string[] = [];
-  for (let i = 0; i < 6; i++) {
-    const d = new Date(monday);
-    d.setDate(monday.getDate() + i);
-    dates.push(toYMD(d));
-  }
-  return dates;
-}
-
-function addWeeks(anchor: Date, n: number): Date {
-  const d = new Date(anchor);
-  d.setDate(d.getDate() + n * 7);
-  return d;
-}
-
-function fmtDay(ymd: string): string {
-  const [y, m, d] = ymd.split("-").map(Number);
-  return new Date(y, m - 1, d).toLocaleDateString("en-IN", { weekday: "short" });
-}
-
-function fmtDate(ymd: string): string {
-  const [y, m, d] = ymd.split("-").map(Number);
-  return `${String(d).padStart(2, "0")}/${String(m).padStart(2, "0")}`;
-}
+import { apiFetch } from "../../../services/api";
+import { Banner, Button, EmptyState, Header, Screen, SP, T, font } from "../../../components/ui";
+import { API_URL, enc, toYMD } from "./ReportShared";
 
 type Status = "present" | "absent" | "no_class" | "od" | null;
-
 interface StudentRow {
   uid: string;
   name: string;
   roll_no: string | null;
 }
-
-interface AttCell {
+interface Cell {
   status: Status;
-  dirty: boolean; // locally changed, not yet saved
+  dirty: boolean;
 }
+type Register = Record<string, Record<string, Cell>>; // uid -> date -> cell
 
-type RegisterData = Record<string, Record<string, AttCell>>; // uid → date → cell
+const NAME_W = 108;
+const ROW_H = 52;
+const STUDENT_LIMIT = 200;
+const SAVE_BATCH = 5;
+
+function weekDatesOf(anchor: Date): string[] {
+  const day = anchor.getDay(); // 0 = Sunday
+  const monday = new Date(anchor.getFullYear(), anchor.getMonth(), anchor.getDate() - ((day === 0 ? 7 : day) - 1));
+  return Array.from({ length: 6 }, (_, i) => toYMD(new Date(monday.getFullYear(), monday.getMonth(), monday.getDate() + i)));
+}
+const ymdToDate = (ymd: string) => {
+  const [y, m, d] = ymd.split("-").map(Number);
+  return new Date(y, m - 1, d);
+};
+const dayName = (ymd: string) => ymdToDate(ymd).toLocaleDateString("en-IN", { weekday: "short" });
+const dayMonth = (ymd: string) => {
+  const [, m, d] = ymd.split("-");
+  return `${d}/${m}`;
+};
 
 export default function MarkAttendance() {
   const navigation = useNavigation<any>();
-  const route = useRoute<any>();
-  const { subject, teacher_id } = route.params;
-  const subjectId = subject?.subject_id || "";
+  const params = useRoute<any>().params ?? {};
+  const { subject, teacher_id } = params;
+  const subjectId: string = subject?.subject_id || "";
+  const { width } = useWindowDimensions();
+  const cellW = Math.max(38, Math.floor((width - NAME_W) / 6));
 
-  const today = new Date();
-  const [weekAnchor, setWeekAnchor] = useState(today);
-  const weekDates = getWeekDates(weekAnchor);
-  const isFutureWeek = weekDates[0] > toYMD(today);
+  const todayStr = toYMD(new Date());
+  const [anchor, setAnchor] = useState(() => new Date());
+  const weekDates = useMemo(() => weekDatesOf(anchor), [anchor]);
+  const weekKey = weekDates[0];
+  const nextWeekStart = toYMD(new Date(ymdToDate(weekKey).getTime() + 7 * 86400000));
+  const canGoNext = nextWeekStart <= todayStr;
 
   const [students, setStudents] = useState<StudentRow[]>([]);
-  const [register, setRegister] = useState<RegisterData>({});
+  const [studentsError, setStudentsError] = useState<string | null>(null);
   const [loadingStudents, setLoadingStudents] = useState(true);
+  const [register, setRegister] = useState<Register>({});
   const [loadingDates, setLoadingDates] = useState<Record<string, boolean>>({});
+  const [failedDates, setFailedDates] = useState<string[]>([]);
   const [saving, setSaving] = useState(false);
 
-  // ── Load students once ───────────────────────────────────────────────────
-  useEffect(() => {
-    loadStudents();
-  }, []);
-
-  // ── Load attendance whenever week changes ────────────────────────────────
-  useEffect(() => {
-    if (students.length) loadWeekAttendance();
-  }, [weekAnchor, students]);
-
-  const loadStudents = async () => {
+  /* ───────────── load students ───────────── */
+  const loadStudents = useCallback(async () => {
+    if (!teacher_id || !subjectId) {
+      setLoadingStudents(false);
+      return;
+    }
+    setLoadingStudents(true);
+    setStudentsError(null);
     try {
-      setLoadingStudents(true);
-      const res = await fetch(
-        `${API_URL}/api/reports/students/search?teacher_id=${teacher_id}&subject_id=${subjectId}&query=&limit=200`
-      );
-      const json = await res.json();
-      if (json.success) {
-        const sorted = (json.students as StudentRow[]).sort((a, b) => {
-          const ra = a.roll_no || "zzz";
-          const rb = b.roll_no || "zzz";
-          return ra.localeCompare(rb, undefined, { numeric: true });
-        });
-        setStudents(sorted);
-      }
-    } catch (e) {
-      console.log("LOAD STUDENTS ERROR:", e);
+      const res = await apiFetch(`${API_URL}/api/reports/students/search?teacher_id=${enc(teacher_id)}&subject_id=${enc(subjectId)}&query=&limit=${STUDENT_LIMIT}`);
+      let json: any = null;
+      try {
+        json = JSON.parse(await res.text());
+      } catch {}
+      if (!res.ok || !json?.success) throw new Error(json?.error || `status ${res.status}`);
+      const sorted = [...(json.students as StudentRow[])].sort((a, b) => (a.roll_no || "zzz").localeCompare(b.roll_no || "zzz", undefined, { numeric: true }));
+      setStudents(sorted);
+    } catch {
+      setStudentsError("Could not load the class list. Check your connection.");
     } finally {
       setLoadingStudents(false);
     }
-  };
+  }, [teacher_id, subjectId]);
 
-  const loadWeekAttendance = async () => {
-    const todayStr = toYMD(today);
-    const datesToFetch = weekDates.filter((d) => d <= todayStr);
-    if (!datesToFetch.length) return;
+  useEffect(() => {
+    loadStudents();
+  }, [loadStudents]);
 
-    setLoadingDates(Object.fromEntries(datesToFetch.map((d) => [d, true])));
+  /* ───────────── load the visible week ───────────── */
+  const loadWeek = useCallback(async () => {
+    const dates = weekDates.filter((d) => d <= todayStr);
+    if (!students.length || !dates.length) return;
+    setLoadingDates((p) => ({ ...p, ...Object.fromEntries(dates.map((d) => [d, true])) }));
 
-    const newRegister: RegisterData = {};
-    students.forEach((s) => { newRegister[s.uid] = {}; });
-
-    await Promise.all(
-      datesToFetch.map(async (date) => {
+    const results = await Promise.all(
+      dates.map(async (date) => {
         try {
-          const res = await fetch(
-            `${API_URL}/api/reports/attendance/by-date?teacher_id=${teacher_id}&subject_id=${subjectId}&date=${date}`
-          );
-          const json = await res.json();
-          if (json.success) {
-            (json.students as any[]).forEach((row) => {
-              if (newRegister[row.uid]) {
-                newRegister[row.uid][date] = { status: row.status as Status, dirty: false };
-              }
-            });
-          }
-        } catch (e) {
-          console.log(`DATE LOAD ERROR ${date}:`, e);
-        } finally {
-          setLoadingDates((prev) => ({ ...prev, [date]: false }));
+          const res = await apiFetch(`${API_URL}/api/reports/attendance/by-date?teacher_id=${enc(teacher_id)}&subject_id=${enc(subjectId)}&date=${date}`);
+          let json: any = null;
+          try {
+            json = JSON.parse(await res.text());
+          } catch {}
+          if (!res.ok || !json?.success) throw new Error("bad");
+          return { date, rows: json.students as { uid: string; status: Status }[], ok: true };
+        } catch {
+          return { date, rows: [] as { uid: string; status: Status }[], ok: false };
         }
       })
     );
 
-    setRegister(newRegister);
-  };
-
-  // ── Toggle cell ──────────────────────────────────────────────────────────
-  const cycleStatus = (uid: string, date: string) => {
-    if (date > toYMD(today)) return; // can't mark future
-    const current = register[uid]?.[date]?.status;
-    if (current === "od") return; // OD cells are locked — approved by teacher
-    // Only 2 states: present ↔ absent. null/no_class → present on first tap.
-    const next: Status = (current === "present") ? "absent" : "present";
-
-    setRegister((prev) => ({
-      ...prev,
-      [uid]: {
-        ...(prev[uid] || {}),
-        [date]: { status: next, dirty: true },
-      },
-    }));
-  };
-
-  // ── Mark entire column (date) ────────────────────────────────────────────
-  const markAllPresent = (date: string, checked: boolean) => {
+    // Merge, never replace: cells the teacher changed but has not saved yet survive a reload or a week change.
     setRegister((prev) => {
-      const next = { ...prev };
-      students.forEach((s) => {
-        const existing = next[s.uid]?.[date];
-        if (existing?.status === "od") return; // never overwrite approved OD
-        next[s.uid] = {
-          ...(next[s.uid] || {}),
-          [date]: {
-            status: checked ? "present" : "absent",
-            dirty: existing?.status !== (checked ? "present" : "absent"),
-          },
-        };
+      const next: Register = {};
+      students.forEach((s) => (next[s.uid] = { ...(prev[s.uid] || {}) }));
+      results.forEach(({ date, rows, ok }) => {
+        if (!ok) return;
+        rows.forEach((row) => {
+          const mine = next[row.uid];
+          if (!mine || mine[date]?.dirty) return;
+          mine[date] = { status: row.status, dirty: false };
+        });
       });
       return next;
     });
+    setFailedDates((prev) => [...prev.filter((d) => !dates.includes(d)), ...results.filter((r) => !r.ok).map((r) => r.date)]);
+    setLoadingDates((p) => ({ ...p, ...Object.fromEntries(dates.map((d) => [d, false])) }));
+  }, [weekDates, students, teacher_id, subjectId, todayStr]);
+
+  useEffect(() => {
+    loadWeek();
+  }, [loadWeek]);
+
+  /* ───────────── editing ───────────── */
+  // A day without a lecture cannot be marked (the server refuses it, and it would push attendance past 100%).
+  const noLecture = (date: string) => students.length > 0 && students.every((s) => register[s.uid]?.[date]?.status === "no_class");
+  const locked = (date: string) => date > todayStr || failedDates.includes(date) || !!loadingDates[date] || noLecture(date);
+
+  const toggleCell = (uid: string, date: string) => {
+    if (locked(date) || saving) return;
+    const cur = register[uid]?.[date]?.status;
+    if (cur === "od" || cur === "no_class") return; // OD is never overwritten here; no lecture that day means nothing to mark
+    const next: Status = cur === "present" ? "absent" : "present";
+    setRegister((p) => ({ ...p, [uid]: { ...(p[uid] || {}), [date]: { status: next, dirty: true } } }));
   };
 
-  const isAllPresent = (date: string) =>
+  const allPresent = (date: string) =>
     students.length > 0 &&
+    register[students[0].uid]?.[date]?.status !== "no_class" &&
     students.every((s) => {
       const st = register[s.uid]?.[date]?.status;
       return st === "present" || st === "od";
     });
 
-  // ── Save dirty cells ─────────────────────────────────────────────────────
-  const saveChanges = async () => {
-    const dirty: { uid: string; date: string; status: string }[] = [];
-    Object.entries(register).forEach(([uid, dates]) => {
-      Object.entries(dates).forEach(([date, cell]) => {
-        if (cell.dirty && cell.status && cell.status !== "no_class") {
-          dirty.push({ uid, date, status: cell.status });
-        }
+  const setColumn = (date: string, present: boolean) => {
+    if (locked(date) || saving) return;
+    const target: Status = present ? "present" : "absent";
+    setRegister((p) => {
+      const next: Register = { ...p };
+      students.forEach((s) => {
+        const existing = next[s.uid]?.[date];
+        if (existing?.status === "od") return;
+        next[s.uid] = { ...(next[s.uid] || {}), [date]: { status: target, dirty: existing?.status !== target || !!existing?.dirty } };
       });
+      return next;
     });
+  };
 
-    if (!dirty.length) {
-      Alert.alert("Nothing to save", "No attendance changes to save.");
-      return;
-    }
-
-    setSaving(true);
-    let successCount = 0;
-    let failCount = 0;
-
-    await Promise.all(
-      dirty.map(async ({ uid, date, status }) => {
-        try {
-          const res = await fetch(`${API_URL}/api/reports/attendance/manual`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              teacher_id,
-              subject_id: subjectId,
-              student_uid: uid,
-              date,
-              status,
-            }),
-          });
-          const json = await res.json();
-          if (json.success) {
-            successCount++;
-            // clear dirty flag
-            setRegister((prev) => ({
-              ...prev,
-              [uid]: {
-                ...(prev[uid] || {}),
-                [date]: { status: status as Status, dirty: false },
-              },
-            }));
-          } else {
-            failCount++;
-          }
-        } catch {
-          failCount++;
-        }
+  const dirtyList = useMemo(() => {
+    const out: { uid: string; date: string; status: "present" | "absent" }[] = [];
+    Object.entries(register).forEach(([uid, dates]) =>
+      Object.entries(dates).forEach(([date, c]) => {
+        if (c.dirty && (c.status === "present" || c.status === "absent")) out.push({ uid, date, status: c.status });
       })
     );
+    return out;
+  }, [register]);
+  const dirtyCount = dirtyList.length;
 
+  const save = async () => {
+    if (saving || dirtyCount === 0) return;
+    setSaving(true);
+    const saved: { uid: string; date: string; status: "present" | "absent" }[] = [];
+    let failed = 0;
+    // A few requests at a time, so a full class does not fire 60 calls at once.
+    for (let i = 0; i < dirtyList.length; i += SAVE_BATCH) {
+      await Promise.all(
+        dirtyList.slice(i, i + SAVE_BATCH).map(async (item) => {
+          try {
+            const res = await apiFetch(`${API_URL}/api/reports/attendance/manual`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ teacher_id, subject_id: subjectId, student_uid: item.uid, date: item.date, status: item.status }),
+            });
+            let json: any = null;
+            try {
+              json = JSON.parse(await res.text());
+            } catch {}
+            if (res.ok && json?.success) saved.push(item);
+            else failed++;
+          } catch {
+            failed++;
+          }
+        })
+      );
+    }
+    setRegister((p) => {
+      const next: Register = { ...p };
+      saved.forEach(({ uid, date, status }) => {
+        next[uid] = { ...(next[uid] || {}), [date]: { status, dirty: false } };
+      });
+      return next;
+    });
     setSaving(false);
-    if (failCount === 0) {
-      Alert.alert(" Saved", `${successCount} record(s) saved successfully.`);
-    } else {
-      Alert.alert(
-        "Partial Save",
-        `${successCount} saved, ${failCount} failed. Please retry.`
-      );
-    }
+    if (failed === 0) Alert.alert("Saved", `${saved.length} record${saved.length === 1 ? "" : "s"} saved.`);
+    else Alert.alert("Some changes were not saved", `${saved.length} saved, ${failed} failed. The failed ones are still marked, so you can tap Save again.`);
   };
 
-  const dirtyCount = Object.values(register)
-    .flatMap((dates) => Object.values(dates))
-    .filter((c) => c.dirty).length;
+  // Warn before leaving with unsaved changes.
+  useEffect(() => {
+    const unsub = navigation.addListener("beforeRemove", (e: any) => {
+      if (dirtyCount === 0) return;
+      e.preventDefault();
+      Alert.alert("Discard unsaved changes?", `${dirtyCount} change${dirtyCount === 1 ? "" : "s"} have not been saved.`, [
+        { text: "Keep editing", style: "cancel" },
+        { text: "Discard", style: "destructive", onPress: () => navigation.dispatch(e.data.action) },
+      ]);
+    });
+    return unsub;
+  }, [navigation, dirtyCount]);
 
-  // ── Cell render ──────────────────────────────────────────────────────────
-  const renderCell = (uid: string, date: string) => {
-    const todayStr = toYMD(today);
-    const isFuture = date > todayStr;
-    const cell = register[uid]?.[date];
-    const status = cell?.status ?? null;
-    const isDirty = cell?.dirty ?? false;
-
-    if (isFuture) {
-      return (
-        <View key={date} style={[S.cell, S.cellFuture]}>
-          <Text style={S.cellFutureText}>—</Text>
-        </View>
-      );
-    }
-
-    let bg = "#F3F4F6";
-    let icon: string | null = null;
-    let iconColor = GREY;
-    const isOD = status === "od";
-
-    if (status === "present") { bg = "#DCFCE7"; icon = "checkmark"; iconColor = GREEN; }
-    else if (status === "absent") { bg = "#FEE2E2"; icon = "close"; iconColor = RED; }
-    else if (isOD) { bg = "#EDE9FE"; icon = "shield-checkmark"; iconColor = "#7C3AED"; }
-    // null and no_class both show as empty dot
-
+  /* ───────────── render ───────────── */
+  if (!teacher_id || !subjectId) {
     return (
-      <TouchableOpacity
-        key={date}
-        style={[S.cell, { backgroundColor: bg }, isDirty && S.cellDirty, isOD && S.cellOD]}
-        onPress={() => cycleStatus(uid, date)}
-        activeOpacity={isOD ? 1 : 0.7}
-      >
-        {icon ? (
-          <Ionicons name={icon as any} size={isOD ? 14 : 18} color={iconColor} />
-        ) : (
-          <View style={S.emptyDot} />
-        )}
-        {isOD && <Text style={S.cellODLabel}>OD</Text>}
-        {isDirty && <View style={S.dirtyDot} />}
-      </TouchableOpacity>
+      <Screen>
+        <Header title="Attendance register" onBack={() => navigation.goBack()} />
+        <EmptyState icon="alert-circle-outline" title="Subject not selected" text="Go back and choose a subject again." />
+      </Screen>
     );
-  };
+  }
 
   if (loadingStudents) {
     return (
-      <SafeAreaView style={S.safe}>
-        <View style={S.center}>
-          <ActivityIndicator size="large" color={PRIMARY} />
-          <Text style={S.loadingText}>Loading class list…</Text>
+      <Screen>
+        <Header title={subject?.subject_name || "Attendance register"} onBack={() => navigation.goBack()} />
+        <View style={st.center}>
+          <ActivityIndicator size="large" color={T.primary} />
+          <Text style={font.small}>Loading class list...</Text>
         </View>
-      </SafeAreaView>
+      </Screen>
+    );
+  }
+
+  if (studentsError) {
+    return (
+      <Screen>
+        <Header title={subject?.subject_name || "Attendance register"} onBack={() => navigation.goBack()} />
+        <EmptyState icon="cloud-offline-outline" title="Could not load" text={studentsError} />
+        <View style={{ paddingHorizontal: SP.xl }}>
+          <Button label="Try again" icon="refresh" variant="secondary" onPress={loadStudents} />
+        </View>
+      </Screen>
     );
   }
 
   return (
-    <SafeAreaView style={S.safe}>
-      {/* ── HEADER ──────────────────────────────────────────────────────── */}
-      <View style={S.header}>
-        <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="arrow-back" size={22} color={DARK} />
-        </TouchableOpacity>
-        <View style={S.headerText}>
-          <Text style={S.headerTitle} numberOfLines={1}>{subject?.subject_name}</Text>
-          <Text style={S.headerSub}>Attendance Register · {students.length} Students</Text>
-        </View>
-        {dirtyCount > 0 && (
-          <TouchableOpacity
-            style={[S.saveBtn, saving && S.saveBtnDisabled]}
-            onPress={saveChanges}
-            disabled={saving}
-          >
-            {saving ? (
-              <ActivityIndicator size="small" color={WHITE} />
-            ) : (
-              <>
-                <Ionicons name="save-outline" size={16} color={WHITE} />
-                <Text style={S.saveBtnText}>Save ({dirtyCount})</Text>
-              </>
-            )}
-          </TouchableOpacity>
-        )}
+    <Screen>
+      <Header title={subject?.subject_name || "Attendance register"} subtitle={`${students.length} students`} onBack={() => navigation.goBack()} />
+
+      {/* week navigator */}
+      <View style={st.weekNav}>
+        <Pressable style={st.arrow} onPress={() => setAnchor((a) => new Date(a.getFullYear(), a.getMonth(), a.getDate() - 7))} accessibilityLabel="Previous week">
+          <Ionicons name="chevron-back" size={20} color={T.primary} />
+        </Pressable>
+        <Pressable onPress={() => setAnchor(new Date())} accessibilityLabel="Go to this week">
+          <Text style={font.h3}>
+            {dayMonth(weekDates[0])} to {dayMonth(weekDates[5])}
+          </Text>
+        </Pressable>
+        <Pressable style={[st.arrow, !canGoNext && { backgroundColor: T.lineSoft }]} disabled={!canGoNext} onPress={() => setAnchor((a) => new Date(a.getFullYear(), a.getMonth(), a.getDate() + 7))} accessibilityLabel="Next week">
+          <Ionicons name="chevron-forward" size={20} color={canGoNext ? T.primary : T.line} />
+        </Pressable>
       </View>
 
-      {/* ── WEEK NAVIGATOR ──────────────────────────────────────────────── */}
-      <View style={S.weekNav}>
-        <TouchableOpacity style={S.weekArrow} onPress={() => setWeekAnchor((a) => addWeeks(a, -1))}>
-          <Ionicons name="chevron-back" size={20} color={PRIMARY} />
-        </TouchableOpacity>
-        <Text style={S.weekLabel}>
-          {fmtDate(weekDates[0])} – {fmtDate(weekDates[5])}
-        </Text>
-        <TouchableOpacity
-          style={[S.weekArrow, isFutureWeek && S.weekArrowDisabled]}
-          onPress={() => !isFutureWeek && setWeekAnchor((a) => addWeeks(a, 1))}
-          disabled={isFutureWeek}
-        >
-          <Ionicons name="chevron-forward" size={20} color={isFutureWeek ? BORDER : PRIMARY} />
-        </TouchableOpacity>
-      </View>
-
-      {/* ── LEGEND ──────────────────────────────────────────────────────── */}
-      <View style={S.legend}>
+      {/* legend */}
+      <View style={st.legend}>
         {[
-          { color: "#DCFCE7", icon: "checkmark",       iconColor: GREEN,     label: "Present"     },
-          { color: "#FEE2E2", icon: "close",            iconColor: RED,       label: "Absent"      },
-          { color: "#EDE9FE", icon: "shield-checkmark", iconColor: "#7C3AED", label: "OD"          },
-          { color: "#F3F4F6", icon: "ellipse",          iconColor: BORDER,    label: "Unrecorded"  },
+          { bg: T.successSoft, icon: "checkmark" as const, color: T.success, label: "Present" },
+          { bg: T.dangerSoft, icon: "close" as const, color: T.danger, label: "Absent" },
+          { bg: T.primarySoft, icon: "shield-checkmark" as const, color: T.primary, label: "OD" },
+          { bg: T.lineSoft, icon: "ellipse" as const, color: T.line, label: "Not marked" },
+          { bg: "#FAFBFD", icon: "remove" as const, color: T.line, label: "No lecture" },
         ].map((l) => (
-          <View key={l.label} style={S.legendItem}>
-            <View style={[S.legendDot, { backgroundColor: l.color }]}>
-              <Ionicons name={l.icon as any} size={10} color={l.iconColor} />
+          <View key={l.label} style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+            <View style={[st.legendBox, { backgroundColor: l.bg }]}>
+              <Ionicons name={l.icon} size={10} color={l.color} />
             </View>
-            <Text style={S.legendText}>{l.label}</Text>
+            <Text style={font.small}>{l.label}</Text>
           </View>
         ))}
-        <Text style={S.legendHint}>Tap cell to cycle</Text>
       </View>
 
-      {/* ── REGISTER TABLE ──────────────────────────────────────────────── */}
-      <ScrollView horizontal showsHorizontalScrollIndicator={false} style={S.tableScroll}>
-        <View>
-          {/* ── Column headers ── */}
-          <View style={S.headerRow}>
-            <View style={S.nameCol}>
-              <Text style={S.colHeaderText}>Student</Text>
-            </View>
-            {weekDates.map((date) => {
-              const todayStr = toYMD(today);
-              const isFuture = date > todayStr;
-              const isToday = date === todayStr;
-              const allPresent = isAllPresent(date);
-              const isLoading = loadingDates[date];
+      {failedDates.length > 0 && (
+        <Banner tone="warning" style={{ marginHorizontal: SP.lg, marginTop: SP.sm }}>
+          Could not load {failedDates.map(dayMonth).join(", ")}. Those columns are locked so nothing gets overwritten.
+          <Text onPress={loadWeek} style={{ fontWeight: "800", color: T.warning }}>
+            {"  "}Retry
+          </Text>
+        </Banner>
+      )}
+      {students.length >= STUDENT_LIMIT && (
+        <Banner tone="info" style={{ marginHorizontal: SP.lg, marginTop: SP.sm }}>
+          Showing the first {STUDENT_LIMIT} students.
+        </Banner>
+      )}
 
+      {students.length === 0 ? (
+        <EmptyState icon="people-outline" title="No students" text="Nobody is enrolled in this subject yet." />
+      ) : (
+        <View style={{ flex: 1, marginTop: SP.sm }}>
+          {/* column headers */}
+          <View style={st.headRow}>
+            <View style={[st.nameCol, { width: NAME_W }]}>
+              <Text style={font.label}>Student</Text>
+            </View>
+            {weekDates.map((d) => {
+              const future = d > todayStr;
+              const today = d === todayStr;
+              const all = allPresent(d);
               return (
-                <View key={date} style={[S.dateCol, isToday && S.dateTodayCol]}>
-                  <Text style={[S.dayText, isToday && { color: PRIMARY }]}>{fmtDay(date)}</Text>
-                  <Text style={[S.dateText, isToday && { color: PRIMARY, fontWeight: "800" }]}>
-                    {fmtDate(date)}
-                  </Text>
-                  {isLoading ? (
-                    <ActivityIndicator size="small" color={PRIMARY} style={{ marginTop: 4 }} />
-                  ) : !isFuture ? (
-                    <TouchableOpacity
-                      style={[S.checkAllBtn, allPresent && S.checkAllBtnActive]}
-                      onPress={() => markAllPresent(date, !allPresent)}
-                    >
-                      {allPresent ? (
-                        <Ionicons name="checkmark" size={12} color={WHITE} />
-                      ) : (
-                        <View style={S.checkAllEmpty} />
-                      )}
-                    </TouchableOpacity>
-                  ) : (
+                <View key={d} style={[st.dateCol, { width: cellW }, today && { backgroundColor: T.primarySoft }]}>
+                  <Text style={[st.dayTxt, today && { color: T.primary }]}>{dayName(d)}</Text>
+                  <Text style={[st.dateTxt, today && { color: T.primary }]}>{dayMonth(d)}</Text>
+                  {loadingDates[d] ? (
+                    <ActivityIndicator size="small" color={T.primary} style={{ marginTop: 4 }} />
+                  ) : future ? (
                     <View style={{ height: 22, marginTop: 4 }} />
+                  ) : (
+                    <Pressable
+                      onPress={() => setColumn(d, !all)}
+                      disabled={locked(d)}
+                      hitSlop={6}
+                      accessibilityRole="checkbox"
+                      accessibilityState={{ checked: all, disabled: locked(d) }}
+                      accessibilityLabel={`Mark everyone ${all ? "absent" : "present"} on ${dayName(d)} ${dayMonth(d)}`}
+                      style={[st.colCheck, all && { backgroundColor: T.success, borderColor: T.success }, locked(d) && { opacity: 0.35 }]}
+                    >
+                      {all && <Ionicons name="checkmark" size={12} color="#fff" />}
+                    </Pressable>
                   )}
                 </View>
               );
             })}
           </View>
 
-          {/* ── Student rows ── */}
-          <ScrollView showsVerticalScrollIndicator={false} style={S.bodyScroll}>
-            {students.map((student, idx) => (
-              <View
-                key={student.uid}
-                style={[S.studentRowR, idx % 2 === 0 && S.studentRowAlt]}
-              >
-                {/* Name column */}
-                <View style={S.nameCol}>
-                  <Text style={S.rollText}>{student.roll_no || `#${idx + 1}`}</Text>
-                  <Text style={S.nameText} numberOfLines={1}>{student.name}</Text>
+          {/* rows */}
+          <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={{ paddingBottom: dirtyCount > 0 ? 100 : 30 }}>
+            {students.map((s, idx) => (
+              <View key={s.uid} style={[st.row, idx % 2 === 1 && { backgroundColor: "#FAFBFD" }]}>
+                <View style={[st.nameCol, { width: NAME_W }]}>
+                  <Text style={st.roll} numberOfLines={1}>
+                    {s.roll_no || `#${idx + 1}`}
+                  </Text>
+                  <Text style={st.name} numberOfLines={1}>
+                    {s.name}
+                  </Text>
                 </View>
-
-                {/* Date cells */}
-                {weekDates.map((date) => renderCell(student.uid, date))}
+                {weekDates.map((d) => (
+                  <AttCell key={d} width={cellW} date={d} future={d > todayStr} blocked={failedDates.includes(d)} cell={register[s.uid]?.[d]} label={`${s.name}, ${dayName(d)} ${dayMonth(d)}`} onPress={() => toggleCell(s.uid, d)} />
+                ))}
               </View>
             ))}
           </ScrollView>
         </View>
-      </ScrollView>
+      )}
 
-      {/* ── FLOATING SAVE HINT ──────────────────────────────────────────── */}
       {dirtyCount > 0 && (
-        <View style={S.saveBanner}>
-          <Ionicons name="ellipse" size={10} color={AMBER} />
-          <Text style={S.saveBannerText}>
-            {dirtyCount} unsaved change{dirtyCount > 1 ? "s" : ""} · Tap Save to confirm
-          </Text>
+        <View style={st.saveBar}>
+          <View style={{ flex: 1 }}>
+            <Text style={{ fontSize: 14, fontWeight: "800", color: T.ink }}>
+              {dirtyCount} unsaved change{dirtyCount === 1 ? "" : "s"}
+            </Text>
+            <Text style={font.small}>Tap Save to confirm</Text>
+          </View>
+          <Button label="Save" icon="save-outline" size="md" onPress={save} loading={saving} />
         </View>
       )}
-    </SafeAreaView>
+    </Screen>
   );
 }
 
-const S = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: BG },
-  center: { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
-  loadingText: { fontSize: 14, color: GREY },
+function AttCell({ width, future, blocked, cell, label, onPress }: { width: number; date: string; future: boolean; blocked: boolean; cell?: Cell; label: string; onPress: () => void }) {
+  if (future) {
+    return (
+      <View style={[st.cell, { width, backgroundColor: "#FAFBFD" }]}>
+        <Text style={{ color: T.line, fontSize: 16 }}>-</Text>
+      </View>
+    );
+  }
+  if (blocked) {
+    return (
+      <View style={[st.cell, { width, backgroundColor: T.warningSoft }]}>
+        <Ionicons name="alert-circle-outline" size={16} color={T.warning} />
+      </View>
+    );
+  }
+  const status = cell?.status ?? null;
+  if (status === "no_class") {
+    return (
+      <View style={[st.cell, { width, backgroundColor: "#FAFBFD" }]} accessibilityLabel={`${label}: no lecture`}>
+        <Text style={{ color: T.line, fontSize: 16 }}>-</Text>
+      </View>
+    );
+  }
+  const od = status === "od";
+  const bg = status === "present" ? T.successSoft : status === "absent" ? T.dangerSoft : od ? T.primarySoft : T.lineSoft;
+  const text = status === "present" ? "present" : status === "absent" ? "absent" : od ? "on duty" : "not marked";
+  return (
+    <Pressable onPress={onPress} disabled={od} accessibilityRole="button" accessibilityLabel={`${label}: ${text}`} style={[st.cell, { width, backgroundColor: bg }, cell?.dirty && st.cellDirty]}>
+      {status === "present" ? (
+        <Ionicons name="checkmark" size={18} color={T.success} />
+      ) : status === "absent" ? (
+        <Ionicons name="close" size={18} color={T.danger} />
+      ) : od ? (
+        <>
+          <Ionicons name="shield-checkmark" size={14} color={T.primary} />
+          <Text style={st.odTxt}>OD</Text>
+        </>
+      ) : (
+        <View style={st.dot} />
+      )}
+      {cell?.dirty && <View style={st.dirtyDot} />}
+    </Pressable>
+  );
+}
 
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 14,
-    paddingTop: 10,
-    paddingBottom: 10,
-    backgroundColor: WHITE,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-    gap: 10,
-  },
-  backBtn: {
-    width: 36, height: 36, borderRadius: 12, backgroundColor: BG,
-    justifyContent: "center", alignItems: "center",
-  },
-  headerText: { flex: 1 },
-  headerTitle: { fontSize: 16, fontWeight: "800", color: DARK },
-  headerSub: { fontSize: 11, color: GREY, marginTop: 2 },
+const st = StyleSheet.create({
+  center: { flex: 1, alignItems: "center", justifyContent: "center", gap: SP.md },
+  weekNav: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: SP.xl, paddingVertical: SP.sm, backgroundColor: T.surface, borderBottomWidth: 1, borderBottomColor: T.line },
+  arrow: { width: 38, height: 38, borderRadius: 12, backgroundColor: T.primarySoft, alignItems: "center", justifyContent: "center" },
+  legend: { flexDirection: "row", flexWrap: "wrap", gap: SP.md, paddingHorizontal: SP.lg, paddingVertical: SP.sm, backgroundColor: T.surface, borderBottomWidth: 1, borderBottomColor: T.line },
+  legendBox: { width: 18, height: 18, borderRadius: 5, alignItems: "center", justifyContent: "center" },
 
-  saveBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: PRIMARY,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 20,
-  },
-  saveBtnDisabled: { opacity: 0.6 },
-  saveBtnText: { color: WHITE, fontWeight: "700", fontSize: 13 },
+  headRow: { flexDirection: "row", backgroundColor: T.surface, borderBottomWidth: 2, borderBottomColor: T.line },
+  nameCol: { paddingHorizontal: SP.md, paddingVertical: SP.sm, justifyContent: "center", borderRightWidth: 1, borderRightColor: T.line },
+  dateCol: { alignItems: "center", paddingVertical: SP.sm, borderRightWidth: 1, borderRightColor: T.line },
+  dayTxt: { fontSize: 10, fontWeight: "700", color: T.muted, textTransform: "uppercase" },
+  dateTxt: { fontSize: 12.5, fontWeight: "800", color: T.ink, marginTop: 1 },
+  colCheck: { width: 22, height: 22, borderRadius: 6, borderWidth: 2, borderColor: T.success, marginTop: 4, alignItems: "center", justifyContent: "center" },
 
-  weekNav: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    backgroundColor: WHITE,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-  },
-  weekArrow: {
-    width: 36, height: 36, borderRadius: 10, backgroundColor: PRIMARY_SOFT,
-    justifyContent: "center", alignItems: "center",
-  },
-  weekArrowDisabled: { backgroundColor: BG },
-  weekLabel: { fontSize: 15, fontWeight: "700", color: DARK },
+  row: { flexDirection: "row", height: ROW_H, borderBottomWidth: 1, borderBottomColor: T.lineSoft, backgroundColor: T.surface },
+  roll: { fontSize: 10, fontWeight: "700", color: T.primary },
+  name: { fontSize: 12.5, fontWeight: "600", color: T.ink, marginTop: 1 },
 
-  legend: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    backgroundColor: WHITE,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-  },
-  legendItem: { flexDirection: "row", alignItems: "center", gap: 4 },
-  legendDot: { width: 18, height: 18, borderRadius: 5, justifyContent: "center", alignItems: "center" },
-  legendText: { fontSize: 11, color: GREY },
-  legendHint: { marginLeft: "auto", fontSize: 10, color: BORDER, fontStyle: "italic" },
+  cell: { height: ROW_H, alignItems: "center", justifyContent: "center", borderRightWidth: 1, borderRightColor: T.lineSoft },
+  cellDirty: { borderWidth: 1.5, borderColor: T.warning },
+  dot: { width: 7, height: 7, borderRadius: 4, backgroundColor: T.line },
+  dirtyDot: { position: "absolute", top: 5, right: 5, width: 6, height: 6, borderRadius: 3, backgroundColor: T.warning },
+  odTxt: { fontSize: 8, fontWeight: "800", color: T.primary, marginTop: 1 },
 
-  tableScroll: { flex: 1 },
-
-  headerRow: {
-    flexDirection: "row",
-    backgroundColor: "#F8FAFC",
-    borderBottomWidth: 2,
-    borderBottomColor: BORDER,
-  },
-  nameCol: {
-    width: 130,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    justifyContent: "center",
-    borderRightWidth: 1,
-    borderRightColor: BORDER,
-  },
-  colHeaderText: { fontSize: 12, fontWeight: "800", color: GREY, textTransform: "uppercase", letterSpacing: 0.5 },
-  dateCol: {
-    width: CELL_W,
-    alignItems: "center",
-    paddingVertical: 8,
-    borderRightWidth: 1,
-    borderRightColor: BORDER,
-  },
-  dateTodayCol: { backgroundColor: PRIMARY_SOFT },
-  dayText: { fontSize: 10, fontWeight: "700", color: GREY, textTransform: "uppercase" },
-  dateText: { fontSize: 13, fontWeight: "700", color: DARK, marginTop: 2 },
-  checkAllBtn: {
-    width: 22, height: 22, borderRadius: 6, borderWidth: 2,
-    borderColor: GREEN, marginTop: 4, justifyContent: "center", alignItems: "center",
-  },
-  checkAllBtnActive: { backgroundColor: GREEN, borderColor: GREEN },
-  checkAllEmpty: { width: 10, height: 10 },
-
-  bodyScroll: { maxHeight: 560 },
-  studentRowR: {
-    flexDirection: "row",
-    height: ROW_H,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-    backgroundColor: WHITE,
-  },
-  studentRowAlt: { backgroundColor: "#FAFAFA" },
-  rollText: { fontSize: 10, fontWeight: "700", color: PRIMARY },
-  nameText: { fontSize: 13, fontWeight: "600", color: DARK, marginTop: 1 },
-
-  cell: {
-    width: CELL_W,
-    height: ROW_H,
-    justifyContent: "center",
-    alignItems: "center",
-    borderRightWidth: 1,
-    borderRightColor: BORDER,
-    position: "relative",
-  },
-  cellFuture: { backgroundColor: "#FAFAFA" },
-  cellFutureText: { fontSize: 16, color: BORDER },
-  cellDirty: { borderWidth: 1.5, borderColor: AMBER },
-  emptyDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: BORDER },
-  dirtyDot: {
-    position: "absolute",
-    top: 5,
-    right: 5,
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: AMBER,
-  },
-
-  saveBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: "#FFFBEB",
-    borderTopWidth: 1,
-    borderTopColor: "#FEF3C7",
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-  },
-  saveBannerText: { fontSize: 13, color: AMBER, fontWeight: "600" },
-
-  // OD cell — locked, purple tint
-  cellOD: {
-    borderWidth: 1,
-    borderColor: "#7C3AED" + "44",
-  },
-  cellODLabel: {
-    fontSize: 8,
-    fontWeight: "800",
-    color: "#7C3AED",
-    letterSpacing: 0.5,
-    marginTop: 1,
-  },
+  saveBar: { position: "absolute", left: 0, right: 0, bottom: 0, flexDirection: "row", alignItems: "center", gap: SP.md, backgroundColor: T.surface, borderTopWidth: 1, borderTopColor: T.line, paddingHorizontal: SP.lg, paddingVertical: SP.md },
 });

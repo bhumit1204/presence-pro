@@ -1,187 +1,170 @@
-import React, { useEffect, useState, useCallback } from "react";
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useRoute, useNavigation } from "@react-navigation/native";
+// screens/quiz/student/StudentQuizResult.tsx — full review of a past submission
+import React, { useCallback, useEffect, useState } from "react";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { useNavigation, useRoute } from "@react-navigation/native";
+import { apiFetch } from "../../../services/api";
 import { auth } from "../../../services/firebase";
-import {
-  PRIMARY, PRIMARY_LIGHT, BG, GREEN, GREEN_LIGHT,
-  RED, RED_LIGHT, AMBER, AMBER_LIGHT, GREY,
-  API_URL, GradedAnswer,
-} from "./components/studentQuizConstants";
+import { Button, Card, Chip, EmptyState, Header, Screen, SP, T, TONE, Tone, font } from "../../../components/ui";
+import { API_URL, GradedAnswer, readJson } from "./components/studentQuizConstants";
 import { QuizPageSkeleton } from "./components/QuizSkeleton";
 
 interface FullResult {
-  submission: {
-    total_marks:    number;
-    marks_obtained: number;
-    percentage:     number;
-    submitted_at:   string;
-    answers:        GradedAnswer[];
-  };
+  submission: { total_marks: number; marks_obtained: number; percentage: number; submitted_at: string; answers: GradedAnswer[] };
   quiz: { title: string; subject_name: string };
 }
 
-// ─── Answer review card (same visual as QuizResultScreen) ─────────────────────
 function AnswerCard({ ga, index }: { ga: GradedAnswer; index: number }) {
-  const correct = ga.is_correct;
+  const ok = ga.is_correct;
+  const c = TONE[ok ? "success" : "danger"];
   return (
-    <View style={[A.card, correct ? A.cardCorrect : A.cardWrong]}>
-      <View style={A.header}>
-        <View style={[A.badge, correct ? A.badgeOk : A.badgeNo]}>
-          <Text style={[A.badgeTxt, { color: correct ? GREEN : RED }]}>Q{index + 1}</Text>
+    <View style={[st.ans, { borderColor: c.fg }]}>
+      <View style={st.ansHead}>
+        <View style={[st.badge, { backgroundColor: c.bg }]}>
+          <Ionicons name={ok ? "checkmark" : "close"} size={13} color={c.fg} />
+          <Text style={[st.badgeTxt, { color: c.fg }]}>Q{index + 1}</Text>
         </View>
-        <Text style={[A.score, { color: correct ? GREEN : RED }]}>
-          {ga.marks_obtained.toFixed(1)}/{ga.marks_possible}
+        <Text style={[st.score, { color: c.fg }]}>
+          {Number(ga.marks_obtained ?? 0).toFixed(1)}/{ga.marks_possible}
         </Text>
       </View>
-      <Text style={A.qText}>{ga.question_text}</Text>
+      <Text style={st.qText}>{ga.question_text}</Text>
 
-      <View style={[A.box, !ga.student_answer && A.emptyBox]}>
-        <Text style={A.boxLabel}>Your answer</Text>
-        <Text style={[A.boxText, !ga.student_answer && { color: GREY, fontStyle: "italic" }]}>
-          {ga.student_answer || "No answer provided"}
-        </Text>
+      <View style={st.box}>
+        <Text style={st.boxLabel}>Your answer</Text>
+        <Text style={[st.boxText, !ga.student_answer && { color: T.muted, fontStyle: "italic" }]}>{ga.student_answer || "No answer provided"}</Text>
       </View>
 
-      {!correct && ga.correct_answer && (
-        <View style={[A.box, A.correctBox]}>
-          <Text style={A.boxLabel}>Correct answer</Text>
-          <Text style={[A.boxText, { color: "#065F46" }]}>{ga.correct_answer}</Text>
+      {!ok && !!ga.correct_answer && (
+        <View style={[st.box, { backgroundColor: T.successSoft, borderColor: T.success }]}>
+          <Text style={st.boxLabel}>Correct answer</Text>
+          <Text style={[st.boxText, { color: "#065F46" }]}>{ga.correct_answer}</Text>
         </View>
       )}
 
-      {ga.feedback && <Text style={A.feedback}>💬 {ga.feedback}</Text>}
+      {!!ga.feedback && (
+        <View style={st.feedback}>
+          <Ionicons name="chatbubble-ellipses-outline" size={14} color={T.sub} />
+          <Text style={st.feedbackTxt}>{ga.feedback}</Text>
+        </View>
+      )}
     </View>
   );
 }
-const A = StyleSheet.create({
-  card:        { backgroundColor: "#FFF", borderRadius: 16, padding: 16, marginBottom: 12, borderWidth: 1.5, borderColor: "#E5E7EB" },
-  cardCorrect: { borderColor: GREEN },
-  cardWrong:   { borderColor: RED },
-  header:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 10 },
-  badge:       { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3, borderWidth: 1.5 },
-  badgeOk:     { backgroundColor: GREEN_LIGHT, borderColor: GREEN },
-  badgeNo:     { backgroundColor: RED_LIGHT, borderColor: RED },
-  badgeTxt:    { fontSize: 12, fontWeight: "800" },
-  score:       { fontSize: 14, fontWeight: "800" },
-  qText:       { fontSize: 15, fontWeight: "600", color: "#111827", lineHeight: 22, marginBottom: 10 },
-  box:         { backgroundColor: "#F9FAFB", borderRadius: 10, padding: 10, marginBottom: 6, borderWidth: 1, borderColor: "#E5E7EB" },
-  emptyBox:    { opacity: 0.6 },
-  correctBox:  { backgroundColor: GREEN_LIGHT, borderColor: GREEN },
-  boxLabel:    { fontSize: 10, fontWeight: "700", color: GREY, textTransform: "uppercase", letterSpacing: 0.5, marginBottom: 4 },
-  boxText:     { fontSize: 14, color: "#111827", lineHeight: 20 },
-  feedback:    { fontSize: 12, color: GREY, fontStyle: "italic", marginTop: 4 },
-});
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
 export default function StudentQuizResult() {
   const navigation = useNavigation<any>();
-  const route      = useRoute<any>();
-  const { quiz_id, quiz_title } = route.params as { quiz_id: string; quiz_title: string };
+  const { quiz_id, quiz_title } = (useRoute<any>().params || {}) as { quiz_id: string; quiz_title?: string };
 
-  const [data,    setData]    = useState<FullResult | null>(null);
+  const [data, setData] = useState<FullResult | null>(null);
   const [loading, setLoading] = useState(true);
-  const [notFound,setNotFound]= useState(false);
+  const [state, setState] = useState<"ok" | "none" | "error">("ok");
 
-  const fetchResult = useCallback(async () => {
+  const load = useCallback(async () => {
+    setLoading(true);
     try {
-      setLoading(true);
       const uid = auth.currentUser?.uid;
-      if (!uid) return;
-
-      const res  = await fetch(`${API_URL}/api/quizzes/${quiz_id}/result?student_uid=${uid}`);
-      const json = await res.json();
-
-      if (!json.success) { setNotFound(true); return; }
+      if (!uid || !quiz_id) {
+        setState("none");
+        return;
+      }
+      const res = await apiFetch(`${API_URL}/api/quizzes/${encodeURIComponent(quiz_id)}/result?student_uid=${encodeURIComponent(uid)}`);
+      const json = await readJson(res);
+      if (!json) {
+        setState("error");
+        return;
+      }
+      if (!json.success) {
+        // a missing submission is a normal answer; anything else is a failure worth retrying
+        setState(res.status === 404 || /submission|not found|attended/i.test(String(json.error)) ? "none" : "error");
+        return;
+      }
       setData(json);
-    } catch (e) {
-      setNotFound(true);
+      setState("ok");
+    } catch {
+      setState("error");
     } finally {
       setLoading(false);
     }
   }, [quiz_id]);
 
-  useEffect(() => { fetchResult(); }, [fetchResult]);
+  useEffect(() => {
+    load();
+  }, [load]);
 
-  if (loading) return (
-    <SafeAreaView style={S.safe}><QuizPageSkeleton /></SafeAreaView>
-  );
+  if (loading) {
+    return (
+      <Screen>
+        <Header title="Result" onBack={() => navigation.goBack()} />
+        <QuizPageSkeleton />
+      </Screen>
+    );
+  }
 
-  if (notFound || !data) return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      <ScrollView contentContainerStyle={S.content}>
-        <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={S.backIcon}>‹</Text>
-        </TouchableOpacity>
-        <View style={S.notFound}>
-          <Text style={S.notFoundEmoji}>📭</Text>
-          <Text style={S.notFoundTitle}>No submission found</Text>
-          <Text style={S.notFoundSub}>You haven't attended this quiz.</Text>
-        </View>
-      </ScrollView>
-    </SafeAreaView>
-  );
+  if (state !== "ok" || !data) {
+    return (
+      <Screen>
+        <Header title={quiz_title || "Result"} onBack={() => navigation.goBack()} />
+        {state === "error" ? (
+          <>
+            <EmptyState icon="cloud-offline-outline" title="Could not load result" text="Check your connection and try again." />
+            <View style={{ paddingHorizontal: SP.xl }}>
+              <Button label="Try again" icon="refresh" onPress={load} />
+            </View>
+          </>
+        ) : (
+          <EmptyState icon="file-tray-outline" title="No submission found" text="You have not attempted this quiz." />
+        )}
+      </Screen>
+    );
+  }
 
   const { submission, quiz } = data;
-  const correct   = submission.answers.filter((a) => a.is_correct).length;
-  const incorrect = submission.answers.length - correct;
-  const color     = submission.percentage >= 75 ? GREEN : submission.percentage >= 50 ? AMBER : RED;
+  const answers = submission.answers || [];
+  const correct = answers.filter((a) => a.is_correct).length;
+  const incorrect = answers.length - correct;
+  const pct = Number(submission.percentage) || 0;
+  const tone: Tone = pct >= 75 ? "success" : pct >= 50 ? "warning" : "danger";
+  const c = TONE[tone];
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      <ScrollView contentContainerStyle={S.content} showsVerticalScrollIndicator={false}>
-
-        <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={S.backIcon}>‹</Text>
-        </TouchableOpacity>
-
-        <Text style={S.title}>{quiz_title || quiz.title}</Text>
-        <Text style={S.sub}>{quiz.subject_name}</Text>
-
-        {/* Score card */}
-        <View style={[S.scoreCard, { borderLeftColor: color }]}>
-          <Text style={[S.pct, { color }]}>{submission.percentage.toFixed(1)}%</Text>
-          <Text style={S.scoreDetails}>
-            {submission.marks_obtained.toFixed(1)} / {submission.total_marks} marks
+    <Screen>
+      <Header title={quiz_title || quiz.title} subtitle={quiz.subject_name} onBack={() => navigation.goBack()} />
+      <ScrollView contentContainerStyle={st.scroll} showsVerticalScrollIndicator={false}>
+        <Card style={{ alignItems: "center", gap: 4, borderLeftWidth: 4, borderLeftColor: c.fg }}>
+          <Text style={[st.pct, { color: c.fg }]}>{pct.toFixed(1)}%</Text>
+          <Text style={st.marks}>
+            {Number(submission.marks_obtained).toFixed(1)} / {submission.total_marks} marks
           </Text>
-          <View style={S.scoreRow}>
-            <Text style={[S.scoreTag, { color: GREEN, backgroundColor: GREEN_LIGHT }]}>✓ {correct} correct</Text>
-            <Text style={[S.scoreTag, { color: RED, backgroundColor: RED_LIGHT }]}>✕ {incorrect} wrong</Text>
+          <View style={st.chips}>
+            <Chip icon="checkmark" tone="success" label={`${correct} correct`} />
+            <Chip icon="close" tone="danger" label={`${incorrect} wrong`} />
           </View>
-        </View>
+        </Card>
 
-        {/* Answer review */}
-        <Text style={S.reviewTitle}>Answer Review</Text>
-        {submission.answers.map((ga, i) => (
+        <Text style={font.h2}>Answer review</Text>
+        {answers.map((ga, i) => (
           <AnswerCard key={ga.question_id ?? i} ga={ga} index={i} />
         ))}
-
-        <View style={{ height: 40 }} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
-const S = StyleSheet.create({
-  safe:    { flex: 1, backgroundColor: BG },
-  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 20 },
-
-  backBtn:  { width: 38, height: 38, borderRadius: 19, backgroundColor: "#FFF", alignItems: "center", justifyContent: "center", marginBottom: 16, elevation: 2, shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 6 },
-  backIcon: { fontSize: 22, fontWeight: "700", color: PRIMARY },
-
-  title: { fontSize: 24, fontWeight: "800", color: "#111827", marginBottom: 4 },
-  sub:   { fontSize: 14, color: GREY, marginBottom: 20 },
-
-  scoreCard: { backgroundColor: "#FFF", borderRadius: 16, padding: 20, marginBottom: 20, borderLeftWidth: 4, borderWidth: 1, borderColor: "#E5E7EB", alignItems: "center" },
-  pct:       { fontSize: 44, fontWeight: "900", marginBottom: 4 },
-  scoreDetails: { fontSize: 16, fontWeight: "600", color: GREY, marginBottom: 12 },
-  scoreRow:  { flexDirection: "row", gap: 10 },
-  scoreTag:  { fontSize: 13, fontWeight: "700", paddingHorizontal: 12, paddingVertical: 5, borderRadius: 10 },
-
-  reviewTitle: { fontSize: 18, fontWeight: "800", color: "#111827", marginBottom: 14 },
-
-  notFound:      { alignItems: "center", paddingTop: 60 },
-  notFoundEmoji: { fontSize: 48, marginBottom: 14 },
-  notFoundTitle: { fontSize: 18, fontWeight: "700", color: "#111827", marginBottom: 6 },
-  notFoundSub:   { fontSize: 14, color: GREY },
+const st = StyleSheet.create({
+  scroll: { padding: SP.xl, gap: SP.md, paddingBottom: 40 },
+  pct: { fontSize: 46, fontWeight: "900" },
+  marks: { fontSize: 16, fontWeight: "600", color: T.sub },
+  chips: { flexDirection: "row", gap: SP.sm, marginTop: SP.md },
+  ans: { backgroundColor: T.surface, borderRadius: 18, padding: SP.lg, borderWidth: 1.5, gap: SP.sm },
+  ansHead: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  badge: { flexDirection: "row", alignItems: "center", gap: 4, borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
+  badgeTxt: { fontSize: 12, fontWeight: "800" },
+  score: { fontSize: 14, fontWeight: "800" },
+  qText: { fontSize: 15, fontWeight: "600", color: T.ink, lineHeight: 22 },
+  box: { backgroundColor: T.bg, borderRadius: 10, padding: 10, borderWidth: 1, borderColor: T.line },
+  boxLabel: { fontSize: 10, fontWeight: "700", color: T.sub, textTransform: "uppercase", letterSpacing: 0.6, marginBottom: 4 },
+  boxText: { fontSize: 14, color: T.ink, lineHeight: 20 },
+  feedback: { flexDirection: "row", gap: 6, alignItems: "flex-start" },
+  feedbackTxt: { flex: 1, fontSize: 12.5, color: T.sub, fontStyle: "italic", lineHeight: 18 },
 });

@@ -1,285 +1,191 @@
-import React, { useState } from "react";
-import {
-  View, Text, StyleSheet, TextInput, TouchableOpacity,
-  Alert, ActivityIndicator,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useRoute, useNavigation } from "@react-navigation/native";
+// screens/quiz/student/StudentJoinQuiz.tsx — enter the join code (or start an open quiz)
+import React, { useRef, useState } from "react";
+import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, TextInput, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { useNavigation, useRoute } from "@react-navigation/native";
+import { apiFetch } from "../../../services/api";
 import { auth } from "../../../services/firebase";
-import {
-  PRIMARY, PRIMARY_LIGHT, BG, GREY, RED, GREEN, API_URL, StudentQuiz,
-} from "./components/studentQuizConstants";
+import { Banner, Button, Card, Chip, EmptyState, Header, LiveBadge, Screen, SP, T, font } from "../../../components/ui";
+import { API_URL, StudentQuiz, isJoinCodeExpired, readJson } from "./components/studentQuizConstants";
+
+const RULES = [
+  "Do not switch apps. A second time out of the quiz submits it automatically.",
+  "Screenshots are disabled while the quiz is open.",
+  "You cannot retake the quiz once it is submitted.",
+];
 
 export default function StudentJoinQuiz() {
   const navigation = useNavigation<any>();
-  const route      = useRoute<any>();
-  const { quiz }   = route.params as { quiz: StudentQuiz };
+  const quiz = (useRoute<any>().params?.quiz || null) as StudentQuiz | null;
 
-  // If quiz has no join_code (open quiz), we skip the code-entry step
-  const isOpenQuiz = !quiz.join_code;
-
-  const [code,    setCode]    = useState("");
+  const [code, setCode] = useState("");
   const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const lock = useRef(false);
 
-  /* ── Shared join logic ─────────────────────────────────────────────────────*/
-  const proceedToQuiz = async (resolvedCode?: string) => {
+  if (!quiz) {
+    return (
+      <Screen>
+        <Header title="Join quiz" onBack={() => navigation.goBack()} />
+        <EmptyState icon="alert-circle-outline" title="Quiz not found" text="Go back and open the quiz again." />
+      </Screen>
+    );
+  }
+
+  const isOpenQuiz = !quiz.join_code;
+  const expired = isJoinCodeExpired(quiz);
+
+  const proceed = async (resolvedCode?: string) => {
+    if (lock.current) return;
+    lock.current = true;
     setLoading(true);
+    setError(null);
     try {
       const uid = auth.currentUser?.uid;
-      if (!uid) { Alert.alert("Error", "Not logged in"); return; }
-
-      // For open quizzes we hit a dedicated endpoint that doesn't require a code.
-      // For code-gated quizzes we use the existing /join/:code endpoint.
-      let res: Response;
-      if (isOpenQuiz) {
-        res = await fetch(`${API_URL}/api/quizzes/join-open/${quiz.quiz_id}`);
-      } else {
-        res = await fetch(`${API_URL}/api/quizzes/join/${resolvedCode}`);
-      }
-
-      const data = await res.json();
-
-      if (!data.success) {
-        // Surface expiry errors clearly
-        const msg =
-          data.error === "join_code_expired"
-            ? "The join code has expired. Please ask your teacher for a new one."
-            : data.error || "Invalid or expired join code.";
-        Alert.alert("Cannot Join", msg);
+      if (!uid) {
+        setError("You are not logged in. Please log in again.");
         return;
       }
 
-      navigation.replace("TakeQuiz", {
-        quiz:        data.quiz,
-        questions:   data.questions,
-        student_uid: uid,
-      });
-    } catch (e) {
-      Alert.alert("Error", "Could not connect to server.");
+      const url = isOpenQuiz
+        ? `${API_URL}/api/quizzes/join-open/${encodeURIComponent(quiz.quiz_id)}`
+        : `${API_URL}/api/quizzes/join/${encodeURIComponent(resolvedCode || "")}`;
+      const res = await apiFetch(url);
+      const data = await readJson(res);
+
+      if (!data?.success) {
+        setError(
+          data?.error === "join_code_expired"
+            ? "The join code has expired. Ask your teacher for a new one."
+            : data?.error || "Invalid or expired join code."
+        );
+        return;
+      }
+
+      navigation.replace("TakeQuiz", { quiz: data.quiz, questions: data.questions, student_uid: uid });
+    } catch {
+      setError("Could not connect to the server. Check your connection and try again.");
     } finally {
+      lock.current = false;
       setLoading(false);
     }
   };
 
-  /* ── Code-entry join ───────────────────────────────────────────────────────*/
-  const handleJoinWithCode = () => {
-    const trimmed = code.trim().toUpperCase();
-    if (trimmed.length !== 6) {
-      Alert.alert("Invalid Code", "Please enter a 6-character join code.");
+  const joinWithCode = () => {
+    if (code.length !== 6) {
+      setError("Enter the 6-character join code.");
       return;
     }
-    proceedToQuiz(trimmed);
+    proceed(code);
   };
 
-  /* ── Auto-join for open quizzes ────────────────────────────────────────────*/
-  const handleJoinOpen = () => proceedToQuiz();
-
-  /* ── UI ───────────────────────────────────────────────────────────────────*/
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-        <Text style={S.backIcon}>‹</Text>
-      </TouchableOpacity>
+    <Screen>
+      <Header title="Join quiz" subtitle={quiz.subject_name} onBack={() => navigation.goBack()} />
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView contentContainerStyle={st.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <View style={{ alignSelf: "flex-start" }}>
+            <LiveBadge label="LIVE NOW" />
+          </View>
+          <Text style={[font.h1, { marginTop: SP.sm }]}>{quiz.title}</Text>
 
-      <View style={S.body}>
-        {/* Live pill */}
-        <View style={S.livePill}>
-          <View style={S.liveDot} />
-          <Text style={S.liveTxt}>LIVE NOW</Text>
-        </View>
+          <View style={st.chips}>
+            <Chip icon="help-circle-outline" label={`${quiz.question_count} questions`} tone="primary" />
+            <Chip icon="trophy-outline" label={`${quiz.total_marks} marks`} tone="primary" />
+            <Chip icon="timer-outline" label={`${quiz.time_limit_minutes} min`} tone="primary" />
+          </View>
 
-        {quiz && (
-          <>
-            <Text style={S.quizTitle}>{quiz.title}</Text>
-            <Text style={S.quizSub}>{quiz.subject_name}</Text>
-          </>
-        )}
+          {!!error && <Banner tone="danger">{error}</Banner>}
 
-        {/* ── OPEN QUIZ ──────────────────────────────────────────────────────*/}
-        {isOpenQuiz ? (
-          <>
-            <View style={S.openCard}>
-              <View style={S.openIconRow}>
-                <Text style={S.openIcon}>🔓</Text>
+          {isOpenQuiz ? (
+            <Card>
+              <View style={st.openRow}>
+                <Ionicons name="lock-open-outline" size={26} color={T.success} />
                 <View style={{ flex: 1 }}>
-                  <Text style={S.openTitle}>Open Quiz</Text>
-                  <Text style={S.openSub}>
-                    No join code required — tap below to start immediately.
-                  </Text>
+                  <Text style={font.h3}>Open quiz</Text>
+                  <Text style={[font.body, { marginTop: 2 }]}>No join code needed. Tap below to start straight away.</Text>
                 </View>
               </View>
+              <Button label="Start quiz" icon="play" variant="success" onPress={() => proceed()} loading={loading} style={{ marginTop: SP.lg }} />
+            </Card>
+          ) : (
+            <Card>
+              <Text style={font.h2}>Enter join code</Text>
+              <Text style={[font.body, { marginTop: 4, marginBottom: SP.lg }]}>Type the 6-character code your teacher is showing.</Text>
 
-              <View style={S.openMeta}>
-                <MetaPill icon="❓" text={`${quiz.question_count} questions`} />
-                <MetaPill icon="🏆" text={`${quiz.total_marks} marks`} />
-                <MetaPill icon="⏱" text={`${quiz.time_limit_minutes} min`} />
-              </View>
+              <TextInput
+                style={[st.codeInput, !!error && { borderColor: T.danger }]}
+                value={code}
+                onChangeText={(t) => {
+                  setCode(t.toUpperCase().replace(/[^A-Z0-9]/g, "").slice(0, 6));
+                  if (error) setError(null);
+                }}
+                placeholder="ABC123"
+                placeholderTextColor={T.muted}
+                maxLength={6}
+                autoCapitalize="characters"
+                autoCorrect={false}
+                autoComplete="off"
+                autoFocus
+                textAlign="center"
+                returnKeyType="go"
+                onSubmitEditing={joinWithCode}
+                editable={!expired}
+                accessibilityLabel="Join code"
+              />
 
-              <TouchableOpacity
-                style={[S.joinBtn, loading && { opacity: 0.7 }]}
-                onPress={handleJoinOpen}
-                disabled={loading}
-                activeOpacity={0.85}
-              >
-                {loading
-                  ? <ActivityIndicator color="#FFF" />
-                  : <Text style={S.joinBtnTxt}>Start Quiz →</Text>
-                }
-              </TouchableOpacity>
+              {expired ? (
+                <Banner tone="danger" icon="time" style={{ marginTop: SP.md }}>
+                  This join code has expired. Ask your teacher for a new one.
+                </Banner>
+              ) : (
+                !!quiz.join_code_expiry_at && (
+                  <Banner tone="warning" icon="time-outline" style={{ marginTop: SP.md }}>
+                    {`Code expires at ${new Date(quiz.join_code_expiry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+                  </Banner>
+                )
+              )}
+
+              <Button
+                label="Join and start"
+                icon="arrow-forward"
+                onPress={joinWithCode}
+                loading={loading}
+                disabled={code.length !== 6 || expired}
+                style={{ marginTop: SP.lg }}
+              />
+            </Card>
+          )}
+
+          <Banner tone="warning" icon="warning" title="Before you start">
+            <View style={{ gap: 4, marginTop: 4 }}>
+              {RULES.map((r) => (
+                <View key={r} style={{ flexDirection: "row", gap: 8 }}>
+                  <Text style={{ color: T.warning, fontWeight: "800" }}>-</Text>
+                  <Text style={[font.body, { flex: 1, fontSize: 13, lineHeight: 19 }]}>{r}</Text>
+                </View>
+              ))}
             </View>
-          </>
-        ) : (
-          /* ── CODE-GATED QUIZ ──────────────────────────────────────────────*/
-          <View style={S.card}>
-            <Text style={S.cardTitle}>Enter Join Code</Text>
-            <Text style={S.cardSub}>
-              Enter the 6-character code provided by your teacher
-            </Text>
-
-            <TextInput
-              style={S.input}
-              value={code}
-              onChangeText={(t) => setCode(t.toUpperCase())}
-              placeholder="e.g. ABC123"
-              placeholderTextColor="#9CA3AF"
-              maxLength={6}
-              autoCapitalize="characters"
-              autoFocus
-              textAlign="center"
-            />
-
-            {/* Expiry notice (if quiz carries expiry info) */}
-            {quiz.join_code_expiry_at && (
-              <View style={S.expiryNotice}>
-                <Text style={S.expiryNoticeText}>
-                  ⏳ Code expires at{" "}
-                  {new Date(quiz.join_code_expiry_at).toLocaleTimeString([], {
-                    hour: "2-digit", minute: "2-digit",
-                  })}
-                </Text>
-              </View>
-            )}
-
-            <TouchableOpacity
-              style={[S.joinBtn, loading && { opacity: 0.7 }]}
-              onPress={handleJoinWithCode}
-              disabled={loading}
-              activeOpacity={0.85}
-            >
-              {loading
-                ? <ActivityIndicator color="#FFF" />
-                : <Text style={S.joinBtnTxt}>Join & Start Quiz →</Text>
-              }
-            </TouchableOpacity>
-          </View>
-        )}
-
-        {/* Warning box — shown for both */}
-        <View style={S.warningBox}>
-          <Text style={S.warningTitle}>⚠️ Before you start</Text>
-          <Text style={S.warningText}>
-            • Do not switch apps — quiz will auto-submit{"\n"}
-            • Screenshots are disabled during the quiz{"\n"}
-            • You cannot re-take once submitted
-          </Text>
-        </View>
-      </View>
-    </SafeAreaView>
+          </Banner>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Screen>
   );
 }
 
-/* ── Small helper ─────────────────────────────────────────────────────────────*/
-function MetaPill({ icon, text }: { icon: string; text: string }) {
-  return (
-    <View style={S.metaPill}>
-      <Text style={S.metaIcon}>{icon}</Text>
-      <Text style={S.metaText}>{text}</Text>
-    </View>
-  );
-}
-
-const S = StyleSheet.create({
-  safe:    { flex: 1, backgroundColor: BG, paddingHorizontal: 20 },
-  backBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: "#FFF", alignItems: "center", justifyContent: "center", marginTop: 16, marginBottom: 24, elevation: 2, shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 6 },
-  backIcon:{ fontSize: 22, fontWeight: "700", color: PRIMARY },
-
-  body: { flex: 1 },
-
-  livePill: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#F0FDF4", paddingHorizontal: 12, paddingVertical: 6, borderRadius: 20, alignSelf: "flex-start", marginBottom: 16 },
-  liveDot:  { width: 8, height: 8, borderRadius: 4, backgroundColor: GREEN },
-  liveTxt:  { color: GREEN, fontWeight: "800", fontSize: 12, letterSpacing: 0.5 },
-
-  quizTitle: { fontSize: 24, fontWeight: "800", color: "#111827", marginBottom: 4 },
-  quizSub:   { fontSize: 14, color: GREY, marginBottom: 24 },
-
-  /* Open quiz card */
-  openCard: {
-    backgroundColor: "#FFF",
-    borderRadius: 20,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: "#BBF7D0",
-    marginBottom: 16,
-    shadowColor: GREEN,
-    shadowOpacity: 0.08,
-    shadowRadius: 12,
-    elevation: 3,
-    gap: 16,
-  },
-  openIconRow: { flexDirection: "row", alignItems: "flex-start", gap: 12 },
-  openIcon:    { fontSize: 28 },
-  openTitle:   { fontSize: 17, fontWeight: "800", color: "#111827", marginBottom: 3 },
-  openSub:     { fontSize: 13, color: GREY, lineHeight: 18 },
-
-  openMeta: { flexDirection: "row", flexWrap: "wrap", gap: 8 },
-  metaPill: { flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "#F0FDF4", paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
-  metaIcon: { fontSize: 13 },
-  metaText: { fontSize: 12, fontWeight: "700", color: "#065F46" },
-
-  /* Code-gated card */
-  card: {
-    backgroundColor: "#FFF",
-    borderRadius: 20,
-    padding: 20,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-    marginBottom: 16,
-    shadowColor: PRIMARY,
-    shadowOpacity: 0.06,
-    shadowRadius: 12,
-    elevation: 3,
-  },
-  cardTitle: { fontSize: 18, fontWeight: "800", color: "#111827", marginBottom: 6 },
-  cardSub:   { fontSize: 13, color: GREY, marginBottom: 16, lineHeight: 18 },
-
-  input: {
-    height: 60,
+const st = StyleSheet.create({
+  scroll: { padding: SP.xl, gap: SP.lg, paddingBottom: 40 },
+  chips: { flexDirection: "row", flexWrap: "wrap", gap: SP.sm },
+  openRow: { flexDirection: "row", alignItems: "flex-start", gap: SP.md },
+  codeInput: {
+    height: 64,
     borderWidth: 2,
-    borderColor: PRIMARY,
+    borderColor: T.primary,
     borderRadius: 16,
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: "800",
-    color: PRIMARY,
-    letterSpacing: 6,
-    paddingHorizontal: 20,
-    backgroundColor: PRIMARY_LIGHT,
-    marginBottom: 12,
+    color: T.primary,
+    letterSpacing: 8,
+    backgroundColor: T.primarySoft,
   },
-
-  expiryNotice: {
-    backgroundColor: "#FFFBEB",
-    borderRadius: 10,
-    padding: 10,
-    marginBottom: 12,
-    borderWidth: 1,
-    borderColor: "#FDE68A",
-  },
-  expiryNoticeText: { fontSize: 12, color: "#92400E", fontWeight: "600" },
-
-  joinBtn:    { backgroundColor: PRIMARY, borderRadius: 16, height: 54, alignItems: "center", justifyContent: "center", shadowColor: PRIMARY, shadowOpacity: 0.3, shadowRadius: 10, elevation: 4 },
-  joinBtnTxt: { color: "#FFF", fontWeight: "800", fontSize: 16 },
-
-  warningBox: { backgroundColor: "#FFFBEB", borderRadius: 14, padding: 16, borderWidth: 1, borderColor: "#FDE68A" },
-  warningTitle:{ fontSize: 14, fontWeight: "700", color: "#92400E", marginBottom: 8 },
-  warningText: { fontSize: 13, color: "#78350F", lineHeight: 20 },
 });

@@ -14,12 +14,11 @@ const firebaseConfig = {
   appId: process.env.EXPO_PUBLIC_FB_APP_ID,
 };
 
-// Prevent duplicate initialization on hot reload
-export const firebaseApp = getApps().length === 0 
-  ? initializeApp(firebaseConfig) 
-  : getApp();
+const firstInit = getApps().length === 0;
 
-export const auth = getApps().length === 0
+export const firebaseApp = firstInit ? initializeApp(firebaseConfig) : getApp();
+
+export const auth = firstInit
   ? initializeAuth(firebaseApp, {
       persistence: getReactNativePersistence(ReactNativeAsyncStorage),
     })

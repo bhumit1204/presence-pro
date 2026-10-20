@@ -1,241 +1,143 @@
-import React, { useState, useCallback } from "react";
-import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  RefreshControl, ActivityIndicator, Alert,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useNavigation, useRoute, useFocusEffect } from "@react-navigation/native";
-import { Ionicons } from "@expo/vector-icons";
-
-const PRIMARY = "#4834D4";
-const PRIMARY_LIGHT = "#EEF2FF";
-const BG = "#F3F4F6";
-const GREEN = "#10B981";
-const GREEN_LIGHT = "#D1FAE5";
-const AMBER = "#F59E0B";
-const AMBER_LIGHT = "#FEF3C7";
-const GREY = "#6B7280";
-const RED = "#EF4444";
-const API_URL = "http://10.132.90.56:5000";
-
-function fmtDate(iso: string | null) {
-  if (!iso) return "";
-  return new Date(iso).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-}
-
-function isPastDue(iso: string | null) {
-  if (!iso) return false;
-  return new Date(iso) < new Date();
-}
-
-function isPinExpired(expiry: string | null) {
-  if (!expiry) return false;
-  return new Date(expiry) < new Date();
-}
+import React, { useCallback, useMemo, useRef, useState } from "react";
+import { ActivityIndicator, RefreshControl, ScrollView, View } from "react-native";
+import { useFocusEffect, useNavigation, useRoute } from "@react-navigation/native";
+import { Banner, Button, EmptyState, Header, SP, Screen, T, Tone } from "../../../components/ui";
+import { ItemCard, api, fmtDateTime, fmtDay, isPastDue, isPinActive, ts } from "../WorkShared";
 
 export default function TeacherSubjectFeed() {
   const navigation = useNavigation<any>();
   const route = useRoute<any>();
-  const { subject, course, teacher_id } = route.params;
+  const { subject, course, teacher_id } = route.params ?? {};
 
-  const [feed, setFeed] = useState<any[]>([]);
+  const [assignments, setAssignments] = useState<any[]>([]);
+  const [announcements, setAnnouncements] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const loadedOnce = useRef(false);
 
-  const loadFeed = useCallback(async (silent = false) => {
-    try {
-      if (!silent) setLoading(true);
-      const [assignRes, announceRes] = await Promise.all([
-        fetch(`${API_URL}/api/assignments?subject_id=${subject.subject_id}&course_id=${course.course_id}`),
-        fetch(`${API_URL}/api/assignments/announcements?subject_id=${subject.subject_id}&course_id=${course.course_id}`),
-      ]);
-      const assignData = await assignRes.json();
-      const announceData = await announceRes.json();
+  const load = useCallback(
+    async (silent = false) => {
+      if (!subject?.subject_id || !course?.course_id) return;
+      try {
+        if (!silent && !loadedOnce.current) setLoading(true);
+        const q = `subject_id=${encodeURIComponent(subject.subject_id)}&course_id=${encodeURIComponent(course.course_id)}`;
+        const [a, n] = await Promise.all([
+          api<{ assignments: any[] }>(`/api/assignments?${q}`),
+          api<{ announcements: any[] }>(`/api/assignments/announcements?${q}`),
+        ]);
+        setAssignments(a.assignments || []);
+        setAnnouncements(n.announcements || []);
+        setError(null);
+        loadedOnce.current = true;
+      } catch (e: any) {
+        setError(e.message);
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
+      }
+    },
+    [subject?.subject_id, course?.course_id]
+  );
+  useFocusEffect(useCallback(() => { load(); }, [load]));
 
-      const assignments = (assignData.assignments || []).map((a: any) => ({ ...a, _type: "assignment" }));
-      const announcements = (announceData.announcements || []).map((a: any) => ({ ...a, _type: "announcement" }));
+  const feed = useMemo(() => {
+    const all = [
+      ...assignments.map((x) => ({ ...x, _t: "a" as const })),
+      ...announcements.map((x) => ({ ...x, _t: "n" as const })),
+    ];
+    return all.sort((x, y) => {
+      const xp = x._t === "n" && isPinActive(x);
+      const yp = y._t === "n" && isPinActive(y);
+      if (xp !== yp) return xp ? -1 : 1;
+      return ts(y.created_at) - ts(x.created_at);
+    });
+  }, [assignments, announcements]);
 
-      const all = [...assignments, ...announcements];
-      all.sort((a, b) => {
-        const aPin = a._type === "announcement" && a.is_pinned && !isPinExpired(a.pin_expires_at || null);
-        const bPin = b._type === "announcement" && b.is_pinned && !isPinExpired(b.pin_expires_at || null);
-        if (aPin && !bPin) return -1;
-        if (!aPin && bPin) return 1;
-        return new Date(b.created_at).getTime() - new Date(a.created_at).getTime();
-      });
-      setFeed(all);
-    } catch (e) {
-      console.error("Feed load error:", e);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [subject.subject_id, course.course_id]);
-
-  useFocusEffect(useCallback(() => { loadFeed(); }, [loadFeed]));
-
-  const renderAnnouncement = (item: any) => {
-    const isPinActive = item.is_pinned && !isPinExpired(item.pin_expires_at || null);
+  if (!subject || !course) {
     return (
-      <TouchableOpacity
-        key={item.announcement_id}
-        style={[S.card, isPinActive && S.pinnedCard]}
-        activeOpacity={0.85}
-        onPress={() => navigation.navigate("AnnouncementDetail", {
-          announcement: item, teacher_id, onRefresh: () => loadFeed(true),
-        })}
-      >
-        <View style={[S.iconWrap, { backgroundColor: PRIMARY_LIGHT }]}>
-          <Ionicons name={isPinActive ? "pin" : "megaphone-outline"} size={16} color={PRIMARY} />
-        </View>
-        <View style={S.cardBody}>
-          <View style={S.titleRow}>
-            <Text style={S.cardTitle} numberOfLines={1}>{item.title}</Text>
-            {isPinActive && <View style={S.pinBadge}><Text style={S.pinBadgeText}>Pinned</Text></View>}
-          </View>
-          <Text style={S.cardSub} numberOfLines={1}>{item.text}</Text>
-          <Text style={S.metaText}>{fmtDate(item.created_at)}</Text>
-        </View>
-        <Ionicons name="chevron-forward" size={16} color={GREY} />
-      </TouchableOpacity>
+      <Screen>
+        <Header title="Classwork" onBack={() => navigation.goBack()} />
+        <EmptyState icon="alert-circle-outline" title="Subject not available" text="Go back and choose the subject again." />
+      </Screen>
     );
-  };
+  }
 
-  const renderAssignment = (item: any) => {
-    const overdue = isPastDue(item.due_date);
-    return (
-      <TouchableOpacity
-        key={item.assignment_id}
-        style={S.card}
-        activeOpacity={0.85}
-        onPress={() => navigation.navigate("TeacherAssignmentDetail", {
-          assignment: item, teacher_id, subject, course,
-        })}
-      >
-        <View style={[S.iconWrap, { backgroundColor: overdue ? "#FEF2F2" : GREEN_LIGHT }]}>
-          <Ionicons name="document-text-outline" size={16} color={overdue ? RED : GREEN} />
-        </View>
-        <View style={S.cardBody}>
-          <Text style={S.cardTitle} numberOfLines={1}>{item.title}</Text>
-          <View style={S.metaRow}>
-            <Text style={[S.dueDateText, { color: overdue ? RED : GREY }]}>Due {fmtDate(item.due_date)}</Text>
-            <View style={[S.chip, { backgroundColor: PRIMARY_LIGHT }]}>
-              <Text style={[S.chipText, { color: PRIMARY }]}>{item.marks} pts</Text>
-            </View>
-            {item.submissions_count > 0 && (
-              <View style={[S.chip, { backgroundColor: GREEN_LIGHT }]}>
-                <Text style={[S.chipText, { color: GREEN }]}>{item.submissions_count} in</Text>
-              </View>
-            )}
-            {item.allow_late && (
-              <View style={[S.chip, { backgroundColor: AMBER_LIGHT }]}>
-                <Text style={[S.chipText, { color: AMBER }]}>Late OK</Text>
-              </View>
-            )}
-          </View>
-        </View>
-        <Ionicons name="chevron-forward" size={16} color={GREY} />
-      </TouchableOpacity>
-    );
-  };
+  const go = (screen: string) => navigation.navigate(screen, { subject, course, teacher_id });
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      {/* Header */}
-      <View style={S.header}>
-        <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="chevron-back" size={22} color={PRIMARY} />
-        </TouchableOpacity>
-        <View style={S.headerText}>
-          <Text style={S.headerTitle} numberOfLines={1}>{subject.subject_name}</Text>
-          <Text style={S.headerSub}>{course.course_name}</Text>
-        </View>
-        <View style={S.headerActions}>
-          <TouchableOpacity
-            style={S.headerBtn}
-            onPress={() => navigation.navigate("CreateAnnouncement", {
-              subject, course, teacher_id, onRefresh: () => loadFeed(true),
-            })}
-          >
-            <Ionicons name="megaphone-outline" size={18} color={PRIMARY} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[S.headerBtn, { backgroundColor: PRIMARY }]}
-            onPress={() => navigation.navigate("CreateAssignment", {
-              subject, course, teacher_id, onRefresh: () => loadFeed(true),
-            })}
-          >
-            <Ionicons name="add" size={20} color="#FFF" />
-          </TouchableOpacity>
-        </View>
-      </View>
+    <Screen>
+      <Header title={subject.subject_name} subtitle={course.course_name} onBack={() => navigation.goBack()} />
 
       <ScrollView
-        contentContainerStyle={S.list}
+        contentContainerStyle={{ padding: SP.lg, paddingBottom: SP.xl }}
         showsVerticalScrollIndicator={false}
-        refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={() => { setRefreshing(true); loadFeed(true); }}
-            colors={[PRIMARY]}
-          />
-        }
+        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(true); }} colors={[T.primary]} tintColor={T.primary} />}
       >
         {loading ? (
-          <View style={S.center}><ActivityIndicator size="large" color={PRIMARY} /></View>
-        ) : feed.length === 0 ? (
-          <View style={S.empty}>
-            <Ionicons name="folder-open-outline" size={40} color={GREY} style={{ marginBottom: 10 }} />
-            <Text style={S.emptyTitle}>Nothing posted yet</Text>
-            <Text style={S.emptyText}>Use the buttons above to post an assignment or announcement.</Text>
+          <View style={{ paddingTop: 80, alignItems: "center" }}>
+            <ActivityIndicator size="large" color={T.primary} />
+          </View>
+        ) : !loadedOnce.current && error ? (
+          <View>
+            <EmptyState icon="cloud-offline-outline" title="Could not load" text={error} />
+            <Button label="Try again" icon="refresh" variant="secondary" onPress={() => load()} />
           </View>
         ) : (
-          feed.map((item) =>
-            item._type === "announcement" ? renderAnnouncement(item) : renderAssignment(item)
-          )
+          <>
+            {!!error && (
+              <Banner tone="warning" title="Showing the last loaded data" style={{ marginBottom: SP.md }}>
+                {error}
+              </Banner>
+            )}
+            {feed.length === 0 ? (
+              <EmptyState icon="folder-open-outline" title="Nothing posted yet" text="Post an assignment or an announcement with the buttons below." />
+            ) : (
+              feed.map((item) => {
+                if (item._t === "n") {
+                  const pinned = isPinActive(item);
+                  const files = item.attachments?.length ?? 0;
+                  return (
+                    <ItemCard
+                      key={`n-${item.announcement_id}`}
+                      icon={pinned ? "pin" : "megaphone-outline"}
+                      title={item.title}
+                      line={item.text}
+                      meta={fmtDay(item.created_at)}
+                      pinned={pinned}
+                      chips={[
+                        ...(pinned ? [{ label: "Pinned", tone: "primary" as Tone }] : []),
+                        ...(files > 0 ? [{ label: `${files} file${files > 1 ? "s" : ""}` }] : []),
+                      ]}
+                      onPress={() => navigation.navigate("AnnouncementDetail", { announcement: item, teacher_id })}
+                    />
+                  );
+                }
+                const overdue = isPastDue(item.due_date);
+                const chips: { label: string; tone?: Tone }[] = [{ label: `${item.marks} marks`, tone: "primary" }];
+                if (item.submissions_count > 0) chips.push({ label: `${item.submissions_count} turned in`, tone: "success" });
+                if (item.allow_late) chips.push({ label: "Late allowed", tone: "warning" });
+                return (
+                  <ItemCard
+                    key={`a-${item.assignment_id}`}
+                    icon="document-text-outline"
+                    tone={overdue ? "danger" : "success"}
+                    title={item.title}
+                    meta={`${overdue ? "Was due" : "Due"} ${fmtDateTime(item.due_date)}`}
+                    chips={chips}
+                    onPress={() => navigation.navigate("TeacherAssignmentDetail", { assignment: item, teacher_id, subject, course })}
+                  />
+                );
+              })
+            )}
+          </>
         )}
-        <View style={{ height: 40 }} />
       </ScrollView>
-    </SafeAreaView>
+
+      <View style={{ flexDirection: "row", gap: SP.md, padding: SP.md, backgroundColor: T.surface, borderTopWidth: 1, borderTopColor: T.line }}>
+        <Button label="Announcement" icon="megaphone-outline" variant="secondary" size="md" onPress={() => go("CreateAnnouncement")} style={{ flex: 1 }} />
+        <Button label="Assignment" icon="add" size="md" onPress={() => go("CreateAssignment")} style={{ flex: 1 }} />
+      </View>
+    </Screen>
   );
 }
-
-const S = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: BG },
-
-  header: { flexDirection: "row", alignItems: "center", paddingHorizontal: 16, paddingTop: 8, paddingBottom: 10, gap: 10 },
-  backBtn: { width: 36, height: 36, borderRadius: 18, backgroundColor: "#FFF", alignItems: "center", justifyContent: "center", elevation: 2, shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 6 },
-  headerText: { flex: 1 },
-  headerTitle: { fontSize: 18, fontWeight: "800", color: "#111827" },
-  headerSub: { fontSize: 12, color: GREY, marginTop: 1 },
-  headerActions: { flexDirection: "row", gap: 8 },
-  headerBtn: { width: 36, height: 36, borderRadius: 10, backgroundColor: PRIMARY_LIGHT, alignItems: "center", justifyContent: "center" },
-
-  list: { paddingHorizontal: 16 },
-
-  card: {
-    flexDirection: "row", alignItems: "center", gap: 10,
-    backgroundColor: "#FFF", borderRadius: 13, marginBottom: 7,
-    padding: 12, borderWidth: 1, borderColor: "#E5E7EB",
-    shadowColor: "#000", shadowOpacity: 0.03, shadowRadius: 4, elevation: 1,
-  },
-  pinnedCard: { borderColor: PRIMARY, borderWidth: 1.5 },
-
-  iconWrap: { width: 36, height: 36, borderRadius: 10, alignItems: "center", justifyContent: "center", flexShrink: 0 },
-  cardBody: { flex: 1 },
-  titleRow: { flexDirection: "row", alignItems: "center", gap: 6, marginBottom: 3 },
-  cardTitle: { fontSize: 14, fontWeight: "700", color: "#111827", flex: 1 },
-  cardSub: { fontSize: 12, color: GREY, marginBottom: 3 },
-  metaText: { fontSize: 11, color: GREY, fontWeight: "500" },
-  metaRow: { flexDirection: "row", alignItems: "center", gap: 5, flexWrap: "wrap" },
-  dueDateText: { fontSize: 11, fontWeight: "600" },
-  pinBadge: { backgroundColor: PRIMARY_LIGHT, borderRadius: 5, paddingHorizontal: 5, paddingVertical: 2 },
-  pinBadgeText: { fontSize: 10, fontWeight: "700", color: PRIMARY },
-  chip: { borderRadius: 5, paddingHorizontal: 6, paddingVertical: 2 },
-  chipText: { fontSize: 10, fontWeight: "700" },
-
-  center: { paddingTop: 80, alignItems: "center" },
-  empty: { alignItems: "center", paddingTop: 60 },
-  emptyTitle: { fontSize: 16, fontWeight: "700", color: "#111827", marginBottom: 6 },
-  emptyText: { fontSize: 13, color: GREY, textAlign: "center" },
-});

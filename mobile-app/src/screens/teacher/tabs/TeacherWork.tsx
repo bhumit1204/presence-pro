@@ -1,3 +1,4 @@
+import { apiFetch } from "../../../services/api";
 import React, { useState, useCallback } from "react";
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity,
@@ -12,8 +13,8 @@ const PRIMARY = "#4834D4";
 const PRIMARY_LIGHT = "#EEF2FF";
 const BG = "#F3F4F6";
 const GREY = "#6B7280";
-// const API_URL = "http://10.132.90.56:5000";
-const API_URL = "http://10.132.90.56:5000";
+// const API_URL = "https://presencepro.duckdns.org";
+const API_URL = "https://presencepro.duckdns.org";
 
 const COURSE_COLORS = ["#4834D4", "#10B981", "#F59E0B", "#EF4444", "#8B5CF6", "#EC4899"];
 
@@ -44,7 +45,7 @@ export default function TeacherWork() {
       const tid = session?.teacher_id;
       setTeacherId(tid);
 
-      const res = await fetch(`${API_URL}/api/lectures/teachers/subjects?teacher_id=${tid}`);
+      const res = await apiFetch(`${API_URL}/api/lectures/teachers/subjects?teacher_id=${tid}`);
       const data = await res.json();
       if (!data.success) throw new Error(data.error);
 

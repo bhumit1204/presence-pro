@@ -12,23 +12,39 @@ import { useTab } from "../navigation/TabContext";
 
 const PRIMARY = "#4834D4";
 
-export type TabKey = "home" | "reports" | "work" | "quizzes";
+export type TabKey = string;
 
-export default function GlassBottomBar() {
+export interface BarTab {
+  key: TabKey;
+  label: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  /** Letters shown instead of the icon (teacher Profile tab). */
+  initials?: string;
+}
+
+// Original tabs: used as-is by the student dashboard.
+const DEFAULT_TABS: BarTab[] = [
+  { key: "home", label: "Home", icon: "home" },
+  { key: "reports", label: "Reports", icon: "bar-chart" },
+  { key: "work", label: "Work", icon: "briefcase" },
+  { key: "quizzes", label: "Quizzes", icon: "document-text" },
+];
+
+export default function GlassBottomBar({
+  tabs = DEFAULT_TABS,
+  badges,
+}: {
+  tabs?: BarTab[];
+  badges?: Record<string, number>;
+}) {
   const { currentTab, setCurrentTab } = useTab(); //  context
-
-  const tabs: { key: TabKey; label: string; icon: keyof typeof Ionicons.glyphMap }[] = [
-    { key: "home", label: "Home", icon: "home" },
-    { key: "reports", label: "Reports", icon: "bar-chart" },
-    { key: "work", label: "Work", icon: "briefcase" },
-    { key: "quizzes", label: "Quizzes", icon: "document-text" },
-  ];
 
   return (
     <View style={styles.wrapper}>
       <BlurView intensity={70} tint="light" style={styles.container}>
         {tabs.map((tab) => {
           const isActive = currentTab === tab.key;
+          const count = badges?.[tab.key] || 0;
 
           return (
             <TouchableOpacity
@@ -38,11 +54,20 @@ export default function GlassBottomBar() {
               activeOpacity={0.8}
             >
               <View style={[styles.pill, isActive && styles.activePill]}>
-                <Ionicons
-                  name={tab.icon}
-                  size={22}
-                  color={isActive ? "#FFF" : "#111"}
-                />
+                {tab.initials ? (
+                  <Text style={[styles.initials, isActive && { color: "#FFF" }]}>{tab.initials}</Text>
+                ) : (
+                  <Ionicons
+                    name={tab.icon}
+                    size={22}
+                    color={isActive ? "#FFF" : "#111"}
+                  />
+                )}
+                {count > 0 && (
+                  <View style={styles.badge}>
+                    <Text style={styles.badgeText}>{count > 9 ? "9+" : count}</Text>
+                  </View>
+                )}
               </View>
 
               <Text style={[styles.label, isActive && styles.activeLabel]}>
@@ -97,7 +122,7 @@ const styles = StyleSheet.create({
   pill: {
   paddingVertical: 8,
   paddingHorizontal: 20,
-  borderRadius: 999, // 🔥 true pill shape
+  borderRadius: 999, // true pill shape
   alignItems: "center",
   justifyContent: "center",
 },
@@ -117,5 +142,31 @@ const styles = StyleSheet.create({
 
   activeLabel: {
     color: PRIMARY,
+  },
+
+  initials: {
+    fontSize: 15,
+    lineHeight: 22,
+    fontWeight: "800",
+    color: "#111",
+  },
+
+  badge: {
+    position: "absolute",
+    top: 2,
+    right: 10,
+    minWidth: 16,
+    height: 16,
+    borderRadius: 8,
+    paddingHorizontal: 4,
+    backgroundColor: "#EF4444",
+    alignItems: "center",
+    justifyContent: "center",
+  },
+
+  badgeText: {
+    color: "#FFF",
+    fontSize: 10,
+    fontWeight: "800",
   },
 });

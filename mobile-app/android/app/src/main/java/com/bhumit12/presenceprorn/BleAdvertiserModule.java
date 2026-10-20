@@ -83,6 +83,78 @@ public class BleAdvertiserModule extends ReactContextBaseJavaModule {
         }
     }
 
+    /**
+     * Rotating-token beacon.  Same service UUID as before + manufacturer data {0x01,0x02,t0,t1,t2,t3}
+     * (28 bytes in total, fits the 31 byte advertising packet).
+     * Call it for the first start AND every time the token changes: the previous advertisement is
+     * stopped first, so only one beacon is ever on air.
+     */
+    @ReactMethod
+    public void advertiseWithToken(String serviceUUID, String tokenHex, final Promise promise) {
+        try {
+            if (tokenHex == null || tokenHex.length() != 8) {
+                promise.reject("BLE_ERROR", "token must be 8 hex characters");
+                return;
+            }
+            byte[] tok = new byte[4];
+            for (int i = 0; i < 4; i++) {
+                tok[i] = (byte) Integer.parseInt(tokenHex.substring(i * 2, i * 2 + 2), 16);
+            }
+            BluetoothManager manager =
+                (BluetoothManager) getReactApplicationContext()
+                    .getSystemService(Context.BLUETOOTH_SERVICE);
+            if (manager == null) {
+                promise.reject("BLE_ERROR", "BluetoothManager unavailable");
+                return;
+            }
+            BluetoothAdapter adapter = manager.getAdapter();
+            if (adapter == null || !adapter.isEnabled()) {
+                promise.reject("BLE_ERROR", "Bluetooth is not enabled");
+                return;
+            }
+            BluetoothLeAdvertiser adv = adapter.getBluetoothLeAdvertiser();
+            if (adv == null) {
+                promise.reject("BLE_ERROR", "Device does not support BLE advertising");
+                return;
+            }
+
+            // stop whatever is on air right now (plain beacon or previous token)
+            if (advertiser != null && advertiseCallback != null) {
+                try { advertiser.stopAdvertising(advertiseCallback); } catch (Exception ignored) {}
+            }
+            advertiser        = adv;
+            advertiseCallback = null;
+            isAdvertising     = false;
+
+            AdvertiseSettings settings = new AdvertiseSettings.Builder()
+                .setAdvertiseMode(AdvertiseSettings.ADVERTISE_MODE_LOW_LATENCY)
+                .setTxPowerLevel(AdvertiseSettings.ADVERTISE_TX_POWER_HIGH)
+                .setConnectable(false)
+                .build();
+            AdvertiseData data = new AdvertiseData.Builder()
+                .addServiceUuid(new ParcelUuid(UUID.fromString(serviceUUID)))
+                .addManufacturerData(0x0102, new byte[]{0x01, 0x02, tok[0], tok[1], tok[2], tok[3]})
+                .setIncludeDeviceName(false)
+                .build();
+            AdvertiseCallback cb = new AdvertiseCallback() {
+                @Override
+                public void onStartSuccess(AdvertiseSettings settingsInEffect) {
+                    isAdvertising = true;
+                    promise.resolve("started");
+                }
+                @Override
+                public void onStartFailure(int errorCode) {
+                    isAdvertising = false;
+                    promise.reject("BLE_ADV_ERROR", "Advertising failed, errorCode=" + errorCode);
+                }
+            };
+            advertiseCallback = cb;
+            adv.startAdvertising(settings, data, cb);
+        } catch (Exception e) {
+            promise.reject("BLE_ERROR", e.getMessage());
+        }
+    }
+
     @ReactMethod
     public void stopAdvertising(Promise promise) {
         if (!isAdvertising || advertiser == null || advertiseCallback == null) {

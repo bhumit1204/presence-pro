@@ -1,356 +1,352 @@
-import React, { useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  Alert,
-} from "react-native";
+// src/screens/auth/TeacherRegistration.tsx
+// Endpoints and payload are unchanged. The server must still enforce every rule (role, college, e-mail uniqueness).
+
+import React, { useRef, useState } from "react";
+import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { useNavigation } from "@react-navigation/native";
+import { API_BASE } from "../../services/api";
+import {
+  cleanAishe,
+  cleanPhone,
+  cleanText,
+  fetchJson,
+  isAlreadyRegistered,
+  isValidName,
+  validatePassword,
+} from "../../utils/validation";
+import { Banner, Button, Card, Header, ResultView, Screen, Segmented, SectionLabel, SP, T, TextField, font } from "../../components/ui";
 
-const PRIMARY = "#4834D4";
-// const API_URL = "http://10.132.90.56:5000";
-const API_URL = "http://10.132.90.56:5000";
+type Errs = Partial<Record<"first" | "last" | "phone" | "aishe" | "depts", string>>;
 
-const TeacherRegistration = ({ route }: any) => {
+export default function TeacherRegistration({ route }: any) {
   const navigation = useNavigation<any>();
-  const { email, password } = route.params;
+  const { email, password, otp_token } = route?.params || {};
 
-  const [selectedDepts, setSelectedDepts] = useState<string[]>([]);
-  const [verifying, setVerifying] = useState(false);
-  const [submitting, setSubmitting] = useState(false);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
-  const [contactPhone, setContactPhone] = useState("");
+  const [phone, setPhone] = useState("");
   const [gender, setGender] = useState<"male" | "female">("male");
   const [aisheCode, setAisheCode] = useState("");
-  const [verifiedCollege, setVerifiedCollege] = useState<any>(null);
+  const [college, setCollege] = useState<any>(null);
   const [courses, setCourses] = useState<any[]>([]);
+  const [depts, setDepts] = useState<string[]>([]);
+  const [verifying, setVerifying] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const [errs, setErrs] = useState<Errs>({});
+  const submitLock = useRef(false);
+  const lastRef = useRef<any>(null);
+  const phoneRef = useRef<any>(null);
 
-  const toggleDept = (abbr: string) => {
-    setSelectedDepts((prev) =>
-      prev.includes(abbr) ? prev.filter((d) => d !== abbr) : [...prev, abbr]
+  // route params missing (deep link / state restore): nothing safe to do except go back to login
+  if (!email || !password || !otp_token) {
+    return (
+      <Screen>
+        <ResultView
+          icon="alert-circle"
+          tone="warning"
+          title="Start again"
+          message="Your registration session expired. Please begin from the sign-up screen."
+          actions={<Button label="Back to login" onPress={() => navigation.reset({ index: 0, routes: [{ name: "Auth" }] })} />}
+        />
+      </Screen>
     );
+  }
+
+  const clear = (k: keyof Errs) => errs[k] && setErrs((e) => ({ ...e, [k]: undefined }));
+
+  const resetCollege = () => {
+    setCollege(null);
+    setCourses([]);
+    setDepts([]);
   };
 
-  const handleVerifyCollege = async () => {
-    const code = aisheCode.trim().toUpperCase();
-    if (!code) { Alert.alert("Error", "Please enter AISHE code"); return; }
+  const verify = async () => {
     if (verifying) return;
-
+    const code = cleanAishe(aisheCode);
+    if (!code) {
+      setErrs((e) => ({ ...e, aishe: "Enter a valid AISHE code, for example C-12345" }));
+      return;
+    }
+    setErrs((e) => ({ ...e, aishe: undefined }));
+    setVerifying(true);
+    resetCollege();
     try {
-      setVerifying(true);
-      setVerifiedCollege(null);
-      setCourses([]);
-      setSelectedDepts([]);
-
-      const verifyRes = await fetch(`${API_URL}/api/colleges/verify/${code}`);
-      const verifyData = await verifyRes.json();
-
-      if (!verifyRes.ok) throw new Error(verifyData.error || "College not found");
-      setVerifiedCollege(verifyData.college);
-
-      const courseRes = await fetch(`${API_URL}/api/colleges/${code}/courses`);
-      const courseData = await courseRes.json();
-
-      if (!courseRes.ok) throw new Error(courseData.error || "No courses found");
-      if (!Array.isArray(courseData.courses) || courseData.courses.length === 0)
-        throw new Error("No courses mapped to this college");
-
-      setCourses(courseData.courses);
-      Alert.alert("College Verified ✓", verifyData.college.college_name);
-    } catch (error: any) {
-      setVerifiedCollege(null);
-      setCourses([]);
-      setSelectedDepts([]);
-      Alert.alert("Verification Failed", error.message);
+      const v = await fetchJson(`${API_BASE}/api/colleges/verify/${encodeURIComponent(code)}`);
+      if (!v.ok || !v.data?.college) throw new Error(v.data?.error || "College not found");
+      const c = await fetchJson(`${API_BASE}/api/colleges/${encodeURIComponent(code)}/courses`);
+      if (!c.ok) throw new Error(c.data?.error || "Could not load departments");
+      if (!Array.isArray(c.data?.courses) || c.data.courses.length === 0) {
+        throw new Error("No departments are set up for this college yet. Contact your institute.");
+      }
+      setCollege(v.data.college);
+      setCourses(c.data.courses);
+    } catch (e: any) {
+      setErrs((x) => ({ ...x, aishe: e.message || "Verification failed" }));
     } finally {
       setVerifying(false);
     }
   };
 
-  const handleSubmit = async () => {
-    if (!firstName.trim() || !lastName.trim()) {
-      Alert.alert("Error", "First and last name are required");
-      return;
-    }
-    if (!contactPhone.trim()) {
-      Alert.alert("Error", "Contact number is required");
-      return;
-    }
-    if (!verifiedCollege) {
-      Alert.alert("Error", "Please verify your institute first");
-      return;
-    }
-    if (selectedDepts.length === 0) {
-      Alert.alert("Error", "Select at least one department");
+  const toggle = (abbr: string) => {
+    clear("depts");
+    setDepts((p) => (p.includes(abbr) ? p.filter((d) => d !== abbr) : [...p, abbr]));
+  };
+
+  const submit = async () => {
+    if (submitLock.current) return;
+    const first = cleanText(firstName, 50);
+    const last = cleanText(lastName, 50);
+    const ph = cleanPhone(phone);
+    const next: Errs = {};
+    if (!isValidName(first)) next.first = "Enter your first name (letters only)";
+    if (!isValidName(last)) next.last = "Enter your last name (letters only)";
+    if (!ph) next.phone = "Enter a valid mobile number (10 to 13 digits)";
+    if (!college) next.aishe = "Verify your institute first";
+    else if (depts.length === 0) next.depts = "Select at least one department";
+    setErrs(next);
+    if (Object.keys(next).length) return;
+
+    const pwErr = validatePassword(password);
+    if (pwErr) {
+      Alert.alert("Weak password", pwErr, [{ text: "Change password", onPress: () => navigation.goBack() }]);
       return;
     }
 
+    submitLock.current = true;
+    setSubmitting(true);
     try {
-      setSubmitting(true);
-
-      // departments = array of course abbreviations e.g. ["BCA", "MCA"]
-      // This is what the backend stores in teachers.departments
-      const payload = {
-        email,
-        password,
-        role: "teacher",
-        teacher: {
-          first_name: firstName.trim(),
-          last_name: lastName.trim(),
-          contact_phone: contactPhone.trim(),
-          gender,
-          aishe_code: verifiedCollege.aishe_code,
-          departments: selectedDepts,
-          designation: "Assistant Professor",
-        },
-      };
-
-      //  Correct endpoint: /api/auth/register
-      const res = await fetch(`${API_URL}/api/auth/register`, {
+      const res = await fetchJson(`${API_BASE}/api/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          email,
+          password,
+          otp_token,
+          role: "teacher",
+          teacher: {
+            first_name: first,
+            last_name: last,
+            contact_phone: ph,
+            gender,
+            aishe_code: college.aishe_code,
+            departments: depts,
+            designation: "Assistant Professor",
+          },
+        }),
       });
 
-      const text = await res.text();
-      let data: any;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        console.error("NON-JSON:", text);
-        throw new Error("Server error. Please try again.");
+      if (!res.ok) {
+        if (isAlreadyRegistered(res)) {
+          Alert.alert("Already registered", "An account with this email already exists. Please log in instead.", [
+            { text: "Go to login", onPress: () => navigation.reset({ index: 0, routes: [{ name: "Auth" }] }) },
+          ]);
+          return;
+        }
+        if (res.status === 403 && /verif/i.test(String(res.data?.error))) {
+          Alert.alert("Verify your email again", res.data?.error, [{ text: "OK", onPress: () => navigation.goBack() }]);
+          return;
+        }
+        throw new Error(res.data?.error || "Registration failed. Please try again.");
       }
 
-      if (!res.ok) throw new Error(data.error || "Registration failed");
-
-      Alert.alert(
-        "Registration Submitted ✓",
-        "Your account is pending admin approval. You will be notified once approved.",
-        [{ text: "OK", onPress: () => navigation.navigate("Auth") }]
-      );
-    } catch (err: any) {
-      Alert.alert("Error", err.message);
+      Alert.alert("Registration submitted", "Your account is pending admin approval. You can sign in once it is approved.", [
+        { text: "OK", onPress: () => navigation.reset({ index: 0, routes: [{ name: "Auth" }] }) },
+      ]);
+    } catch (e: any) {
+      Alert.alert("Could not register", e.message || "Something went wrong");
     } finally {
+      submitLock.current = false;
       setSubmitting(false);
     }
   };
 
-  const canSubmit = verifiedCollege && selectedDepts.length > 0 && !submitting;
-
   return (
-    <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <Text style={styles.header}>Teacher Registration</Text>
+    <Screen>
+      <Header title="Teacher registration" subtitle={email} onBack={() => navigation.goBack()} />
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView contentContainerStyle={st.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <Banner tone="info" icon="information-circle">
+            You register as a Teacher. If you are an HOD, an admin will upgrade your role after approval.
+          </Banner>
 
-      <View style={styles.infoBox}>
-        <Text style={styles.infoText}>
-          📌 You register as a Teacher. If you are an HOD, an admin will upgrade
-          your role after approval.
-        </Text>
-      </View>
-
-      <Text style={styles.label}>First Name</Text>
-      <TextInput
-        style={styles.input}
-        placeholder="Enter your first name"
-        placeholderTextColor="#B0B0B0"
-        value={firstName}
-        onChangeText={setFirstName}
-      />
-
-      <Text style={styles.label}>Last Name</Text>
-      <TextInput
-        style={styles.input}
-        placeholder="Enter your last name"
-        placeholderTextColor="#B0B0B0"
-        value={lastName}
-        onChangeText={setLastName}
-      />
-
-      <Text style={styles.label}>Contact Number</Text>
-      <TextInput
-        style={styles.input}
-        placeholder="Enter your mobile number"
-        keyboardType="phone-pad"
-        placeholderTextColor="#B0B0B0"
-        value={contactPhone}
-        onChangeText={setContactPhone}
-      />
-
-      <Text style={styles.label}>Gender</Text>
-      <View style={styles.genderRow}>
-        {(["male", "female"] as const).map((g) => (
-          <TouchableOpacity key={g} style={styles.genderOption} onPress={() => setGender(g)}>
-            <View style={[styles.radioOuter, gender === g && styles.radioOuterActive]}>
-              {gender === g && <View style={styles.radioInner} />}
+          <Card>
+            <SectionLabel>Personal details</SectionLabel>
+            <View style={{ gap: SP.lg }}>
+              <TextField
+                label="First name"
+                icon="person-outline"
+                value={firstName}
+                onChangeText={(t) => {
+                  setFirstName(t);
+                  clear("first");
+                }}
+                placeholder="First name"
+                autoCapitalize="words"
+                autoComplete="given-name"
+                textContentType="givenName"
+                returnKeyType="next"
+                onSubmitEditing={() => lastRef.current?.focus()}
+                error={errs.first}
+                maxLength={50}
+              />
+              <TextField
+                label="Last name"
+                icon="person-outline"
+                value={lastName}
+                onChangeText={(t) => {
+                  setLastName(t);
+                  clear("last");
+                }}
+                placeholder="Last name"
+                autoCapitalize="words"
+                autoComplete="family-name"
+                textContentType="familyName"
+                returnKeyType="next"
+                onSubmitEditing={() => phoneRef.current?.focus()}
+                inputRef={lastRef}
+                error={errs.last}
+                maxLength={50}
+              />
+              <TextField
+                label="Mobile number"
+                icon="call-outline"
+                value={phone}
+                onChangeText={(t) => {
+                  setPhone(t);
+                  clear("phone");
+                }}
+                placeholder="10 digit mobile number"
+                keyboardType="phone-pad"
+                autoComplete="tel"
+                textContentType="telephoneNumber"
+                inputRef={phoneRef}
+                error={errs.phone}
+                maxLength={16}
+              />
+              <View>
+                <Text style={st.label}>Gender</Text>
+                <Segmented
+                  options={[
+                    { value: "male" as const, label: "Male" },
+                    { value: "female" as const, label: "Female" },
+                  ]}
+                  value={gender}
+                  onChange={setGender}
+                />
+              </View>
             </View>
-            <Text style={styles.genderText}>
-              {g.charAt(0).toUpperCase() + g.slice(1)}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
+          </Card>
 
-      <Text style={styles.label}>Institute Verification</Text>
-      <View style={styles.aisheRow}>
-        <TextInput
-          style={styles.aisheInput}
-          placeholder="Enter AISHE Code (e.g. C-12345)"
-          placeholderTextColor="#B0B0B0"
-          value={aisheCode}
-          onChangeText={setAisheCode}
-          autoCapitalize="characters"
-        />
-        <TouchableOpacity
-          style={[styles.verifyBtn, verifying && { opacity: 0.7 }]}
-          onPress={handleVerifyCollege}
-          disabled={verifying}
-        >
-          <Text style={styles.verifyText}>{verifying ? "..." : "Verify"}</Text>
-        </TouchableOpacity>
-      </View>
+          <Card>
+            <SectionLabel>Institute</SectionLabel>
+            <View style={st.aisheRow}>
+              <View style={{ flex: 1 }}>
+                <TextField
+                  value={aisheCode}
+                  onChangeText={(t) => {
+                    setAisheCode(t);
+                    clear("aishe");
+                    if (college) resetCollege(); // editing the code invalidates the earlier verification
+                  }}
+                  placeholder="AISHE code, e.g. C-12345"
+                  icon="business-outline"
+                  autoCapitalize="characters"
+                  returnKeyType="go"
+                  onSubmitEditing={verify}
+                  error={errs.aishe}
+                  maxLength={20}
+                />
+              </View>
+              <Button label="Verify" size="md" onPress={verify} loading={verifying} style={{ marginTop: 0, height: 52 }} />
+            </View>
 
-      {verifiedCollege && (
-        <View style={styles.verifiedBadge}>
-          <Text style={styles.verifiedBadgeText}>✓ {verifiedCollege.college_name}</Text>
-        </View>
-      )}
+            {college && (
+              <View style={st.verified}>
+                <Ionicons name="checkmark-circle" size={22} color={T.success} />
+                <View style={{ flex: 1 }}>
+                  <Text style={font.small}>Verified institute</Text>
+                  <Text style={font.h3}>{college.college_name}</Text>
+                </View>
+              </View>
+            )}
+          </Card>
 
-      <Text style={styles.label}>Departments</Text>
-      <Text style={styles.subLabel}>
-        {verifiedCollege
-          ? "Select all departments you teach in"
-          : "Verify your institute first to see departments"}
-      </Text>
+          <Card>
+            <SectionLabel>Departments</SectionLabel>
+            {!college ? (
+              <Text style={font.body}>Verify your institute to see its departments.</Text>
+            ) : (
+              <>
+                <Text style={[font.body, { marginBottom: SP.md }]}>Select every department you teach in.</Text>
+                <View style={st.deptWrap}>
+                  {courses.map((c) => {
+                    const on = depts.includes(c.abbr);
+                    return (
+                      <Pressable
+                        key={c.id ?? c.abbr}
+                        onPress={() => toggle(c.abbr)}
+                        accessibilityRole="checkbox"
+                        accessibilityState={{ checked: on }}
+                        style={[st.dept, on && st.deptOn]}
+                      >
+                        {on && <Ionicons name="checkmark" size={14} color={T.primary} />}
+                        <View>
+                          <Text style={[st.deptAbbr, on && { color: T.primary }]}>{c.abbr}</Text>
+                          <Text style={st.deptName} numberOfLines={1}>
+                            {c.course_name}
+                          </Text>
+                        </View>
+                      </Pressable>
+                    );
+                  })}
+                </View>
+                {!!errs.depts && <Text style={st.err}>{errs.depts}</Text>}
+              </>
+            )}
+          </Card>
 
-      {verifiedCollege && courses.length > 0 && (
-        <View style={styles.deptWrap}>
-          {courses.map((course) => {
-            const isSelected = selectedDepts.includes(course.abbr);
-            return (
-              <TouchableOpacity
-                key={course.id}
-                style={[styles.deptPill, isSelected && styles.deptPillActive]}
-                onPress={() => toggleDept(course.abbr)}
-              >
-                <Text style={[styles.deptAbbr, isSelected && styles.deptTextActive]}>
-                  {course.abbr}
-                </Text>
-                <Text style={[styles.deptName, isSelected && styles.deptTextActiveLight]}>
-                  {course.course_name}
-                </Text>
-              </TouchableOpacity>
-            );
-          })}
-        </View>
-      )}
-
-      <TouchableOpacity
-        style={[styles.submitBtn, !canSubmit && styles.submitDisabled]}
-        disabled={!canSubmit}
-        onPress={handleSubmit}
-      >
-        <Text style={styles.submitText}>
-          {submitting ? "Submitting..." : "Complete Registration"}
-        </Text>
-      </TouchableOpacity>
-
-      <View style={{ height: 40 }} />
-    </ScrollView>
+          <Button
+            label="Complete registration"
+            icon="checkmark-circle-outline"
+            onPress={submit}
+            loading={submitting}
+            disabled={!college || depts.length === 0}
+          />
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Screen>
   );
-};
+}
 
-const styles = StyleSheet.create({
-  container: { flex: 1, backgroundColor: "#FFF", paddingHorizontal: 24 },
-  header: { fontSize: 22, fontWeight: "700", marginTop: 20, marginBottom: 16 },
-  infoBox: {
-    backgroundColor: "#EEF2FF",
-    borderRadius: 12,
-    padding: 14,
-    marginBottom: 8,
-  },
-  infoText: { fontSize: 13, color: "#4834D4", lineHeight: 20 },
-  label: { fontSize: 15, fontWeight: "700", marginBottom: 8, marginTop: 18 },
-  subLabel: { fontSize: 13, color: "#777", marginBottom: 10 },
-  input: {
-    height: 56,
-    borderWidth: 1,
-    borderColor: "#D0D0D0",
-    borderRadius: 30,
-    paddingHorizontal: 20,
-    fontSize: 15,
-    color: "#111",
-  },
-  genderRow: { flexDirection: "row", marginTop: 8 },
-  genderOption: { flexDirection: "row", alignItems: "center", marginRight: 24 },
-  radioOuter: {
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    borderWidth: 2,
-    borderColor: "#C0C0C0",
+const st = StyleSheet.create({
+  scroll: { padding: SP.lg, gap: SP.lg, paddingBottom: 40 },
+  label: { fontSize: 12.5, fontWeight: "700", color: T.sub, marginBottom: 7, letterSpacing: 0.2 },
+  aisheRow: { flexDirection: "row", gap: SP.sm, alignItems: "flex-start" },
+  verified: {
+    flexDirection: "row",
     alignItems: "center",
-    justifyContent: "center",
-    marginRight: 8,
+    gap: SP.md,
+    marginTop: SP.md,
+    padding: SP.md,
+    borderRadius: 14,
+    backgroundColor: T.successSoft,
   },
-  radioOuterActive: { borderColor: PRIMARY },
-  radioInner: { width: 10, height: 10, borderRadius: 5, backgroundColor: PRIMARY },
-  genderText: { fontSize: 15 },
-  aisheRow: { flexDirection: "row", alignItems: "center" },
-  aisheInput: {
-    flex: 1,
-    height: 56,
-    borderWidth: 1,
-    borderColor: "#D0D0D0",
-    borderRadius: 30,
-    paddingHorizontal: 20,
-    marginRight: 10,
-    fontSize: 14,
-  },
-  verifyBtn: {
-    backgroundColor: PRIMARY,
-    paddingHorizontal: 20,
-    height: 44,
-    borderRadius: 22,
-    justifyContent: "center",
-  },
-  verifyText: { color: "#FFF", fontWeight: "600" },
-  verifiedBadge: {
-    marginTop: 8,
-    backgroundColor: "#D1FAE5",
-    borderRadius: 10,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    alignSelf: "flex-start",
-  },
-  verifiedBadgeText: { color: "#065F46", fontWeight: "700", fontSize: 13 },
-  deptWrap: { flexDirection: "row", flexWrap: "wrap", gap: 10 },
-  deptPill: {
-    borderWidth: 1,
-    borderColor: "#CFCFCF",
-    borderRadius: 12,
+  deptWrap: { flexDirection: "row", flexWrap: "wrap", gap: SP.sm },
+  dept: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     paddingVertical: 10,
-    paddingHorizontal: 16,
-    minWidth: 80,
+    paddingHorizontal: 14,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: T.line,
+    backgroundColor: T.surface,
+    maxWidth: "100%",
   },
-  deptPillActive: { backgroundColor: PRIMARY, borderColor: PRIMARY },
-  deptAbbr: { fontSize: 14, color: "#333", fontWeight: "700" },
-  deptName: { fontSize: 11, color: "#666", marginTop: 2 },
-  deptTextActive: { color: "#FFF" },
-  deptTextActiveLight: { color: "rgba(255,255,255,0.8)" },
-  submitBtn: {
-    marginTop: 40,
-    backgroundColor: PRIMARY,
-    height: 58,
-    borderRadius: 30,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  submitDisabled: { backgroundColor: "#D0D0D0" },
-  submitText: { color: "#FFF", fontSize: 17, fontWeight: "700" },
+  deptOn: { borderColor: T.primary, backgroundColor: T.primarySoft },
+  deptAbbr: { fontSize: 14, fontWeight: "800", color: T.ink },
+  deptName: { fontSize: 11.5, color: T.sub, maxWidth: 200 },
+  err: { color: T.danger, fontSize: 12.5, marginTop: SP.sm, fontWeight: "600" },
 });
-
-export default TeacherRegistration;

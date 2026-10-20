@@ -1,44 +1,18 @@
+import { apiFetch, API_BASE } from "../../../services/api";
 import React, { useState, useCallback } from "react";
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
-  RefreshControl,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity,
+  ActivityIndicator, RefreshControl,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { auth, db } from "../../../services/firebase";
-import {
-  getDoc,
-  doc,
-  collection,
-  query,
-  where,
-  getDocs,
-} from "firebase/firestore";
+import { getDoc, doc, collection, query, where, getDocs } from "firebase/firestore";
+import { Banner, Button, Card, Chip, EmptyState, ProgressBar, Screen, SP, T, TONE, Tone, font } from "../../../components/ui";
 
-// ─── Palette ──────────────────────────────────────────────────────────────────
-const PRIMARY      = "#4834D4";
-const PRIMARY_SOFT = "#EEF2FF";
-const BG           = "#F3F4F6";
-const GREEN        = "#10B981";
-const GREEN_SOFT   = "#D1FAE5";
-const AMBER        = "#F59E0B";
-const AMBER_SOFT   = "#FEF3C7";
-const RED          = "#EF4444";
-const RED_SOFT     = "#FEF2F2";
-const GREY         = "#6B7280";
-const DARK         = "#111827";
-const WHITE        = "#FFFFFF";
-const BORDER       = "#E5E7EB";
-const OD_COLOR     = "#7C3AED";
-const OD_SOFT      = "#EDE9FE";
-
-const API_URL = "http://10.132.90.56:5000";
+const API_URL = API_BASE;
+const OD_COLOR = "#7C3AED";
+const OD_SOFT  = "#EDE9FE";
 
 type TabKey = "overview" | "attendance" | "quizzes" | "assignments" | "od";
 
@@ -91,50 +65,23 @@ interface SubjectMeta {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 function fmtDate(iso: string | null) {
-  if (!iso) return "—";
+  if (!iso) return "-";
   return new Date(iso).toLocaleDateString("en-IN", {
     day: "2-digit", month: "short", year: "numeric",
   });
 }
 
-function pctColor(pct: number | null | undefined) {
-  if (pct == null) return GREY;
-  if (pct >= 75)   return GREEN;
-  if (pct >= 50)   return AMBER;
-  return RED;
+function pctTone(pct: number | null | undefined): Tone {
+  if (pct == null) return "neutral";
+  if (pct >= 75)   return "success";
+  if (pct >= 50)   return "warning";
+  return "danger";
 }
-
-function pctBg(pct: number | null | undefined) {
-  if (pct == null) return BG;
-  if (pct >= 75)   return GREEN_SOFT;
-  if (pct >= 50)   return AMBER_SOFT;
-  return RED_SOFT;
-}
-
-// ─── Mini progress bar ────────────────────────────────────────────────────────
-function Bar({ pct, color }: { pct: number; color: string }) {
-  return (
-    <View style={S.barTrack}>
-      <View style={[S.barFill, { width: `${Math.min(pct, 100)}%`, backgroundColor: color }]} />
-    </View>
-  );
-}
-
-// ─── Summary chip ─────────────────────────────────────────────────────────────
-function Chip({
-  value, label, color, bg,
-}: { value: string | number; label: string; color: string; bg: string }) {
-  return (
-    <View style={[S.chip, { backgroundColor: bg }]}>
-      <Text style={[S.chipVal, { color }]}>{value}</Text>
-      <Text style={[S.chipLabel, { color }]}>{label}</Text>
-    </View>
-  );
-}
+const pctColor = (pct: number | null | undefined) => (pct == null ? T.muted : TONE[pctTone(pct)].fg);
 
 // ─── Chunk helper ─────────────────────────────────────────────────────────────
-function chunkArray<T>(arr: T[], size: number): T[][] {
-  const chunks: T[][] = [];
+function chunkArray<X>(arr: X[], size: number): X[][] {
+  const chunks: X[][] = [];
   for (let i = 0; i < arr.length; i += size) chunks.push(arr.slice(i, i + size));
   return chunks;
 }
@@ -313,7 +260,7 @@ export default function StudentAttendance() {
       // ── 4. Quizzes ─────────────────────────────────────────────────────────
       const quizzes: QuizItem[] = [];
       try {
-        const qRes  = await fetch(`${API_URL}/api/quizzes/student-quizzes/${uid}`);
+        const qRes  = await apiFetch(`${API_URL}/api/quizzes/student-quizzes/${uid}`);
         const qData = await qRes.json();
         if (qData.success) {
           const allQ = [
@@ -348,7 +295,7 @@ export default function StudentAttendance() {
       // ── 5. Assignments ─────────────────────────────────────────────────────
       const assignments: AssignmentItem[] = [];
       try {
-        const subRes  = await fetch(`${API_URL}/api/assignments/my-submissions?student_uid=${uid}`);
+        const subRes  = await apiFetch(`${API_URL}/api/assignments/my-submissions?student_uid=${uid}`);
         const subData = await subRes.json();
         const submitted: any[] = subData.submissions || [];
         const submittedMap: Record<string, any> = {};
@@ -361,7 +308,7 @@ export default function StudentAttendance() {
           for (const chunk of chunkArray(enrolledSubs, 5)) {
             await Promise.all(chunk.map(async (sid) => {
               try {
-                const res   = await fetch(`${API_URL}/api/assignments?subject_id=${sid}&course_id=${courseId}&limit=50`);
+                const res   = await apiFetch(`${API_URL}/api/assignments?subject_id=${sid}&course_id=${courseId}&limit=50`);
                 const aData = await res.json();
                 for (const a of (aData.assignments || [])) {
                   if (seen.has(a.assignment_id)) continue;
@@ -433,226 +380,210 @@ export default function StudentAttendance() {
     : null;
 
   // ── Tab config ────────────────────────────────────────────────────────────
-  const TABS: { key: TabKey; label: string; icon: string }[] = [
+  const TABS: { key: TabKey; label: string; icon: any }[] = [
     { key: "overview",    label: "Overview",    icon: "grid-outline"          },
     { key: "attendance",  label: "Attendance",  icon: "calendar-outline"      },
     { key: "quizzes",     label: "Quizzes",     icon: "help-circle-outline"   },
     { key: "assignments", label: "Assignments", icon: "document-text-outline" },
-    { key: "od",          label: "OD Leave",    icon: "briefcase-outline"     },
+    { key: "od",          label: "OD leave",    icon: "briefcase-outline"     },
   ];
 
-  // ─── Render tabs ─────────────────────────────────────────────────────────
+  const MiniStat = ({ value, label, tone }: { value: string | number; label: string; tone: Tone }) => (
+    <View style={[S.miniStat, { backgroundColor: TONE[tone].bg }]}>
+      <Text style={[S.miniVal, { color: TONE[tone].fg }]}>{value}</Text>
+      <Text style={[S.miniLabel, { color: TONE[tone].fg }]}>{label}</Text>
+    </View>
+  );
 
+  const OverviewCard = ({
+    tab, icon, title, tone, children, progress,
+  }: { tab: TabKey; icon: any; title: string; tone: Tone; children?: React.ReactNode; progress?: number | null }) => (
+    <TouchableOpacity onPress={() => setActiveTab(tab)} activeOpacity={0.8}>
+      <Card>
+        <View style={S.ovTop}>
+          <View style={[S.ovIcon, { backgroundColor: TONE[tone].bg }]}>
+            <Ionicons name={icon} size={18} color={TONE[tone].fg} />
+          </View>
+          <Text style={[font.h3, { flex: 1 }]}>{title}</Text>
+          <Ionicons name="chevron-forward" size={16} color={T.muted} />
+        </View>
+        {children}
+        {progress != null && (
+          <View style={{ marginTop: SP.md }}>
+            <ProgressBar value={progress} tone={tone} />
+          </View>
+        )}
+      </Card>
+    </TouchableOpacity>
+  );
+
+  // ─── Render tabs ─────────────────────────────────────────────────────────
   const renderOverview = () => (
     <View style={S.section}>
-      <View style={S.heroCard}>
-        <Text style={S.heroEyebrow}>My Academic Report</Text>
-        <Text style={S.heroName}>{studentName}</Text>
+      <View style={S.hero}>
+        <Text style={S.heroEyebrow}>My academic report</Text>
+        <Text style={S.heroName} numberOfLines={1}>{studentName}</Text>
         <View style={S.heroRow}>
           <View style={S.heroStat}>
-            <Text style={[S.heroStatNum, { color: pctColor(overallAttPct) }]}>
-              {overallAttPct != null ? `${overallAttPct}%` : "—"}
+            <Text style={[S.heroNum, { color: overallAttPct == null ? "#94A3B8" : overallAttPct >= 75 ? "#34D399" : overallAttPct >= 50 ? "#FBBF24" : "#F87171" }]}>
+              {overallAttPct != null ? `${overallAttPct}%` : "-"}
             </Text>
-            <Text style={S.heroStatLabel}>Attendance</Text>
+            <Text style={S.heroLabel}>Attendance</Text>
           </View>
           <View style={S.heroDivider} />
           <View style={S.heroStat}>
-            <Text style={[S.heroStatNum, { color: pctColor(quizAvgPct) }]}>
-              {quizAvgPct != null ? `${quizAvgPct}%` : "—"}
+            <Text style={[S.heroNum, { color: quizAvgPct == null ? "#94A3B8" : quizAvgPct >= 75 ? "#34D399" : quizAvgPct >= 50 ? "#FBBF24" : "#F87171" }]}>
+              {quizAvgPct != null ? `${quizAvgPct}%` : "-"}
             </Text>
-            <Text style={S.heroStatLabel}>Quiz Avg</Text>
+            <Text style={S.heroLabel}>Quiz avg</Text>
           </View>
           <View style={S.heroDivider} />
           <View style={S.heroStat}>
-            <Text style={[S.heroStatNum, { color: assAvgMarks != null ? GREEN : GREY }]}>
-              {assAvgMarks != null ? assAvgMarks : "—"}
+            <Text style={[S.heroNum, { color: assAvgMarks != null ? "#34D399" : "#94A3B8" }]}>
+              {assAvgMarks != null ? assAvgMarks : "-"}
             </Text>
-            <Text style={S.heroStatLabel}>Avg Marks</Text>
+            <Text style={S.heroLabel}>Avg marks</Text>
           </View>
         </View>
       </View>
 
-      {/* Attendance overview card */}
-      <TouchableOpacity style={S.overviewCard} onPress={() => setActiveTab("attendance")} activeOpacity={0.8}>
-        <View style={[S.cardAccent, { backgroundColor: pctColor(overallAttPct) }]} />
-        <View style={S.cardInner}>
-          <View style={S.cardTop}>
-            <View style={[S.cardIconWrap, { backgroundColor: pctBg(overallAttPct) }]}>
-              <Ionicons name="calendar-outline" size={16} color={pctColor(overallAttPct)} />
-            </View>
-            <Text style={S.cardTitle}>Attendance</Text>
-            <Ionicons name="chevron-forward" size={14} color={GREY} style={{ marginLeft: "auto" }} />
-          </View>
-          <View style={S.cardStats}>
-            <Chip value={overallAttPct != null ? `${overallAttPct}%` : "—"} label="Overall"  color={pctColor(overallAttPct)} bg={pctBg(overallAttPct)} />
-            <Chip value={data?.attendance.reduce((s, a) => s + a.present, 0) ?? 0}           label="Present"  color={GREEN}                            bg={GREEN_SOFT}               />
-            <Chip value={data?.attendance.reduce((s, a) => s + a.absent,  0) ?? 0}           label="Absent"   color={RED}                              bg={RED_SOFT}                 />
-          </View>
-          {overallAttPct != null && (
-            <View style={{ marginTop: 10, gap: 4 }}>
-              <Bar pct={overallAttPct} color={pctColor(overallAttPct)} />
-            </View>
-          )}
+      <OverviewCard
+        tab="attendance" icon="calendar-outline" title="Attendance" tone={pctTone(overallAttPct)}
+        progress={overallAttPct != null ? overallAttPct / 100 : null}
+      >
+        <View style={S.statsRow}>
+          <MiniStat value={overallAttPct != null ? `${overallAttPct}%` : "-"} label="Overall" tone={pctTone(overallAttPct)} />
+          <MiniStat value={data?.attendance.reduce((s, a) => s + a.present, 0) ?? 0} label="Present" tone="success" />
+          <MiniStat value={data?.attendance.reduce((s, a) => s + a.absent, 0) ?? 0} label="Absent" tone="danger" />
         </View>
-      </TouchableOpacity>
+      </OverviewCard>
 
-      {/* Quiz overview card */}
-      <TouchableOpacity style={S.overviewCard} onPress={() => setActiveTab("quizzes")} activeOpacity={0.8}>
-        <View style={[S.cardAccent, { backgroundColor: PRIMARY }]} />
-        <View style={S.cardInner}>
-          <View style={S.cardTop}>
-            <View style={[S.cardIconWrap, { backgroundColor: PRIMARY_SOFT }]}>
-              <Ionicons name="help-circle-outline" size={16} color={PRIMARY} />
-            </View>
-            <Text style={S.cardTitle}>Quizzes</Text>
-            <Ionicons name="chevron-forward" size={14} color={GREY} style={{ marginLeft: "auto" }} />
-          </View>
-          <View style={S.cardStats}>
-            <Chip value={`${quizAttempted}/${quizTotal}`}                                       label="Attempted" color={PRIMARY}            bg={PRIMARY_SOFT}            />
-            <Chip value={quizAvgPct != null ? `${quizAvgPct}%` : "—"}                          label="Avg Score" color={pctColor(quizAvgPct)} bg={pctBg(quizAvgPct)}  />
-            <Chip value={data?.quizzes.filter((q) => q.status === "missed").length ?? 0}        label="Missed"    color={RED}                  bg={RED_SOFT}            />
-          </View>
-          {quizTotal > 0 && (
-            <View style={{ marginTop: 10, gap: 4 }}>
-              <Bar pct={(quizAttempted / quizTotal) * 100} color={PRIMARY} />
-            </View>
-          )}
+      <OverviewCard
+        tab="quizzes" icon="help-circle-outline" title="Quizzes" tone="primary"
+        progress={quizTotal > 0 ? quizAttempted / quizTotal : null}
+      >
+        <View style={S.statsRow}>
+          <MiniStat value={`${quizAttempted}/${quizTotal}`} label="Attempted" tone="primary" />
+          <MiniStat value={quizAvgPct != null ? `${quizAvgPct}%` : "-"} label="Avg score" tone={pctTone(quizAvgPct)} />
+          <MiniStat value={data?.quizzes.filter((q) => q.status === "missed").length ?? 0} label="Missed" tone="danger" />
         </View>
-      </TouchableOpacity>
+      </OverviewCard>
 
-      {/* Assignment overview card */}
-      <TouchableOpacity style={S.overviewCard} onPress={() => setActiveTab("assignments")} activeOpacity={0.8}>
-        <View style={[S.cardAccent, { backgroundColor: AMBER }]} />
-        <View style={S.cardInner}>
-          <View style={S.cardTop}>
-            <View style={[S.cardIconWrap, { backgroundColor: AMBER_SOFT }]}>
-              <Ionicons name="document-text-outline" size={16} color={AMBER} />
-            </View>
-            <Text style={S.cardTitle}>Assignments</Text>
-            <Ionicons name="chevron-forward" size={14} color={GREY} style={{ marginLeft: "auto" }} />
-          </View>
-          <View style={S.cardStats}>
-            <Chip value={`${assSubmitted}/${assTotal}`}                                                    label="Submitted" color={AMBER}                            bg={AMBER_SOFT}                           />
-            <Chip value={assAvgMarks ?? "—"}                                                               label="Avg Marks" color={assAvgMarks != null ? GREEN : GREY} bg={assAvgMarks != null ? GREEN_SOFT : BG} />
-            <Chip value={data?.assignments.filter((a) => a.status === "missed").length ?? 0}               label="Missed"    color={RED}                                bg={RED_SOFT}                             />
-          </View>
-          {assTotal > 0 && (
-            <View style={{ marginTop: 10, gap: 4 }}>
-              <Bar pct={(assSubmitted / assTotal) * 100} color={AMBER} />
-            </View>
-          )}
+      <OverviewCard
+        tab="assignments" icon="document-text-outline" title="Assignments" tone="warning"
+        progress={assTotal > 0 ? assSubmitted / assTotal : null}
+      >
+        <View style={S.statsRow}>
+          <MiniStat value={`${assSubmitted}/${assTotal}`} label="Submitted" tone="warning" />
+          <MiniStat value={assAvgMarks ?? "-"} label="Avg marks" tone={assAvgMarks != null ? "success" : "neutral"} />
+          <MiniStat value={data?.assignments.filter((a) => a.status === "missed").length ?? 0} label="Missed" tone="danger" />
         </View>
-      </TouchableOpacity>
+      </OverviewCard>
 
-      {/* OD overview card */}
-      <TouchableOpacity style={S.overviewCard} onPress={() => setActiveTab("od")} activeOpacity={0.8}>
-        <View style={[S.cardAccent, { backgroundColor: OD_COLOR }]} />
-        <View style={S.cardInner}>
-          <View style={S.cardTop}>
-            <View style={[S.cardIconWrap, { backgroundColor: OD_SOFT }]}>
-              <Ionicons name="briefcase-outline" size={16} color={OD_COLOR} />
+      <TouchableOpacity onPress={() => setActiveTab("od")} activeOpacity={0.8}>
+        <Card>
+          <View style={S.ovTop}>
+            <View style={[S.ovIcon, { backgroundColor: OD_SOFT }]}>
+              <Ionicons name="briefcase-outline" size={18} color={OD_COLOR} />
             </View>
-            <Text style={S.cardTitle}>OD Leave</Text>
-            <Ionicons name="chevron-forward" size={14} color={GREY} style={{ marginLeft: "auto" }} />
+            <View style={{ flex: 1 }}>
+              <Text style={font.h3}>OD leave</Text>
+              <Text style={font.small}>Apply for on-duty leave per subject</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={16} color={T.muted} />
           </View>
-          <Text style={S.odOverviewDesc}>
-            Apply for on-duty leave per subject. Tap to manage your OD requests.
-          </Text>
-        </View>
+        </Card>
       </TouchableOpacity>
     </View>
   );
 
   const renderAttendance = () => {
     const subjects = data?.attendance ?? [];
-    if (!subjects.length) return <EmptyState icon="calendar-outline" text="No attendance data yet" />;
+    if (!subjects.length) return <EmptyState icon="calendar-outline" title="No attendance data yet" />;
 
     const withData     = subjects.filter((s) => s.total > 0);
     const totalPresent = withData.reduce((sum, s) => sum + s.present, 0);
     const totalClasses = withData.reduce((sum, s) => sum + s.total,   0);
     const overallPct   = totalClasses > 0 ? Math.round((totalPresent / totalClasses) * 100) : null;
+    const oTone        = pctTone(overallPct);
 
     return (
       <View style={S.section}>
-        <View style={[S.attSummaryCard, { borderLeftColor: pctColor(overallPct) }]}>
-          <View style={{ flex: 1 }}>
-            <Text style={S.attSummaryLabel}>Overall Attendance</Text>
-            <Text style={[S.attSummaryPct, { color: pctColor(overallPct) }]}>
-              {overallPct != null ? `${overallPct}%` : "—"}
-            </Text>
-            <Text style={[S.attSummaryStatus, { color: pctColor(overallPct) }]}>
-              {overallPct == null  ? "No data"
-               : overallPct >= 75  ? "On Track ✓"
-               : overallPct >= 50  ? "Needs Attention ⚠"
-               :                    "Critical — attend more classes"}
-            </Text>
+        <Card tone={oTone}>
+          <View style={{ flexDirection: "row", alignItems: "center" }}>
+            <View style={{ flex: 1 }}>
+              <Text style={font.label}>Overall attendance</Text>
+              <Text style={[S.bigPct, { color: TONE[oTone].fg }]}>
+                {overallPct != null ? `${overallPct}%` : "-"}
+              </Text>
+              <Text style={[S.status, { color: TONE[oTone].fg }]}>
+                {overallPct == null  ? "No data"
+                 : overallPct >= 75  ? "On track"
+                 : overallPct >= 50  ? "Needs attention"
+                 :                    "Critical: attend more classes"}
+              </Text>
+            </View>
+            <View style={{ alignItems: "center" }}>
+              <Text style={[S.sumNum, { color: TONE[oTone].fg }]}>{totalPresent}</Text>
+              <Text style={font.small}>of {totalClasses} classes</Text>
+            </View>
           </View>
-          <View style={S.attSummaryRight}>
-            <Text style={[S.attSummaryBigNum, { color: pctColor(overallPct) }]}>{totalPresent}</Text>
-            <Text style={S.attSummarySmall}>/ {totalClasses} classes</Text>
-          </View>
-        </View>
+        </Card>
 
         {subjects.map((s) => {
-          const color  = pctColor(s.percentage);
-          const bg     = pctBg(s.percentage);
           const pct    = s.percentage;
+          const tone   = pctTone(pct);
           const needed = pct != null && pct < 75 && s.total > 0
             ? Math.max(0, Math.ceil((0.75 * (s.total + 1) - s.present) / 0.25))
             : 0;
 
           return (
-            <View key={s.subject_id} style={S.attSubCard}>
-              <View style={S.attSubTop}>
-                <Text style={S.attSubName} numberOfLines={2}>{s.subject_name}</Text>
-                <View style={[S.attPctBadge, { backgroundColor: bg }]}>
-                  <Text style={[S.attPctText, { color }]}>
-                    {pct != null ? `${pct}%` : "—"}
-                  </Text>
-                </View>
+            <Card key={s.subject_id} flat style={{ gap: SP.md }}>
+              <View style={S.subTop}>
+                <Text style={[font.h3, { flex: 1 }]} numberOfLines={2}>{s.subject_name}</Text>
+                <Chip label={pct != null ? `${pct}%` : "-"} tone={tone} />
               </View>
 
-              <View style={S.attBarTrack}>
-                <View style={[S.attBarFill, { width: `${Math.min(pct ?? 0, 100)}%`, backgroundColor: color }]} />
-                <View style={S.attBarMarker} />
+              <View>
+                <View style={S.track}>
+                  <View style={[S.fill, { width: `${Math.min(pct ?? 0, 100)}%`, backgroundColor: pctColor(pct) }]} />
+                  <View style={S.marker} />
+                </View>
+                <Text style={S.hint}>75% required</Text>
               </View>
-              <Text style={S.attBarHint}>75% required</Text>
 
               <View style={S.attStatRow}>
-                <View style={S.attStatItem}>
-                  <Text style={[S.attStatNum, { color: GREEN }]}>{s.present}</Text>
-                  <Text style={S.attStatLabel}>Present</Text>
+                <View style={S.attStat}>
+                  <Text style={[S.attNum, { color: T.success }]}>{s.present}</Text>
+                  <Text style={font.small}>Present</Text>
                 </View>
-                <View style={S.attStatDivider} />
-                <View style={S.attStatItem}>
-                  <Text style={[S.attStatNum, { color: RED }]}>{s.absent}</Text>
-                  <Text style={S.attStatLabel}>Absent</Text>
+                <View style={S.vDiv} />
+                <View style={S.attStat}>
+                  <Text style={[S.attNum, { color: T.danger }]}>{s.absent}</Text>
+                  <Text style={font.small}>Absent</Text>
                 </View>
                 {s.late > 0 && (
                   <>
-                    <View style={S.attStatDivider} />
-                    <View style={S.attStatItem}>
-                      <Text style={[S.attStatNum, { color: AMBER }]}>{s.late}</Text>
-                      <Text style={S.attStatLabel}>Late</Text>
+                    <View style={S.vDiv} />
+                    <View style={S.attStat}>
+                      <Text style={[S.attNum, { color: T.warning }]}>{s.late}</Text>
+                      <Text style={font.small}>Late</Text>
                     </View>
                   </>
                 )}
-                <View style={S.attStatDivider} />
-                <View style={S.attStatItem}>
-                  <Text style={[S.attStatNum, { color: GREY }]}>{s.total}</Text>
-                  <Text style={S.attStatLabel}>Total</Text>
+                <View style={S.vDiv} />
+                <View style={S.attStat}>
+                  <Text style={[S.attNum, { color: T.sub }]}>{s.total}</Text>
+                  <Text style={font.small}>Total</Text>
                 </View>
               </View>
 
               {pct != null && pct < 75 && (
-                <View style={S.attWarnRow}>
-                  <Ionicons name="warning-outline" size={13} color={RED} />
-                  <Text style={S.attWarnText}>
-                    Attend {needed} more class{needed !== 1 ? "es" : ""} to reach 75%
-                  </Text>
-                </View>
+                <Banner tone="danger" icon="warning-outline">
+                  Attend {needed} more class{needed !== 1 ? "es" : ""} to reach 75%
+                </Banner>
               )}
-            </View>
+            </Card>
           );
         })}
       </View>
@@ -661,54 +592,53 @@ export default function StudentAttendance() {
 
   const renderQuizzes = () => {
     const quizzes = data?.quizzes ?? [];
-    if (!quizzes.length) return <EmptyState icon="help-circle-outline" text="No quizzes yet" />;
+    if (!quizzes.length) return <EmptyState icon="help-circle-outline" title="No quizzes yet" />;
 
     const attempted = quizzes.filter((q) => q.status === "submitted").length;
     const missed    = quizzes.filter((q) => q.status === "missed").length;
 
     return (
       <View style={S.section}>
-        <View style={S.chipRow}>
-          <Chip value={attempted}                                     label="Attempted" color={GREEN}               bg={GREEN_SOFT}            />
-          <Chip value={missed}                                        label="Missed"    color={RED}                 bg={RED_SOFT}              />
-          <Chip value={quizAvgPct != null ? `${quizAvgPct}%` : "—"} label="Avg Score" color={pctColor(quizAvgPct)} bg={pctBg(quizAvgPct)}   />
+        <View style={S.statsRow}>
+          <MiniStat value={attempted} label="Attempted" tone="success" />
+          <MiniStat value={missed} label="Missed" tone="danger" />
+          <MiniStat value={quizAvgPct != null ? `${quizAvgPct}%` : "-"} label="Avg score" tone={pctTone(quizAvgPct)} />
         </View>
 
         {quizzes.map((q) => {
-          const statusCfg = {
-            submitted: { color: GREEN,   bg: GREEN_SOFT,   label: "Attempted" },
-            missed:    { color: RED,     bg: RED_SOFT,     label: "Missed"    },
-            live:      { color: GREEN,   bg: GREEN_SOFT,   label: "Live"      },
-            scheduled: { color: PRIMARY, bg: PRIMARY_SOFT, label: "Upcoming"  },
-          }[q.status];
+          const statusCfg: Record<QuizItem["status"], { tone: Tone; label: string }> = {
+            submitted: { tone: "success", label: "Attempted" },
+            missed:    { tone: "danger",  label: "Missed"    },
+            live:      { tone: "success", label: "Live"      },
+            scheduled: { tone: "primary", label: "Upcoming"  },
+          };
+          const cfg = statusCfg[q.status];
 
           return (
-            <View key={q.quiz_id} style={S.listCard}>
-              <View style={S.listCardTop}>
+            <Card key={q.quiz_id} flat style={{ gap: SP.md }}>
+              <View style={S.subTop}>
                 <View style={{ flex: 1 }}>
-                  <Text style={S.listCardTitle} numberOfLines={1}>{q.title}</Text>
-                  <Text style={S.listCardSub}>{q.subject_name}</Text>
+                  <Text style={font.h3} numberOfLines={1}>{q.title}</Text>
+                  <Text style={font.small}>{q.subject_name}</Text>
                 </View>
-                <View style={[S.statusBadge, { backgroundColor: statusCfg.bg }]}>
-                  <Text style={[S.statusBadgeText, { color: statusCfg.color }]}>{statusCfg.label}</Text>
-                </View>
+                <Chip label={cfg.label} tone={cfg.tone} />
               </View>
 
               {q.status === "submitted" && q.marks_obtained != null && (
                 <View style={S.resultRow}>
                   <View style={S.resultItem}>
-                    <Text style={S.resultLabel}>Marks</Text>
+                    <Text style={font.small}>Marks</Text>
                     <Text style={S.resultVal}>{q.marks_obtained}/{q.total_marks}</Text>
                   </View>
                   <View style={S.resultItem}>
-                    <Text style={S.resultLabel}>Score</Text>
+                    <Text style={font.small}>Score</Text>
                     <Text style={[S.resultVal, { color: pctColor(q.percentage) }]}>
-                      {q.percentage != null ? `${q.percentage}%` : "—"}
+                      {q.percentage != null ? `${q.percentage}%` : "-"}
                     </Text>
                   </View>
                   {q.submitted_at && (
                     <View style={S.resultItem}>
-                      <Text style={S.resultLabel}>Submitted</Text>
+                      <Text style={font.small}>Submitted</Text>
                       <Text style={S.resultVal}>{fmtDate(q.submitted_at)}</Text>
                     </View>
                   )}
@@ -716,21 +646,15 @@ export default function StudentAttendance() {
               )}
 
               {q.status === "missed" && (
-                <View style={S.missedBanner}>
-                  <Ionicons name="close-circle-outline" size={13} color={RED} />
-                  <Text style={S.missedText}>Not attempted · 0/{q.total_marks}</Text>
-                </View>
+                <Banner tone="danger" icon="close-circle-outline">Not attempted, 0/{q.total_marks}</Banner>
               )}
 
               {(q.status === "live" || q.status === "scheduled") && (
-                <View style={S.upcomingBanner}>
-                  <Ionicons name="time-outline" size={13} color={PRIMARY} />
-                  <Text style={S.upcomingText}>
-                    {q.status === "live" ? "Live now" : `Until ${fmtDate(q.scheduled_end)}`}
-                  </Text>
-                </View>
+                <Banner tone="primary" icon="time-outline">
+                  {q.status === "live" ? "Live now" : `Until ${fmtDate(q.scheduled_end)}`}
+                </Banner>
               )}
-            </View>
+            </Card>
           );
         })}
       </View>
@@ -739,76 +663,66 @@ export default function StudentAttendance() {
 
   const renderAssignments = () => {
     const assignments = data?.assignments ?? [];
-    if (!assignments.length) return <EmptyState icon="document-text-outline" text="No assignments yet" />;
+    if (!assignments.length) return <EmptyState icon="document-text-outline" title="No assignments yet" />;
 
     return (
       <View style={S.section}>
-        <View style={S.chipRow}>
-          <Chip value={`${assSubmitted}/${assTotal}`}                                            label="Submitted" color={AMBER}                            bg={AMBER_SOFT}                           />
-          <Chip value={assAvgMarks ?? "—"}                                                       label="Avg Marks" color={assAvgMarks != null ? GREEN : GREY} bg={assAvgMarks != null ? GREEN_SOFT : BG} />
-          <Chip value={assignments.filter((a) => a.status === "missed").length}                  label="Missed"    color={RED}                                bg={RED_SOFT}                             />
+        <View style={S.statsRow}>
+          <MiniStat value={`${assSubmitted}/${assTotal}`} label="Submitted" tone="warning" />
+          <MiniStat value={assAvgMarks ?? "-"} label="Avg marks" tone={assAvgMarks != null ? "success" : "neutral"} />
+          <MiniStat value={assignments.filter((a) => a.status === "missed").length} label="Missed" tone="danger" />
         </View>
 
         {assignments.map((a) => {
-          const statusCfg = {
-            graded:    { color: GREEN,   bg: GREEN_SOFT,   label: "Graded"    },
-            submitted: { color: PRIMARY, bg: PRIMARY_SOFT, label: "Submitted" },
-            late:      { color: AMBER,   bg: AMBER_SOFT,   label: "Late"      },
-            pending:   { color: GREY,    bg: BG,           label: "Pending"   },
-            missed:    { color: RED,     bg: RED_SOFT,     label: "Missed"    },
-          }[a.status];
+          const statusCfg: Record<AssignmentItem["status"], { tone: Tone; label: string }> = {
+            graded:    { tone: "success", label: "Graded"    },
+            submitted: { tone: "primary", label: "Submitted" },
+            late:      { tone: "warning", label: "Late"      },
+            pending:   { tone: "neutral", label: "Pending"   },
+            missed:    { tone: "danger",  label: "Missed"    },
+          };
+          const cfg = statusCfg[a.status];
 
           return (
-            <View key={a.assignment_id} style={S.listCard}>
-              <View style={S.listCardTop}>
+            <Card key={a.assignment_id} flat style={{ gap: SP.md }}>
+              <View style={S.subTop}>
                 <View style={{ flex: 1 }}>
-                  <Text style={S.listCardTitle} numberOfLines={1}>{a.title}</Text>
-                  <Text style={S.listCardSub}>{a.subject_name}</Text>
+                  <Text style={font.h3} numberOfLines={1}>{a.title}</Text>
+                  <Text style={font.small}>{a.subject_name}</Text>
                 </View>
-                <View style={[S.statusBadge, { backgroundColor: statusCfg.bg }]}>
-                  <Text style={[S.statusBadgeText, { color: statusCfg.color }]}>{statusCfg.label}</Text>
-                </View>
+                <Chip label={cfg.label} tone={cfg.tone} />
               </View>
 
-              <View style={{ flexDirection: "row", gap: 8 }}>
-                <Text style={S.listCardSub}>Due: {fmtDate(a.due_date)}</Text>
-                <Text style={S.listCardSub}>·</Text>
-                <Text style={S.listCardSub}>Marks: {a.marks}</Text>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
+                <Ionicons name="calendar-outline" size={13} color={T.muted} />
+                <Text style={font.small}>Due {fmtDate(a.due_date)}</Text>
+                <Text style={font.small}>·</Text>
+                <Text style={font.small}>{a.marks} marks</Text>
               </View>
 
               {a.status === "graded" && a.marks_obtained != null && (
                 <View style={S.gradeBox}>
-                  <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-                    <View style={S.gradeLeft}>
-                      <Text style={S.gradeLabel}>Score</Text>
-                      <Text style={[S.gradeMarks, { color: pctColor((a.marks_obtained / a.marks) * 100) }]}>
-                        {a.marks_obtained}/{a.marks}
-                      </Text>
-                    </View>
-                  </View>
+                  <Text style={font.label}>Score</Text>
+                  <Text style={[S.gradeMarks, { color: pctColor((a.marks_obtained / a.marks) * 100) }]}>
+                    {a.marks_obtained}/{a.marks}
+                  </Text>
                   {a.feedback && (
                     <View style={S.feedbackBox}>
-                      <Text style={S.feedbackLabel}>Feedback</Text>
-                      <Text style={S.feedbackText}>{a.feedback}</Text>
+                      <Text style={font.label}>Feedback</Text>
+                      <Text style={font.body}>{a.feedback}</Text>
                     </View>
                   )}
                 </View>
               )}
 
               {a.status === "missed" && (
-                <View style={S.missedBanner}>
-                  <Ionicons name="close-circle-outline" size={13} color={RED} />
-                  <Text style={S.missedText}>Not submitted · deadline passed</Text>
-                </View>
+                <Banner tone="danger" icon="close-circle-outline">Not submitted, deadline passed</Banner>
               )}
 
               {(a.status === "submitted" || a.status === "late") && (
-                <View style={S.upcomingBanner}>
-                  <Ionicons name="checkmark-circle-outline" size={13} color={PRIMARY} />
-                  <Text style={S.upcomingText}>Submitted · grading pending</Text>
-                </View>
+                <Banner tone="primary" icon="checkmark-circle-outline">Submitted, grading pending</Banner>
               )}
-            </View>
+            </Card>
           );
         })}
       </View>
@@ -818,44 +732,34 @@ export default function StudentAttendance() {
   // ── OD Leave tab ──────────────────────────────────────────────────────────
   const renderOD = () => {
     if (!subjectMetas.length) {
-      return <EmptyState icon="briefcase-outline" text="No subjects enrolled yet" />;
+      return <EmptyState icon="briefcase-outline" title="No subjects enrolled yet" />;
     }
 
     return (
       <View style={S.section}>
-        {/* Info banner */}
-        <View style={S.odInfoBanner}>
-          <Ionicons name="information-circle-outline" size={20} color={OD_COLOR} />
-          <Text style={S.odInfoText}>
-            Submit an on-duty leave request per subject. Your teacher will review
-            and approve or reject it. Approved ODs are automatically reflected in
-            your attendance.
-          </Text>
-        </View>
+        <Banner tone="info" icon="information-circle-outline">
+          Submit an on-duty leave request per subject. Approved ODs show in your attendance.
+        </Banner>
 
         {subjectMetas.map((meta) => {
           const canApply = !!meta.teacher_id; // guard: subject must have a teacher assigned
           return (
-            <View key={meta.subject_id} style={S.odSubjectCard}>
-              {/* Subject info row */}
-              <View style={S.odSubjectTop}>
-                <View style={S.odSubjectIconWrap}>
+            <Card key={meta.subject_id} flat style={{ gap: SP.md }}>
+              <View style={{ flexDirection: "row", alignItems: "center", gap: SP.md }}>
+                <View style={S.odIcon}>
                   <Ionicons name="book-outline" size={20} color={OD_COLOR} />
                 </View>
                 <View style={{ flex: 1 }}>
-                  <Text style={S.odSubjectName} numberOfLines={2}>
-                    {meta.subject_name}
-                  </Text>
-                  {!canApply && (
-                    <Text style={S.odNoTeacher}>No teacher assigned</Text>
-                  )}
+                  <Text style={font.h3} numberOfLines={2}>{meta.subject_name}</Text>
+                  {!canApply && <Text style={font.small}>No teacher assigned</Text>}
                 </View>
               </View>
 
-              {/* Apply button */}
-              <TouchableOpacity
-                style={[S.odApplyBtn, !canApply && S.odApplyBtnDisabled]}
-                activeOpacity={canApply ? 0.8 : 1}
+              <Button
+                label={canApply ? "Apply or view requests" : "Unavailable"}
+                icon={canApply ? "add-circle-outline" : undefined}
+                size="md"
+                disabled={!canApply}
                 onPress={() => {
                   if (!canApply) return;
                   navigation.navigate("ODLeaveRequest", {
@@ -867,17 +771,8 @@ export default function StudentAttendance() {
                     courseId:    meta.course_id,
                   });
                 }}
-              >
-                <Ionicons
-                  name="add-circle-outline"
-                  size={18}
-                  color={canApply ? WHITE : GREY}
-                />
-                <Text style={[S.odApplyBtnText, !canApply && { color: GREY }]}>
-                  {canApply ? "Apply / View OD Requests" : "Unavailable"}
-                </Text>
-              </TouchableOpacity>
-            </View>
+              />
+            </Card>
           );
         })}
       </View>
@@ -888,33 +783,35 @@ export default function StudentAttendance() {
   // Main render
   // ─────────────────────────────────────────────────────────────────────────
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
+    <Screen edges={["top"]}>
       <View style={S.header}>
-        <Text style={S.headerTitle}>My Reports</Text>
-        <Text style={S.headerSub}>Academic performance overview</Text>
+        <Text style={font.display}>My reports</Text>
+        <Text style={[font.body, { marginTop: 2 }]}>Academic performance</Text>
       </View>
 
-      <View style={S.tabBar}>
-        {TABS.map((tab) => {
-          const active = activeTab === tab.key;
-          return (
-            <TouchableOpacity
-              key={tab.key}
-              style={[S.tabItem, active && S.tabItemActive]}
-              onPress={() => setActiveTab(tab.key)}
-            >
-              <Ionicons name={tab.icon as any} size={15} color={active ? PRIMARY : GREY} />
-              <Text style={[S.tabLabel, active && S.tabLabelActive]}>{tab.label}</Text>
-              {active && <View style={S.tabUnderline} />}
-            </TouchableOpacity>
-          );
-        })}
+      <View style={{ height: 52 }}>
+        <ScrollView horizontal showsHorizontalScrollIndicator={false} contentContainerStyle={S.tabRow}>
+          {TABS.map((tab) => {
+            const active = activeTab === tab.key;
+            return (
+              <TouchableOpacity
+                key={tab.key}
+                style={[S.tabItem, active && S.tabItemOn]}
+                onPress={() => setActiveTab(tab.key)}
+                activeOpacity={0.8}
+              >
+                <Ionicons name={tab.icon} size={15} color={active ? "#FFF" : T.sub} />
+                <Text style={[S.tabLabel, active && { color: "#FFF" }]}>{tab.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </ScrollView>
       </View>
 
       {loading ? (
         <View style={S.center}>
-          <ActivityIndicator size="large" color={PRIMARY} />
-          <Text style={S.loadingText}>Loading your report…</Text>
+          <ActivityIndicator size="large" color={T.primary} />
+          <Text style={font.small}>Loading your report</Text>
         </View>
       ) : (
         <ScrollView
@@ -924,7 +821,7 @@ export default function StudentAttendance() {
             <RefreshControl
               refreshing={refreshing}
               onRefresh={() => { setRefreshing(true); fetchAll(true); }}
-              colors={[PRIMARY]}
+              colors={[T.primary]}
             />
           }
         >
@@ -933,171 +830,63 @@ export default function StudentAttendance() {
           {activeTab === "quizzes"     && renderQuizzes()}
           {activeTab === "assignments" && renderAssignments()}
           {activeTab === "od"          && renderOD()}
-          <View style={{ height: 100 }} />
+          <View style={{ height: 120 }} />
         </ScrollView>
       )}
-    </SafeAreaView>
-  );
-}
-
-// ─── Empty state ──────────────────────────────────────────────────────────────
-function EmptyState({ icon, text }: { icon: any; text: string }) {
-  return (
-    <View style={S.empty}>
-      <Ionicons name={icon} size={46} color={BORDER} />
-      <Text style={S.emptyText}>{text}</Text>
-    </View>
+    </Screen>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const S = StyleSheet.create({
-  safe:        { flex: 1, backgroundColor: BG },
-  scroll:      { padding: 16, paddingTop: 12, paddingBottom: 24 },
-  center:      { flex: 1, justifyContent: "center", alignItems: "center", gap: 12 },
-  loadingText: { fontSize: 13, color: GREY, fontWeight: "500" },
+  header: { paddingHorizontal: SP.xl, paddingTop: SP.lg, paddingBottom: SP.md },
+  center: { flex: 1, justifyContent: "center", alignItems: "center", gap: SP.md },
+  scroll: { paddingHorizontal: SP.xl, paddingTop: SP.xs },
+  section: { gap: SP.md },
 
-  header:      { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 12, backgroundColor: WHITE, borderBottomWidth: 1, borderBottomColor: BORDER },
-  headerTitle: { fontSize: 24, fontWeight: "800", color: DARK },
-  headerSub:   { fontSize: 13, color: GREY, marginTop: 2 },
+  tabRow:    { paddingHorizontal: SP.xl, gap: SP.sm, alignItems: "center" },
+  tabItem:   { flexDirection: "row", alignItems: "center", gap: 6, paddingHorizontal: 14, height: 38, borderRadius: 19, backgroundColor: T.surface, borderWidth: 1, borderColor: T.line },
+  tabItemOn: { backgroundColor: T.primary, borderColor: T.primary },
+  tabLabel:  { fontSize: 13, fontWeight: "700", color: T.sub },
 
-  tabBar:         { flexDirection: "row", backgroundColor: WHITE, borderBottomWidth: 1, borderBottomColor: BORDER, paddingHorizontal: 4 },
-  tabItem:        { flex: 1, flexDirection: "column", alignItems: "center", paddingVertical: 10, gap: 3, position: "relative" },
-  tabItemActive:  {},
-  tabLabel:       { fontSize: 10, fontWeight: "600", color: GREY },
-  tabLabelActive: { color: PRIMARY, fontWeight: "700" },
-  tabUnderline:   { position: "absolute", bottom: 0, left: 10, right: 10, height: 2, backgroundColor: PRIMARY, borderRadius: 2 },
+  hero:        { backgroundColor: T.dark, borderRadius: 22, padding: SP.xl, gap: SP.lg },
+  heroEyebrow: { fontSize: 11, fontWeight: "700", color: "#94A3B8", textTransform: "uppercase", letterSpacing: 1 },
+  heroName:    { fontSize: 22, fontWeight: "800", color: "#FFF", marginTop: -10 },
+  heroRow:     { flexDirection: "row", alignItems: "center" },
+  heroStat:    { flex: 1, alignItems: "center", gap: 4 },
+  heroNum:     { fontSize: 24, fontWeight: "800" },
+  heroLabel:   { fontSize: 11, color: "#94A3B8", fontWeight: "600" },
+  heroDivider: { width: 1, height: 36, backgroundColor: "#2A2A3A" },
 
-  section: { gap: 12 },
+  ovTop:   { flexDirection: "row", alignItems: "center", gap: SP.md, marginBottom: SP.xs },
+  ovIcon:  { width: 34, height: 34, borderRadius: 11, alignItems: "center", justifyContent: "center" },
+  statsRow:{ flexDirection: "row", gap: SP.sm, marginTop: SP.sm },
+  miniStat:{ flex: 1, borderRadius: 14, paddingVertical: 10, alignItems: "center", gap: 2 },
+  miniVal: { fontSize: 18, fontWeight: "800" },
+  miniLabel:{ fontSize: 10.5, fontWeight: "700" },
 
-  barTrack: { height: 5, backgroundColor: BORDER, borderRadius: 3, overflow: "hidden" },
-  barFill:  { height: "100%", borderRadius: 3 },
+  bigPct: { fontSize: 42, fontWeight: "800", lineHeight: 48, marginTop: 2 },
+  status: { fontSize: 13, fontWeight: "700" },
+  sumNum: { fontSize: 28, fontWeight: "800" },
 
-  chip:      { flex: 1, borderRadius: 12, padding: 10, alignItems: "center", gap: 2 },
-  chipVal:   { fontSize: 18, fontWeight: "800" },
-  chipLabel: { fontSize: 10, fontWeight: "600" },
-  chipRow:   { flexDirection: "row", gap: 8 },
+  subTop: { flexDirection: "row", alignItems: "flex-start", gap: SP.sm },
+  track:  { height: 8, backgroundColor: T.line, borderRadius: 4, position: "relative" },
+  fill:   { height: "100%", borderRadius: 4 },
+  marker: { position: "absolute", left: "75%", top: -3, width: 2, height: 14, backgroundColor: T.sub, borderRadius: 1 },
+  hint:   { fontSize: 10.5, color: T.muted, textAlign: "right", marginTop: 4 },
 
-  heroCard:       { backgroundColor: DARK, borderRadius: 20, padding: 20, gap: 16 },
-  heroEyebrow:    { fontSize: 11, fontWeight: "700", color: GREY, textTransform: "uppercase", letterSpacing: 1 },
-  heroName:       { fontSize: 22, fontWeight: "800", color: WHITE, marginTop: -8 },
-  heroRow:        { flexDirection: "row", alignItems: "center" },
-  heroStat:       { flex: 1, alignItems: "center", gap: 4 },
-  heroStatNum:    { fontSize: 22, fontWeight: "800" },
-  heroStatLabel:  { fontSize: 11, color: GREY, fontWeight: "600" },
-  heroDivider:    { width: 1, height: 36, backgroundColor: "#2E3A52" },
+  attStatRow: { flexDirection: "row", alignItems: "center" },
+  attStat:    { flex: 1, alignItems: "center", gap: 1 },
+  attNum:     { fontSize: 19, fontWeight: "800" },
+  vDiv:       { width: 1, height: 28, backgroundColor: T.line },
 
-  overviewCard: { backgroundColor: WHITE, borderRadius: 16, flexDirection: "row", overflow: "hidden", borderWidth: 1, borderColor: BORDER, elevation: 1, shadowColor: "#000", shadowOpacity: 0.04, shadowRadius: 6 },
-  cardAccent:   { width: 4, alignSelf: "stretch" },
-  cardInner:    { flex: 1, padding: 16 },
-  cardTop:      { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 12 },
-  cardIconWrap: { width: 28, height: 28, borderRadius: 8, justifyContent: "center", alignItems: "center" },
-  cardTitle:    { fontSize: 14, fontWeight: "700", color: DARK },
-  cardStats:    { flexDirection: "row", gap: 8 },
-  odOverviewDesc: { fontSize: 12, color: GREY, lineHeight: 18, marginTop: -4 },
+  resultRow:  { flexDirection: "row", justifyContent: "space-between", backgroundColor: T.bg, borderRadius: 12, padding: SP.md },
+  resultItem: { alignItems: "center", gap: 3 },
+  resultVal:  { fontSize: 14, fontWeight: "800", color: T.ink },
 
-  attSummaryCard:   { backgroundColor: "#FFF", borderRadius: 16, padding: 18, flexDirection: "row", justifyContent: "space-between", alignItems: "center", borderLeftWidth: 5, borderWidth: 1, borderColor: "#E5E7EB", marginBottom: 4 },
-  attSummaryLabel:  { fontSize: 12, color: "#6B7280", fontWeight: "600", marginBottom: 4 },
-  attSummaryPct:    { fontSize: 38, fontWeight: "800", lineHeight: 42 },
-  attSummaryStatus: { fontSize: 12, fontWeight: "700", marginTop: 4 },
-  attSummaryRight:  { alignItems: "center" },
-  attSummaryBigNum: { fontSize: 28, fontWeight: "800" },
-  attSummarySmall:  { fontSize: 12, color: "#6B7280", marginTop: 2 },
+  gradeBox:    { backgroundColor: T.bg, borderRadius: 12, padding: SP.md, gap: 4 },
+  gradeMarks:  { fontSize: 22, fontWeight: "800" },
+  feedbackBox: { borderTopWidth: 1, borderTopColor: T.line, paddingTop: SP.sm, marginTop: SP.sm, gap: 3 },
 
-  attSubCard:  { backgroundColor: "#FFF", borderRadius: 14, padding: 14, borderWidth: 1, borderColor: "#E5E7EB", gap: 10 },
-  attSubTop:   { flexDirection: "row", justifyContent: "space-between", alignItems: "flex-start" },
-  attSubName:  { fontSize: 15, fontWeight: "700", color: "#111827", flex: 1, marginRight: 10 },
-  attPctBadge: { paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, minWidth: 54, alignItems: "center" },
-  attPctText:  { fontSize: 14, fontWeight: "800" },
-
-  attBarTrack:  { height: 8, backgroundColor: "#E5E7EB", borderRadius: 4, overflow: "visible", position: "relative" },
-  attBarFill:   { height: "100%" as any, borderRadius: 4 },
-  attBarMarker: { position: "absolute", left: "75%" as any, top: -3, width: 2, height: 14, backgroundColor: "#6B7280", borderRadius: 1 },
-  attBarHint:   { fontSize: 10, color: "#6B7280", textAlign: "right" },
-
-  attStatRow:     { flexDirection: "row", alignItems: "center" },
-  attStatItem:    { flex: 1, alignItems: "center" },
-  attStatDivider: { width: 1, height: 28, backgroundColor: "#E5E7EB" },
-  attStatNum:     { fontSize: 18, fontWeight: "800" },
-  attStatLabel:   { fontSize: 10, color: "#6B7280", fontWeight: "600", marginTop: 2 },
-
-  attWarnRow:  { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: "#FEF2F2", borderRadius: 8, padding: 8 },
-  attWarnText: { fontSize: 12, color: "#EF4444", fontWeight: "600", flex: 1 },
-
-  listCard:      { backgroundColor: WHITE, borderRadius: 14, padding: 14, gap: 10, borderWidth: 1, borderColor: BORDER, elevation: 1 },
-  listCardTop:   { flexDirection: "row", alignItems: "flex-start", gap: 10 },
-  listCardTitle: { fontSize: 14, fontWeight: "700", color: DARK },
-  listCardSub:   { fontSize: 12, color: GREY, marginTop: 2 },
-
-  statusBadge:     { paddingHorizontal: 9, paddingVertical: 4, borderRadius: 8 },
-  statusBadgeText: { fontSize: 11, fontWeight: "700" },
-
-  resultRow:   { flexDirection: "row", justifyContent: "space-between", backgroundColor: BG, borderRadius: 10, padding: 10 },
-  resultItem:  { alignItems: "center" },
-  resultLabel: { fontSize: 10, color: GREY, fontWeight: "600" },
-  resultVal:   { fontSize: 14, fontWeight: "800", color: DARK, marginTop: 3 },
-
-  missedBanner: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: RED_SOFT, borderRadius: 8, padding: 8 },
-  missedText:   { fontSize: 12, color: RED, fontWeight: "600" },
-
-  upcomingBanner: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: PRIMARY_SOFT, borderRadius: 8, padding: 8 },
-  upcomingText:   { fontSize: 12, color: PRIMARY, fontWeight: "600" },
-
-  gradeBox:      { backgroundColor: BG, borderRadius: 10, padding: 12, gap: 8 },
-  gradeLeft:     { gap: 4 },
-  gradeLabel:    { fontSize: 10, color: GREY, fontWeight: "700", textTransform: "uppercase" },
-  gradeMarks:    { fontSize: 20, fontWeight: "800" },
-  feedbackBox:   { borderTopWidth: 1, borderTopColor: BORDER, paddingTop: 8, gap: 3 },
-  feedbackLabel: { fontSize: 10, color: GREY, fontWeight: "700", textTransform: "uppercase" },
-  feedbackText:  { fontSize: 13, color: DARK, lineHeight: 18 },
-
-  empty:     { paddingVertical: 60, alignItems: "center", gap: 12 },
-  emptyText: { fontSize: 14, color: GREY, fontWeight: "600" },
-
-  // ── OD Leave tab ──────────────────────────────────────────────────────────
-  odInfoBanner: {
-    flexDirection: "row",
-    gap: 10,
-    backgroundColor: OD_SOFT,
-    borderRadius: 14,
-    padding: 14,
-    alignItems: "flex-start",
-    borderWidth: 1,
-    borderColor: OD_COLOR + "33",
-  },
-  odInfoText: { flex: 1, fontSize: 13, color: "#4C1D95", lineHeight: 18 },
-
-  odSubjectCard: {
-    backgroundColor: WHITE,
-    borderRadius: 16,
-    padding: 16,
-    gap: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
-    elevation: 1,
-  },
-  odSubjectTop: { flexDirection: "row", alignItems: "center", gap: 12 },
-  odSubjectIconWrap: {
-    width: 42, height: 42, borderRadius: 13,
-    backgroundColor: OD_SOFT,
-    alignItems: "center", justifyContent: "center",
-  },
-  odSubjectName: { fontSize: 15, fontWeight: "700", color: DARK },
-  odNoTeacher:   { fontSize: 11, color: GREY, marginTop: 2 },
-
-  odApplyBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    backgroundColor: OD_COLOR,
-    borderRadius: 50,
-    paddingVertical: 12,
-  },
-  odApplyBtnDisabled: {
-    backgroundColor: BG,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-  odApplyBtnText: { fontSize: 14, fontWeight: "700", color: WHITE },
+  odIcon: { width: 44, height: 44, borderRadius: 14, backgroundColor: OD_SOFT, alignItems: "center", justifyContent: "center" },
 });

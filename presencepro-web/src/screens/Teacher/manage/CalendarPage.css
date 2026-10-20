@@ -1,0 +1,393 @@
+/* CalendarPage.css — Manage → Academic Calendar (prefix ac-) */
+
+.ac-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px 20px;
+  align-items: flex-end;
+  margin-bottom: 16px;
+}
+.ac-year {
+  min-width: 150px;
+}
+.ac-two {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  gap: 10px;
+}
+
+/* type colours */
+.ac-chip--holiday {
+  background: #fee2e2;
+  color: #b91c1c;
+  border-color: #fca5a5;
+}
+.ac-chip--exam {
+  background: #ede9fe;
+  color: #6d28d9;
+  border-color: #c4b5fd;
+}
+.ac-chip--defaulter {
+  background: #fef3c7;
+  color: #b45309;
+  border-color: #fcd34d;
+}
+.ac-chip--event {
+  background: #dbeafe;
+  color: #1d4ed8;
+  border-color: #93c5fd;
+}
+.ac-chip--working_day_swap {
+  background: #ccfbf1;
+  color: #0f766e;
+  border-color: #5eead4;
+}
+.ac-chip--general {
+  background: #f3f4f6;
+  color: #374151;
+  border-color: #d1d5db;
+}
+
+/* month grid */
+.ac-month {
+  background: #fff;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 14px;
+  padding: 14px;
+  margin-bottom: 20px;
+}
+.ac-month-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.ac-month-title {
+  margin: 0 auto 0 6px;
+  font-size: 17px;
+  font-weight: 800;
+  color: #111827;
+}
+.ac-today {
+  margin-left: 4px;
+}
+.ac-grid {
+  display: grid;
+  grid-template-columns: repeat(7, minmax(0, 1fr));
+  border-top: 1px solid #e5e7eb;
+  border-left: 1px solid #e5e7eb;
+}
+.ac-dow {
+  padding: 6px 8px;
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #6b7280;
+  background: #f9fafb;
+  border-right: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+}
+.ac-cell {
+  min-height: 92px;
+  padding: 4px;
+  border-right: 1px solid #e5e7eb;
+  border-bottom: 1px solid #e5e7eb;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  cursor: default;
+}
+.ac-cell--blank {
+  background: #fafafb;
+}
+.ac-cell--sun {
+  background: #fcfcfd;
+}
+.ac-cell--today .ac-day {
+  background: #4834d4;
+  color: #fff;
+}
+.ac-day {
+  align-self: flex-start;
+  min-width: 24px;
+  height: 24px;
+  line-height: 24px;
+  text-align: center;
+  padding: 0 5px;
+  border-radius: 12px;
+  font-size: 12px;
+  font-weight: 700;
+  color: #374151;
+  cursor: pointer;
+}
+.ac-day:hover {
+  background: #eef2ff;
+  color: #4834d4;
+}
+.ac-cell--today .ac-day:hover {
+  background: #4834d4;
+  color: #fff;
+}
+.ac-chip {
+  border: 1px solid;
+  border-radius: 6px;
+  padding: 1px 6px;
+  font: 600 11px/1.5 inherit;
+  font-family: inherit;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+  width: 100%;
+}
+.ac-chip:hover {
+  filter: brightness(0.96);
+}
+.ac-more {
+  font-size: 11px;
+  color: #6b7280;
+  padding-left: 4px;
+}
+
+/* event list */
+.ac-events {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ac-events-title {
+  margin: 0 0 2px;
+  font-size: 14px;
+  font-weight: 800;
+  color: #374151;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.ac-event {
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+  background: #fff;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+.ac-event--past {
+  opacity: 0.7;
+}
+.ac-badge {
+  flex: 0 0 auto;
+  border: 1px solid;
+  border-radius: 8px;
+  padding: 3px 10px;
+  font-size: 11px;
+  font-weight: 800;
+  text-transform: uppercase;
+  letter-spacing: 0.4px;
+  margin-top: 2px;
+  min-width: 92px;
+  text-align: center;
+}
+.ac-event-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.ac-event-title {
+  font-size: 15px;
+  font-weight: 700;
+  color: #111827;
+  overflow-wrap: anywhere;
+}
+.ac-scope {
+  margin-left: 8px;
+  font-size: 10px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #6b7280;
+  background: #f3f4f6;
+  border-radius: 6px;
+  padding: 1px 6px;
+  vertical-align: middle;
+}
+.ac-event-date {
+  font-size: 13px;
+  color: #4b5563;
+}
+.ac-event-desc {
+  font-size: 13px;
+  color: #6b7280;
+  overflow-wrap: anywhere;
+}
+.ac-auto {
+  font-size: 12px;
+  font-weight: 600;
+  margin-top: 3px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.ac-auto::before {
+  content: "";
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  flex: 0 0 auto;
+}
+.ac-auto--wait {
+  color: #b45309;
+}
+.ac-auto--ok {
+  color: #15803d;
+}
+.ac-auto--bad {
+  color: #b91c1c;
+}
+.ac-auto--off {
+  color: #6b7280;
+}
+.ac-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  justify-content: flex-end;
+  flex: 0 1 auto;
+}
+
+/* dialogs */
+.ac-check {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  border: 1.5px solid #e5e7eb;
+  border-radius: 10px;
+  padding: 10px 12px;
+  cursor: pointer;
+  background: #f9fafb;
+}
+.ac-check input {
+  margin-top: 3px;
+  accent-color: #4834d4;
+  width: 16px;
+  height: 16px;
+}
+.ac-check span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 13px;
+  color: #111827;
+}
+.ac-check em {
+  font-style: normal;
+  color: #6b7280;
+}
+.ac-info {
+  background: #eef2ff;
+  border-radius: 10px;
+  padding: 10px 12px;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #3730a3;
+}
+.ac-confirm {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.55;
+  color: #374151;
+}
+.ac-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+}
+.ac-list-head {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+  font-size: 13px;
+  color: #6b7280;
+}
+.ac-list-head strong {
+  color: #111827;
+  font-size: 14px;
+}
+.ac-period {
+  font-size: 12px;
+  font-weight: 600;
+  color: #4834d4;
+  background: #eef2ff;
+  border-radius: 8px;
+  padding: 6px 10px;
+}
+.ac-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+.ac-table th {
+  text-align: left;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: #6b7280;
+  padding: 6px 8px;
+  border-bottom: 1.5px solid #111827;
+}
+.ac-table td {
+  padding: 8px;
+  border-bottom: 1px solid #e5e7eb;
+  vertical-align: top;
+  color: #111827;
+}
+.ac-table td small {
+  display: block;
+  color: #9ca3af;
+  font-size: 11px;
+  margin-top: 2px;
+}
+.ac-roll {
+  font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 720px) {
+  .ac-two {
+    grid-template-columns: 1fr;
+  }
+  .ac-event {
+    flex-direction: column;
+    gap: 8px;
+  }
+  .ac-badge {
+    min-width: 0;
+  }
+  .ac-actions {
+    justify-content: flex-start;
+  }
+  .ac-cell {
+    min-height: 64px;
+    padding: 2px;
+  }
+  .ac-chip {
+    font-size: 10px;
+    padding: 0 3px;
+  }
+  .ac-month {
+    padding: 8px;
+  }
+  .ac-dow {
+    padding: 4px 2px;
+    font-size: 10px;
+    text-align: center;
+  }
+}

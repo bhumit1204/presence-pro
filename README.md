@@ -17,64 +17,88 @@
 
 ---
 
-## 💡 Why PresencePro?
+## Why PresencePro?
 
 Most campuses still run on paper registers, spreadsheets, WhatsApp groups, and Google Forms. The result is familiar to every student and teacher:
 
-| The old way 😩 | The PresencePro way ✨ |
+| The old way | The PresencePro way |
 | --- | --- |
 | Roll calls eat into lecture time | Attendance is marked in **seconds** |
 | Friends answer "present" for each other | **Wi-Fi + BLE presence checks** make proxies very hard |
 | Assignments scattered across chats and email | Tasks, submissions, and deadlines live in **one place** |
 | Announcements get lost in group noise | **Targeted** messages to a class, a group, or low-attendance students |
-| Reports compiled by hand | **One-tap PDF reports** with filters |
+| Reports compiled by hand | **One-tap PDF and CSV reports** with filters |
+| Electives and sections tracked on paper | **Elective groups and divisions** managed by the head, applied automatically |
 | Students find out they're short on attendance too late | A **live dashboard** shows attendance, tasks, and quizzes |
 
-PresencePro brings attendance, assignments, quizzes, announcements, and reporting into a single ecosystem that teachers, students, and institutions can all rely on.
+PresencePro brings attendance, curriculum management, assignments, quizzes, announcements, and reporting into a single ecosystem that teachers, students, heads of department, and institutions can all rely on.
 
 ---
 
-## ✨ Features
+## Features
 
-### 🎯 Flexible, secure attendance
+### Flexible, secure attendance
 Teachers start a session during a scheduled lecture and pick **one** verification method:
 
 | Method | How it works |
 | --- | --- |
-| 📡 **IoT (BLE + GATT)** | An ESP32 classroom node exposes a **GATT** service over BLE. The student's phone connects to it at very short range to mark attendance, and the node is paired with the teacher's live session |
-| 🔢 **Code-based** | A short-lived session code is generated; students pick the correct code from on-screen options before it expires |
-| 📷 **Time-based QR** | A rotating QR code prevents screenshots from being shared |
-| 👆 **Biometric + geofencing** | Verifies identity and location together |
+| **IoT (BLE + GATT)** | An ESP32 classroom node exposes a **GATT** service over BLE. The student's phone connects to it at very short range to mark attendance, and the node is paired with the teacher's live session |
+| **Code-based** | A short-lived session code is generated; students pick the correct code from on-screen options before it expires |
+| **Time-based QR** | A rotating QR code prevents screenshots from being shared |
+| **Biometric + geofencing** | Verifies identity and location together |
 
 Every session also enforces **geofencing** using a combination of Wi-Fi fingerprinting and BLE beacons, so only students physically in the room can mark attendance.
 
 After the session, teachers can **review the roster, add missed students, apply manual overrides, or stop the session**, all from the app.
 
-### 🧑‍🏫 Teacher tools
+### Teacher tools
 - **Live dashboard** with the ongoing lecture timer, upcoming lectures, and quick actions
 - **Live attendance roster** that updates as students check in
+- **Lecture exchange and cancellation** between teachers, with the timetable updated for students
 - **Assignments** with deadlines, submission counts, and optional feedback
 - **Quizzes**: create them manually, or **generate them with AI** from a syllabus
 - **Announcements** to the whole class, specific students, groups, or students below an attendance threshold (e.g. under 75%)
-- **Reports** filtered by subject, attendance percentage, and time period, exportable to **PDF**
+- **Reports** filtered by subject, division, attendance percentage, and time period, exportable to **PDF**
 - **On-duty (OD) requests** for sessions missed for approved reasons
 
-### 🎓 Student experience
+### Student experience
+- **Secure sign-up** with email OTP verification and a forgot-password flow
 - **Personal dashboard** with current session progress, overall attendance %, and absence count
 - **Subject-wise attendance tracker** with a daily and overall view
-- **Tasks & submissions** grouped as Assigned, Missing, and Done
+- **Elective selection**: pick one subject from each elective group for the semester
+- **Division selection** at registration or later from the profile
+- **Tasks and submissions** grouped as Assigned, Missing, and Done
 - **Quizzes** with upcoming and previous attempts and scores
 - **Announcements feed** filterable by Class, Individual, and Group
 - **Push notifications** for deadlines and updates
 
-### 🏛️ Institute administration
+### Head Teacher panel
+Heads of department get a **Manage** section on the web dashboard, on top of the normal teacher pages:
+
+| Page | What the head can do |
+| --- | --- |
+| **Semesters** | Set semester dates for the course |
+| **Subjects & Faculty** | Add subjects, assign faculty, and build **elective groups** (n subjects, a student picks one). See per-subject student counts, **move** a student to another elective, or **unenroll** them |
+| **Divisions** | Create divisions (A, B, C sections of a semester) and assign or move students between them |
+| **Timetable** | Schedule lectures for the whole semester or for a single division; filter the view by common lectures or a division |
+| **Academic Calendar** | Maintain holidays and events |
+| **Student Reports** | Review attendance across the course, filter by division, and export to CSV |
+
+Head status follows the institute app: when a head is assigned or removed there, the session refreshes automatically and the Manage section appears or disappears without logging out.
+
+### Electives and divisions
+- **Elective groups:** subjects marked as non-compulsory share a group. Each student holds exactly one choice per group per semester, and attendance and reports count only the subjects a student is enrolled in.
+- **Divisions:** a lecture can be common to every student or tied to one division. Timetables, attendance, and reports are division-aware; a student without a division sees only the common lectures.
+
+### Institute administration
 - Manage **colleges, courses, subjects, users, and classes**
 - Role-based access for **students, teachers, head teachers, and institute admins**
 - Institute management screens on the web dashboard
+- **Semester rollover** service that moves a course to its next semester when enabled
 
 ---
 
-## 🔐 How Attendance Works
+## How Attendance Works
 
 ```mermaid
 sequenceDiagram
@@ -90,13 +114,13 @@ sequenceDiagram
     API-->>S: Push notification, Mark Attendance enabled
     S->>API: Submit code / QR / biometric / BLE proof
     API->>N: Verify physical presence (geofence)
-    N-->>API: Inside classroom ✅
+    N-->>API: Inside classroom
     API->>DB: Store record (time, method, status)
-    API-->>S: Attendance Marked!
+    API-->>S: Attendance Marked
     T->>API: Review roster, add missed, confirm
 ```
 
-### 📡 IoT attendance with ESP32 and GATT
+### IoT attendance with ESP32 and GATT
 
 The IoT method is built around an **ESP32** classroom node that communicates over **BLE using GATT (Generic Attribute Profile)**.
 
@@ -119,35 +143,36 @@ sequenceDiagram
     S->>E: Send attendance request via GATT
     E-->>S: Response / verification data
     S->>API: Submit result for verification
-    API-->>S: Attendance Marked!
+    API-->>S: Attendance Marked
 ```
 
 **Attendance is blocked before the teacher starts the session.** The button stays disabled and an error is shown if a student tries early. Each record stores **who, which subject, when, by which method, and with what status** (`present`, `absent`, `late`, `manual`).
 
 ---
 
-## 🏗️ Architecture
+## Architecture
 
 ```mermaid
 flowchart LR
     subgraph Clients
-        M[📱 Mobile App<br/>Expo React Native]
-        W[💻 Web Dashboard<br/>React + Vite]
+        M[Mobile App<br/>Expo React Native]
+        W[Web Dashboard<br/>React + Vite]
     end
 
     subgraph Services
-        B[⚙️ Main API<br/>backend :5000]
-        I[🏫 Institute API<br/>institute_backend :5001]
+        B[Main API<br/>backend :5000]
+        I[Institute API<br/>institute_backend :5001]
     end
 
     subgraph Cloud
-        F[(🔥 Firebase<br/>Auth + Firestore)]
-        R[(☁️ Object Storage)]
-        AI[🤖 AI Quiz Generation]
-        X[🔔 Expo Notifications]
+        F[(Firebase<br/>Auth + Firestore)]
+        R[(Object Storage)]
+        AI[AI Quiz Generation]
+        X[Expo Notifications]
+        ML[Email OTP]
     end
 
-    D[📡 ESP32 Classroom Node<br/>BLE GATT Server]
+    D[ESP32 Classroom Node<br/>BLE GATT Server]
 
     M --> B
     W --> B
@@ -157,6 +182,7 @@ flowchart LR
     B --> R
     B --> AI
     B --> X
+    B --> ML
     M <-. BLE / GATT .-> D
     D <-. MQTT .-> B
 ```
@@ -166,28 +192,31 @@ flowchart LR
 ```text
 backend/             Main application API (default port 5000)
 institute_backend/   Institute administration API (default port 5001)
-mobile-app/          Expo React Native application
-presencepro-web/     Vite React web dashboard
+mobile-app/          Expo React Native application (students and teachers)
+presencepro-web/     Vite React web dashboard (teachers, heads, students)
+docs/                Images used by this README
 ```
 
-The main backend mounts route groups such as `/auth`, `/api/lectures`, `/api/quizzes`, `/api/assignments`, `/api/reports`, `/api/broadcasts`, `/api/manage`, and `/api/od`. The institute backend automatically mounts route files from its `routes/` directory and listens on port 5001 by default.
+The main backend mounts route groups such as `/auth`, `/api/lectures`, `/api/quizzes`, `/api/assignments`, `/api/reports`, `/api/broadcasts`, `/api/profile`, `/api/colleges`, and `/api/od`, plus the web routes for teachers, students, and heads (subjects, divisions, timetable, reports). The institute backend automatically mounts route files from its `routes/` directory and listens on port 5001 by default.
 
 ### Tech stack
 
 | Layer | Technology |
 | --- | --- |
-| Mobile | React Native (Expo), single codebase for Android and iOS |
+| Mobile | React Native (Expo), Android |
 | Web | React, Vite |
 | APIs | Node.js, Express |
 | Auth & data | Firebase Authentication, Cloud Firestore |
+| Email | SMTP mailer for OTP and password reset |
 | Files | S3-compatible object storage (R2) |
 | AI | Groq-powered quiz generation |
 | Devices | ESP32 nodes, BLE with GATT (server on ESP32, client on phone), MQTT |
-| Notifications | Firebase Cloud Messaging (FCM) |
+| Notifications | Expo push notifications |
+| Hosting | Node processes under PM2 behind a Caddy reverse proxy |
 
 ---
 
-## 🚀 Getting Started
+## Getting Started
 
 ### Prerequisites
 
@@ -211,7 +240,7 @@ cd ../presencepro-web && npm install
 Environment files and Firebase service-account JSON files are intentionally ignored by Git. **Never commit credentials.**
 
 <details>
-<summary><b>⚙️ Backend environment</b></summary>
+<summary><b>Backend environment</b></summary>
 
 Common variables used by the main backend:
 
@@ -220,7 +249,12 @@ PORT=5000
 GROQ_API_KEY=...
 R2_ENDPOINT=...
 WEB_APP_URL=http://localhost:5173
+SEM_ROLLOVER=off
 ```
+
+The mailer also needs the email account credentials used to send OTP and password-reset emails. Use an app-specific password, never your account password.
+
+`SEM_ROLLOVER` controls the semester rollover service. Leave it off until the semester dates are set, then switch it to `on`.
 
 The institute backend uses at least:
 
@@ -233,7 +267,7 @@ Place the required Firebase Admin credentials in the local backend configuration
 </details>
 
 <details>
-<summary><b>💻 Web environment</b></summary>
+<summary><b>Web environment</b></summary>
 
 Create `presencepro-web/.env`:
 
@@ -244,7 +278,7 @@ VITE_INSTITUTE_API_URL=http://localhost:5001
 </details>
 
 <details>
-<summary><b>📱 Mobile environment</b></summary>
+<summary><b>Mobile environment</b></summary>
 
 Create `mobile-app/.env` with the Expo public Firebase variables used by `src/services/firebase.ts`:
 
@@ -258,7 +292,7 @@ EXPO_PUBLIC_FB_MESSAGING_SENDER_ID=...
 EXPO_PUBLIC_FB_APP_ID=...
 ```
 
-For a physical device, use the development machine's LAN IP instead of `localhost`. Some legacy mobile screens currently contain their own local API fallback; update those values or centralize them before using a different backend host.
+For a physical device, use the development machine's LAN IP instead of `localhost`.
 </details>
 
 ### 3. Run everything
@@ -285,30 +319,52 @@ cd mobile-app && npx expo start
 | Main API | http://localhost:5000 |
 | Institute API | http://localhost:5001 |
 
+### 4. Build the Android app
+
+```bash
+cd mobile-app/android
+./gradlew assembleRelease
+```
+
+On Windows use `.\gradlew assembleRelease`. If the build fails while packaging, stop the Gradle daemon with `.\gradlew --stop` and run it again.
+
 ---
 
-## 🛡️ Production Notes
+## Production Notes
 
-- Configure Firebase, JWT, storage, AI, and notification credentials through the deployment environment.
-- **Restrict CORS origins** before production deployment; the current development services allow broad CORS access.
-- Review and replace hard-coded mobile API fallback URLs before release.
+- Configure Firebase, JWT, storage, AI, email, and notification credentials through the deployment environment.
+- Run the APIs under a process manager such as **PM2** and restart them after each deploy.
+- **Restrict CORS origins** before production deployment; the development setup allows broad CORS access.
 - Never commit `.env` files, Firebase service-account files, signing keys, build output, or dependency directories.
+- Rotate any credential that was ever shared or committed.
 
 ---
 
-## 🧪 Testing
+## Testing
 
-PresencePro has been validated through manual test cases covering the core flows:
+PresencePro has been validated through manual test cases and scripted checks covering the core flows:
 
-- ✅ Teacher starts a live attendance session and a session code is generated
-- ✅ Student login and redirect to the dashboard
-- ✅ Student marks attendance only after the session is live, with Wi-Fi and BLE verification
-- ✅ Attendance is blocked before the teacher starts the session
-- ✅ Subject-wise attendance percentages are displayed correctly
-- ✅ Class attendance report is generated and exported as PDF
+- Teacher starts a live attendance session and a session code is generated
+- Student login and redirect to the dashboard
+- Student marks attendance only after the session is live, with Wi-Fi and BLE verification
+- Attendance is blocked before the teacher starts the session
+- Subject-wise attendance percentages are displayed correctly
+- Class attendance report is generated and exported as PDF
+- Elective choice, move, and unenroll keep student counts and attendance consistent
+- Division-specific lectures appear only for students in that division, while common lectures appear for everyone
+- Heads see the Manage section; non-heads are redirected to the teacher dashboard
 
 ---
 
-**If PresencePro helped or inspired you, consider giving the repo a ⭐**
+## Known Limitations
+
+- Quizzes, assignments, and broadcasts are not yet split by division.
+- A student without a division sees only the common lectures.
+- The teacher mobile app does not yet have a division filter (the API supports it).
+- Manual attendance marking is not restricted by division.
+
+---
+
+**If PresencePro helped or inspired you, consider giving the repo a star.**
 
 *Making every lecture count, one check-in at a time.*

@@ -1,101 +1,95 @@
+// screens/quiz/student/StudentScheduledQuiz.tsx — countdown for a quiz that has not started yet
 import React, { useEffect, useState } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ScrollView } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useRoute, useNavigation } from "@react-navigation/native";
-import {
-  PRIMARY, PRIMARY_LIGHT, BG, AMBER, AMBER_LIGHT, GREY,
-  StudentQuiz, fmtDate, msToCountdown,
-} from "./components/studentQuizConstants";
+import { ScrollView, StyleSheet, Text, View } from "react-native";
+import { useNavigation, useRoute } from "@react-navigation/native";
+import { Banner, Card, EmptyState, Header, Screen, SP, T, font } from "../../../components/ui";
+import { StudentQuiz, fmtDate } from "./components/studentQuizConstants";
+
+const pad = (n: number) => String(n).padStart(2, "0");
 
 export default function StudentScheduledQuiz() {
   const navigation = useNavigation<any>();
-  const route      = useRoute<any>();
-  const { quiz }   = route.params as { quiz: StudentQuiz };
+  const quiz = (useRoute<any>().params?.quiz || null) as StudentQuiz | null;
 
-  const [countdown, setCountdown] = useState("");
+  const [left, setLeft] = useState<number>(() => (quiz ? new Date(quiz.scheduled_start).getTime() - Date.now() : 0));
 
   useEffect(() => {
-    const tick = () => {
-      const ms = new Date(quiz.scheduled_start).getTime() - Date.now();
-      if (ms <= 0) { setCountdown("Starting soon..."); return; }
-      const h = Math.floor(ms / 3600000);
-      const m = Math.floor((ms % 3600000) / 60000);
-      const s = Math.floor((ms % 60000) / 1000);
-      setCountdown(`${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`);
-    };
+    if (!quiz) return;
+    const tick = () => setLeft(new Date(quiz.scheduled_start).getTime() - Date.now());
     tick();
-    const interval = setInterval(tick, 1000);
-    return () => clearInterval(interval);
-  }, [quiz.scheduled_start]);
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [quiz?.scheduled_start]);
 
-  const infoRows = [
-    { label: "Subject",    value: quiz.subject_name },
-    { label: "Questions",  value: `${quiz.question_count} questions` },
-    { label: "Total Marks",value: `${quiz.total_marks} marks` },
-    { label: "Duration",   value: `${quiz.time_limit_minutes} minutes` },
-    { label: "Type",       value: quiz.question_type.replace("_", " ").toUpperCase() },
-    { label: "Starts",     value: fmtDate(quiz.scheduled_start) },
-    { label: "Ends",       value: fmtDate(quiz.scheduled_end) },
+  if (!quiz) {
+    return (
+      <Screen>
+        <Header title="Scheduled quiz" onBack={() => navigation.goBack()} />
+        <EmptyState icon="alert-circle-outline" title="Quiz not found" text="Go back and open the quiz again." />
+      </Screen>
+    );
+  }
+
+  const started = left <= 0;
+  const h = Math.max(0, Math.floor(left / 3600000));
+  const m = Math.max(0, Math.floor((left % 3600000) / 60000));
+  const s = Math.max(0, Math.floor((left % 60000) / 1000));
+
+  const rows = [
+    { label: "Subject", value: quiz.subject_name },
+    { label: "Questions", value: `${quiz.question_count} questions` },
+    { label: "Total marks", value: `${quiz.total_marks} marks` },
+    { label: "Duration", value: `${quiz.time_limit_minutes} minutes` },
+    { label: "Type", value: String(quiz.question_type || "").replace(/_/g, " ").toUpperCase() },
+    { label: "Starts", value: fmtDate(quiz.scheduled_start) },
+    { label: "Ends", value: fmtDate(quiz.scheduled_end) },
   ];
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      <ScrollView contentContainerStyle={S.content} showsVerticalScrollIndicator={false}>
+    <Screen>
+      <Header title={quiz.title} subtitle={quiz.subject_name} onBack={() => navigation.goBack()} />
+      <ScrollView contentContainerStyle={st.scroll} showsVerticalScrollIndicator={false}>
+        {!!quiz.description && <Text style={font.body}>{quiz.description}</Text>}
 
-        <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-          <Text style={S.backIcon}>‹</Text>
-        </TouchableOpacity>
-
-        <Text style={S.title}>{quiz.title}</Text>
-        {quiz.description ? <Text style={S.desc}>{quiz.description}</Text> : null}
-
-        {/* Countdown */}
-        <View style={S.countdownCard}>
-          <Text style={S.countdownLabel}>Starts in</Text>
-          <Text style={S.countdownTime}>{countdown}</Text>
-          <Text style={S.countdownSub}>You'll be able to join when the quiz goes live</Text>
+        <View style={st.countdown}>
+          <Text style={st.cdLabel}>{started ? "Starting now" : "Starts in"}</Text>
+          {!started && (
+            <Text style={st.cdTime}>
+              {pad(h)}:{pad(m)}:{pad(s)}
+            </Text>
+          )}
+          <Text style={st.cdSub}>
+            {started ? "Go back to your quiz list and tap the quiz to join." : "You can join as soon as the quiz goes live."}
+          </Text>
         </View>
 
-        {/* Info card */}
-        <View style={S.infoCard}>
-          {infoRows.map((row) => (
-            <View key={row.label} style={S.infoRow}>
-              <Text style={S.infoLabel}>{row.label}</Text>
-              <Text style={S.infoValue}>{row.value}</Text>
+        {started && (
+          <Banner tone="success" icon="play-circle">
+            The quiz should be live. Pull down to refresh your quiz list if it still shows as scheduled.
+          </Banner>
+        )}
+
+        <Card padded={false}>
+          {rows.map((r, i) => (
+            <View key={r.label} style={[st.row, i < rows.length - 1 && st.rowBorder]}>
+              <Text style={st.label}>{r.label}</Text>
+              <Text style={st.value}>{r.value}</Text>
             </View>
           ))}
-        </View>
-
+        </Card>
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
-const S = StyleSheet.create({
-  safe:    { flex: 1, backgroundColor: BG },
-  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 40 },
-
-  backBtn:  { width: 38, height: 38, borderRadius: 19, backgroundColor: "#FFF", alignItems: "center", justifyContent: "center", marginBottom: 16, elevation: 2, shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 6 },
-  backIcon: { fontSize: 22, fontWeight: "700", color: PRIMARY },
-
-  title: { fontSize: 24, fontWeight: "800", color: "#111827", marginBottom: 4 },
-  desc:  { fontSize: 14, color: GREY, marginBottom: 20, lineHeight: 20 },
-
-  countdownCard: {
-    backgroundColor: AMBER_LIGHT,
-    borderRadius: 20,
-    padding: 20,
-    alignItems: "center",
-    marginBottom: 16,
-    borderWidth: 1,
-    borderColor: "#FDE68A",
-  },
-  countdownLabel: { fontSize: 13, fontWeight: "700", color: "#92400E", marginBottom: 6 },
-  countdownTime:  { fontSize: 36, fontWeight: "900", color: "#78350F", fontVariant: ["tabular-nums"], marginBottom: 8 },
-  countdownSub:   { fontSize: 12, color: "#92400E", textAlign: "center" },
-
-  infoCard: { backgroundColor: "#FFF", borderRadius: 16, padding: 16, marginBottom: 16, borderWidth: 1, borderColor: "#E5E7EB" },
-  infoRow:  { flexDirection: "row", justifyContent: "space-between", paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: "#F3F4F6" },
-  infoLabel:{ fontSize: 13, color: GREY, fontWeight: "600" },
-  infoValue:{ fontSize: 13, color: "#111827", fontWeight: "700", maxWidth: "55%", textAlign: "right" },
+const st = StyleSheet.create({
+  scroll: { padding: SP.xl, gap: SP.lg, paddingBottom: 40 },
+  countdown: { backgroundColor: T.warningSoft, borderRadius: 24, padding: SP.xl, alignItems: "center", borderWidth: 1, borderColor: "#F3DDA0" },
+  cdLabel: { fontSize: 13, fontWeight: "700", color: T.warning, marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.8 },
+  cdTime: { fontSize: 40, fontWeight: "900", color: "#7A4A00", fontVariant: ["tabular-nums"], marginBottom: 6 },
+  cdSub: { fontSize: 12.5, color: "#8A5A00", textAlign: "center" },
+  row: { flexDirection: "row", justifyContent: "space-between", paddingVertical: 13, paddingHorizontal: SP.lg, gap: SP.md },
+  rowBorder: { borderBottomWidth: 1, borderBottomColor: T.lineSoft },
+  label: { fontSize: 13, color: T.sub, fontWeight: "600" },
+  value: { fontSize: 13, color: T.ink, fontWeight: "700", flex: 1, textAlign: "right" },
 });

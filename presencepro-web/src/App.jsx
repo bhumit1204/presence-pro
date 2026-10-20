@@ -11,6 +11,22 @@ import TestsPage from "./screens/Teacher/TestsPage";
 import ODPage from "./screens/Teacher/ODPage";
 import AnnouncementsPage from "./screens/Teacher/AnnouncementsPage";
 import ReportsPage from "./screens/Teacher/ReportsPage";
+import SemestersPage from "./screens/Teacher/manage/SemestersPage";
+import SubjectsPage from "./screens/Teacher/manage/SubjectsPage";
+import DivisionsPage from "./screens/Teacher/manage/DivisionsPage";
+import TimetablePage from "./screens/Teacher/manage/TimetablePage";
+import CalendarPage from "./screens/Teacher/manage/CalendarPage";
+import StudentReportsPage from "./screens/Teacher/manage/StudentReportsPage";
+import StudentHome from "./screens/Student/StudentHome";
+import ClassesPage from "./screens/Student/ClassesPage";
+import ClassroomPage from "./screens/Student/ClassroomPage";
+import StudentAssignmentsPage from "./screens/Student/AssignmentsPage";
+import AssignmentDetail from "./screens/Student/AssignmentDetail";
+import StudentTestsPage from "./screens/Student/TestsPage";
+import TakeTest from "./screens/Student/TakeTest";
+import TestResult from "./screens/Student/TestResult";
+import StudentAnnouncementsPage from "./screens/Student/AnnouncementsPage";
+import StudentProfilePage from "./screens/Student/ProfilePage";
 
 export default function App() {
   return (
@@ -23,7 +39,7 @@ export default function App() {
       {/* ── Role entry-point / catch-all ────────────────────────── */}
       <Route path="/dashboard" element={<RoleRouter />} />
 
-      {/* ── Teacher ─────────────────────────────────────────────── */}
+      {/* ── Teacher (heads use these pages too) ─────────────────── */}
       <Route path="/dashboard/teacher"
         element={<ProtectedRoute role="teacher"><TeacherDashboardPage /></ProtectedRoute>} />
 
@@ -44,35 +60,59 @@ export default function App() {
       <Route path="/dashboard/teacher/reports"
         element={<ProtectedRoute role="teacher"><ReportsPage /></ProtectedRoute>} />
 
-      {/* ── Head Teacher ────────────────────────────────────────── */}
-      <Route path="/dashboard/head"
-        element={<ProtectedRoute role="head"><ComingSoon label="Head Teacher Dashboard" /></ProtectedRoute>} />
+      {/* ── Head ▸ Manage (heads only; the sidebar shows these under "Manage") ── */}
+      <Route path="/dashboard/teacher/manage/semesters"
+        element={<ProtectedRoute role="head"><SemestersPage /></ProtectedRoute>} />
 
-      {/* ── Student ─────────────────────────────────────────────── */}
+      <Route path="/dashboard/teacher/manage/subjects"
+        element={<ProtectedRoute role="head"><SubjectsPage /></ProtectedRoute>} />
+
+      <Route path="/dashboard/teacher/manage/divisions"
+        element={<ProtectedRoute role="head"><DivisionsPage /></ProtectedRoute>} />
+
+      <Route path="/dashboard/teacher/manage/timetable"
+        element={<ProtectedRoute role="head"><TimetablePage /></ProtectedRoute>} />
+
+      <Route path="/dashboard/teacher/manage/calendar"
+        element={<ProtectedRoute role="head"><CalendarPage /></ProtectedRoute>} />
+
+      <Route path="/dashboard/teacher/manage/reports"
+        element={<ProtectedRoute role="head"><StudentReportsPage /></ProtectedRoute>} />
+
+      {/* ── Old head URLs → the teacher pages ───────────────────── */}
+      <Route path="/dashboard/head/*" element={<Navigate to="/dashboard/teacher" replace />} />
+
+      {/* ── Student portal ──────────────────────────────────────── */}
       <Route path="/dashboard/student"
-        element={<ProtectedRoute role="student"><ComingSoon label="Student Dashboard" /></ProtectedRoute>} />
+        element={<ProtectedRoute role="student"><StudentHome /></ProtectedRoute>} />
+
+      <Route path="/dashboard/student/classes"
+        element={<ProtectedRoute role="student"><ClassesPage /></ProtectedRoute>} />
+      <Route path="/dashboard/student/classes/:subjectId"
+        element={<ProtectedRoute role="student"><ClassroomPage /></ProtectedRoute>} />
+
+      <Route path="/dashboard/student/assignments"
+        element={<ProtectedRoute role="student"><StudentAssignmentsPage /></ProtectedRoute>} />
+      <Route path="/dashboard/student/assignments/:assignmentId"
+        element={<ProtectedRoute role="student"><AssignmentDetail /></ProtectedRoute>} />
+
+      <Route path="/dashboard/student/tests"
+        element={<ProtectedRoute role="student"><StudentTestsPage /></ProtectedRoute>} />
+      <Route path="/dashboard/student/tests/take"
+        element={<ProtectedRoute role="student"><TakeTest /></ProtectedRoute>} />
+      <Route path="/dashboard/student/tests/result/:quizId"
+        element={<ProtectedRoute role="student"><TestResult /></ProtectedRoute>} />
+
+      <Route path="/dashboard/student/announcements"
+        element={<ProtectedRoute role="student"><StudentAnnouncementsPage /></ProtectedRoute>} />
+      <Route path="/dashboard/student/profile"
+        element={<ProtectedRoute role="student"><StudentProfilePage /></ProtectedRoute>} />
+
+      {/* unknown /dashboard/student/... → student home */}
+      <Route path="/dashboard/student/*" element={<Navigate to="/dashboard/student" replace />} />
 
       <Route path="*" element={<RoleRouter />} />
 
     </Routes>
-  );
-}
-
-function ComingSoon({ label }) {
-  return (
-    <div style={{
-      display: "flex", alignItems: "center", justifyContent: "center",
-      minHeight: "100vh", background: "#F3F4F6",
-      fontFamily: "'DM Sans', 'Segoe UI', sans-serif",
-    }}>
-      <div style={{
-        background: "#fff", border: "1px solid #E5E7EB",
-        borderRadius: 16, padding: "40px 48px", textAlign: "center",
-      }}>
-        <div style={{ fontSize: 32, marginBottom: 12 }}>🚧</div>
-        <div style={{ fontSize: 18, fontWeight: 800, color: "#111827" }}>{label}</div>
-        <div style={{ fontSize: 14, color: "#9CA3AF", marginTop: 6 }}>Coming soon</div>
-      </div>
-    </div>
   );
 }

@@ -1,248 +1,157 @@
-import React, { useState } from "react";
-import { View, Text, TouchableOpacity, StyleSheet, PanResponder } from "react-native";
+// src/components/AttendanceCalendar.tsx
+// Month calendar. Props are backward compatible; `mode="any"` and `initialDate` are new.
+//   mode "past"   -> future days disabled (attendance history)
+//   mode "future" -> past days disabled   (planning)
+//   mode "any"    -> nothing disabled
+import React, { useMemo, useRef, useState } from "react";
+import { PanResponder, Pressable, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { T, R, SP, font, shadow } from "./ui";
 
-const PRIMARY = "#4834D4";
-const BG = "#F3F4F6";
+const DAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const MONTHS = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+const CELL = `${100 / 7}%` as const;
 
-const days = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-
-interface Props {
-  onDateSelect: (date: {
-    day: string;
-    date: number;
-    month: number;
-    year: number;
-  }) => void;
-  mode?: "past" | "future";
+export interface PickedDate {
+  day: string;
+  date: number;
+  month: number; // 1-12
+  year: number;
 }
 
-export default function AttendanceCalendar({ onDateSelect, mode = "past" }: Props) {
+interface Props {
+  onDateSelect: (date: PickedDate) => void;
+  mode?: "past" | "future" | "any";
+  initialDate?: Date;
+}
 
-  const today = new Date();
+const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 
-  const [currentMonth, setCurrentMonth] = useState(today.getMonth());
-  const [currentYear, setCurrentYear] = useState(today.getFullYear());
-  const [selectedDate, setSelectedDate] = useState(today.getDate());
+export default function AttendanceCalendar({ onDateSelect, mode = "past", initialDate }: Props) {
+  const today = useMemo(() => startOfDay(new Date()), []);
+  const start = initialDate ? startOfDay(initialDate) : today;
 
-  const months = [
-    "January","February","March","April","May","June",
-    "July","August","September","October","November","December"
-  ];
+  const [view, setView] = useState({ m: start.getMonth(), y: start.getFullYear() });
+  // The whole selected date is tracked, so "the 15th" does not stay highlighted when the month changes.
+  const [sel, setSel] = useState({ d: start.getDate(), m: start.getMonth(), y: start.getFullYear() });
 
-  const getDaysInMonth = (month: number, year: number) => {
-    return new Date(year, month + 1, 0).getDate();
+  const monthIndex = (m: number, y: number) => y * 12 + m;
+  const canGo = (dir: number) => {
+    const next = monthIndex(view.m, view.y) + dir;
+    const now = monthIndex(today.getMonth(), today.getFullYear());
+    if (mode === "past" && next > now) return false;
+    if (mode === "future" && next < now) return false;
+    return true;
   };
 
-  const getFirstDay = (month: number, year: number) => {
-    return new Date(year, month, 1).getDay();
+  const go = (dir: number) => {
+    if (!canGo(dir)) return;
+    const idx = monthIndex(view.m, view.y) + dir;
+    setView({ m: ((idx % 12) + 12) % 12, y: Math.floor(idx / 12) });
   };
 
-  const swipeThreshold = 80;
+  // Always call the newest `go` (the responder is created once).
+  const goRef = useRef(go);
+  goRef.current = go;
+  const pan = useRef(
+    PanResponder.create({
+      onMoveShouldSetPanResponder: (_, g) => Math.abs(g.dx) > 24 && Math.abs(g.dx) > Math.abs(g.dy) * 2,
+      onPanResponderRelease: (_, g) => {
+        if (g.dx > 70) goRef.current(-1);
+        else if (g.dx < -70) goRef.current(1);
+      },
+    })
+  ).current;
 
-  const panResponder = PanResponder.create({
-    onMoveShouldSetPanResponder: (_, gestureState) => {
-      return Math.abs(gestureState.dx) > 20;
-    },
-    onPanResponderRelease: (_, gestureState) => {
-      if (gestureState.dx > swipeThreshold) changeMonth(-1);
-      if (gestureState.dx < -swipeThreshold) changeMonth(1);
+  const isDisabled = (d: Date) => (mode === "past" ? d > today : mode === "future" ? d < today : false);
+
+  const pick = (d: number) => {
+    setSel({ d, m: view.m, y: view.y });
+    const dt = new Date(view.y, view.m, d);
+    onDateSelect({ day: DAYS[dt.getDay()], date: d, month: view.m + 1, year: view.y });
+  };
+
+  const jumpToday = () => {
+    setView({ m: today.getMonth(), y: today.getFullYear() });
+    if (!isDisabled(today)) {
+      setSel({ d: today.getDate(), m: today.getMonth(), y: today.getFullYear() });
+      onDateSelect({ day: DAYS[today.getDay()], date: today.getDate(), month: today.getMonth() + 1, year: today.getFullYear() });
     }
-  });
-
-  const changeMonth = (direction: number) => {
-    let newMonth = currentMonth + direction;
-    let newYear = currentYear;
-
-    if (newMonth < 0) { newMonth = 11; newYear -= 1; }
-    if (newMonth > 11) { newMonth = 0; newYear += 1; }
-
-    const newDate = new Date(newYear, newMonth);
-    const todayMonth = new Date(today.getFullYear(), today.getMonth());
-
-    // past mode: block navigating into the future
-    if (mode === "past" && newDate > todayMonth) return;
-
-    // future mode: block navigating into the past
-    if (mode === "future" && newDate < todayMonth) return;
-
-    setCurrentMonth(newMonth);
-    setCurrentYear(newYear);
   };
 
-  const selectDate = (date: number) => {
-    setSelectedDate(date);
-    const d = new Date(currentYear, currentMonth, date);
-    onDateSelect({
-      day: days[d.getDay()],
-      date,
-      month: currentMonth + 1,
-      year: currentYear
-    });
-  };
+  const total = new Date(view.y, view.m + 1, 0).getDate();
+  const first = new Date(view.y, view.m, 1).getDay();
+  const onTodayMonth = view.m === today.getMonth() && view.y === today.getFullYear();
 
-  const totalDays = getDaysInMonth(currentMonth, currentYear);
-  const firstDay = getFirstDay(currentMonth, currentYear);
-
-  const calendarCells = [];
-
-  for (let i = 0; i < firstDay; i++) {
-    calendarCells.push(<View key={"empty" + i} style={styles.emptyCell} />);
-  }
-
-  for (let d = 1; d <= totalDays; d++) {
-    const isSelected = d === selectedDate;
-    const dateObj = new Date(currentYear, currentMonth, d);
-
-    // past mode: disable future dates
-    // future mode: disable past dates
-    const isDisabled =
-      mode === "past"
-        ? dateObj > today
-        : dateObj < new Date(today.getFullYear(), today.getMonth(), today.getDate());
-
-    calendarCells.push(
-      <TouchableOpacity
-        key={d}
-        disabled={isDisabled}
-        style={[
-          styles.dateCell,
-          isSelected && styles.selectedDate,
-          isDisabled && styles.disabledDate,
-        ]}
-        onPress={() => selectDate(d)}
+  const navBtn = (dir: number, icon: "chevron-back" | "chevron-forward") => {
+    const ok = canGo(dir);
+    return (
+      <Pressable
+        onPress={() => go(dir)}
+        disabled={!ok}
+        hitSlop={6}
+        accessibilityRole="button"
+        accessibilityLabel={dir < 0 ? "Previous month" : "Next month"}
+        style={{ width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center", backgroundColor: T.primarySoft, opacity: ok ? 1 : 0.35 }}
       >
-        <Text style={[styles.dateText, isSelected && styles.selectedText]}>
-          {d}
-        </Text>
-      </TouchableOpacity>
+        <Ionicons name={icon} size={20} color={T.primary} />
+      </Pressable>
+    );
+  };
+
+  const cells: React.ReactNode[] = [];
+  for (let i = 0; i < first; i++) cells.push(<View key={"e" + i} style={{ width: CELL, height: 42 }} />);
+  for (let d = 1; d <= total; d++) {
+    const dt = new Date(view.y, view.m, d);
+    const off = isDisabled(dt);
+    const on = sel.d === d && sel.m === view.m && sel.y === view.y;
+    const isToday = dt.getTime() === today.getTime();
+    cells.push(
+      <View key={d} style={{ width: CELL, height: 42, alignItems: "center", justifyContent: "center" }}>
+        <Pressable
+          disabled={off}
+          onPress={() => pick(d)}
+          accessibilityRole="button"
+          accessibilityState={{ selected: on, disabled: off }}
+          accessibilityLabel={`${d} ${MONTHS[view.m]} ${view.y}`}
+          style={{
+            width: 36,
+            height: 36,
+            borderRadius: 12,
+            alignItems: "center",
+            justifyContent: "center",
+            backgroundColor: on ? T.primary : "transparent",
+            borderWidth: isToday && !on ? 1.5 : 0,
+            borderColor: T.primary,
+            opacity: off ? 0.3 : 1,
+          }}
+        >
+          <Text style={{ fontSize: 14, color: on ? "#fff" : T.ink, fontWeight: on || isToday ? "800" : "500" }}>{d}</Text>
+        </Pressable>
+      </View>
     );
   }
 
   return (
-    <View style={styles.container} {...panResponder.panHandlers}>
-
-      {/* Month Header */}
-      <View style={styles.header}>
-
-        <TouchableOpacity style={styles.navButton} onPress={() => changeMonth(-1)}>
-          <Text style={styles.navText}>‹</Text>
-        </TouchableOpacity>
-
-        <Text style={styles.monthText}>
-          {months[currentMonth]} {currentYear}
-        </Text>
-
-        <TouchableOpacity style={styles.navButton} onPress={() => changeMonth(1)}>
-          <Text style={styles.navText}>›</Text>
-        </TouchableOpacity>
-
+    <View style={[{ backgroundColor: T.surface, borderRadius: R.lg, padding: SP.lg }, shadow]} {...pan.panHandlers}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: SP.md }}>
+        {navBtn(-1, "chevron-back")}
+        <Pressable onPress={jumpToday} disabled={onTodayMonth} accessibilityLabel="Jump to today" style={{ alignItems: "center" }}>
+          <Text style={font.h2}>
+            {MONTHS[view.m]} {view.y}
+          </Text>
+          {!onTodayMonth && <Text style={{ fontSize: 11, fontWeight: "700", color: T.primary }}>Back to today</Text>}
+        </Pressable>
+        {navBtn(1, "chevron-forward")}
       </View>
-
-      {/* Week Days */}
-      <View style={styles.weekRow}>
-        {days.map((d) => (
-          <Text key={d} style={styles.weekDay}>{d}</Text>
+      <View style={{ flexDirection: "row", marginBottom: 6 }}>
+        {DAYS.map((d) => (
+          <Text key={d} style={{ width: CELL, textAlign: "center", fontSize: 11, fontWeight: "700", color: T.muted }}>
+            {d}
+          </Text>
         ))}
       </View>
-
-      {/* Calendar Grid */}
-      <View style={styles.grid}>
-        {calendarCells}
-      </View>
-
+      <View style={{ flexDirection: "row", flexWrap: "wrap" }}>{cells}</View>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-
-  container: {
-    backgroundColor: "#FFF",
-    borderRadius: 18,
-    padding: 16,
-    shadowColor: "#000",
-    shadowOpacity: 0.06,
-    shadowOffset: { width: 0, height: 4 },
-    shadowRadius: 10,
-    elevation: 4
-  },
-
-  header: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-    marginBottom: 14
-  },
-
-  monthText: {
-    fontSize: 16,
-    fontWeight: "700",
-    color: "#111827"
-  },
-
-  navButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 12,
-    justifyContent: "center",
-    alignItems: "center",
-    backgroundColor: "#EEF2FF"
-  },
-
-  navText: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: PRIMARY
-  },
-
-  weekRow: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    marginBottom: 10
-  },
-
-  weekDay: {
-    width: "14%",
-    textAlign: "center",
-    fontWeight: "600",
-    color: "#6B7280",
-    fontSize: 12
-  },
-
-  grid: {
-    flexDirection: "row",
-    flexWrap: "wrap"
-  },
-
-  emptyCell: {
-    width: "14%",
-    height: 40
-  },
-
-  dateCell: {
-    width: "14%",
-    height: 40,
-    justifyContent: "center",
-    alignItems: "center",
-    borderRadius: 10
-  },
-
-  dateText: {
-    fontSize: 14,
-    color: "#111827"
-  },
-
-  selectedDate: {
-    backgroundColor: PRIMARY
-  },
-
-  selectedText: {
-    color: "#FFF",
-    fontWeight: "700"
-  },
-
-  disabledDate: {
-    opacity: 0.3
-  },
-
-});

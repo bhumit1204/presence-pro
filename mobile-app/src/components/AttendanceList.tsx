@@ -1,93 +1,40 @@
+// src/components/AttendanceList.tsx
+// "Students attended" list. Same prop: { students: { uid, name, roll }[] }.
 import React from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  FlatList,
-} from "react-native";
-
-const PRIMARY = "#4834D4";
-const BG = "#F3F4F6";
+import { Text, View } from "react-native";
+import { Avatar, Card, Chip, EmptyState, T, SP, font } from "./ui";
 
 interface Props {
   students: any[];
+  title?: string;
 }
 
-export default function AttendanceList({ students }: Props) {
-
-  const renderItem = ({ item }: any) => (
-    <View style={styles.row}>
-      <Text style={styles.name}>{item.name}</Text>
-      <Text style={styles.roll}>Roll no: {item.roll}</Text>
-    </View>
-  );
-
+export default function AttendanceList({ students, title = "Students attended" }: Props) {
+  const list = students || [];
   return (
-    <View style={{padding:18}}>
-    <Text style={styles.sectionTitle}>Students Attended</Text>
-
-      <View style={styles.card}>
-
-        <FlatList
-          data={students}
-          keyExtractor={(item) => item.uid}
-          renderItem={renderItem}
-          ItemSeparatorComponent={() => <View style={styles.divider} />}
-          ListEmptyComponent={
-            <Text style={styles.emptyText}>
-              No attendance data available
-            </Text>
-          }
-        />
-
+    <View style={{ padding: SP.lg }}>
+      <View style={{ flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: SP.md }}>
+        <Text style={font.h3}>{title}</Text>
+        <Chip label={`${list.length}`} tone={list.length ? "success" : "neutral"} icon="people" />
       </View>
+      <Card padded={false}>
+        {list.length === 0 ? (
+          <EmptyState icon="people-outline" title="No attendance yet" text="Students will appear here as they mark." />
+        ) : (
+          list.map((item, i) => (
+            <View
+              key={item.uid ?? `${item.roll}-${i}`}
+              style={{ flexDirection: "row", alignItems: "center", gap: SP.md, paddingHorizontal: SP.lg, paddingVertical: SP.md, borderTopWidth: i ? 1 : 0, borderTopColor: T.lineSoft }}
+            >
+              <Avatar name={item.name} size={34} tone="success" />
+              <Text style={[font.h3, { flex: 1, fontWeight: "600" }]} numberOfLines={1}>
+                {item.name}
+              </Text>
+              {!!item.roll && <Text style={font.small}>Roll {item.roll}</Text>}
+            </View>
+          ))
+        )}
+      </Card>
     </View>
   );
 }
-
-const styles = StyleSheet.create({
-
-  sectionTitle: {
-    fontWeight: "700",
-    color: PRIMARY,
-    marginBottom: 12,
-  },
-
-  card: {
-    backgroundColor: "#fff",
-    borderRadius: 18,
-    paddingVertical: 6,
-  },
-
-  row: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-  },
-
-  name: {
-    fontSize: 16,
-    fontWeight: "500",
-    color: "#222",
-  },
-
-  roll: {
-    fontSize: 14,
-    color: "#888",
-  },
-
-  divider: {
-    height: 1,
-    backgroundColor: "#F0F0F0",
-    marginHorizontal: 16,
-  },
-
-  emptyText: {
-    textAlign: "center",
-    padding: 20,
-    color: "#888",
-  },
-});

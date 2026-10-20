@@ -1,737 +1,317 @@
-/**
- * ODRequestsTeacher.tsx
- * Teacher screen — review, approve or reject student OD requests.
- * Shows pending requests first, then history.
- */
-import React, { useEffect, useState, useCallback } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  ActivityIndicator,
-  Alert,
-  Modal,
-  TextInput,
-  Linking,
-  RefreshControl,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+// screens/reports/teacher/ODRequestTeacher.tsx — review, approve or reject student OD (on duty) requests.
+// Fixes: the old screen called fetch() without the auth token and with a stale server address.
+
+import React, { useCallback, useMemo, useRef, useState } from "react";
+import { Alert, Image, KeyboardAvoidingView, Linking, Modal, Platform, Pressable, RefreshControl, ScrollView, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
-import { useNavigation, useRoute, useFocusEffect } from "@react-navigation/native";
+import { useFocusEffect, useNavigation, useRoute } from "@react-navigation/native";
+import { apiFetch } from "../../../services/api";
+import { Avatar, Banner, Button, Card, Chip, EmptyState, Header, Screen, Segmented, SP, T, TextField, Tone, font } from "../../../components/ui";
+import { API_URL, IconName, LoadBoundary, StatRow, enc, fmtDate, parseDate, useReport } from "./ReportShared";
 
-// ─── Palette ──────────────────────────────────────────────────────────────────
-const PRIMARY      = "#4834D4";
-const PRIMARY_SOFT = "#EEF2FF";
-const BG           = "#F3F4F6";
-const WHITE        = "#FFFFFF";
-const GREY         = "#6B7280";
-const DARK         = "#111827";
-const GREEN        = "#10B981";
-const AMBER        = "#F59E0B";
-const RED          = "#EF4444";
-const BORDER       = "#E5E7EB";
-const OD_COLOR     = "#7C3AED";
-const OD_SOFT      = "#EDE9FE";
-
-const API_URL = "http://10.132.90.56:5000";
-
-// ─── Types ────────────────────────────────────────────────────────────────────
 interface ODRequest {
-  od_id:        string;
-  student_uid:  string;
+  od_id: string;
+  student_uid: string;
   student_name: string;
-  from_date:    string;
-  to_date:      string;
-  reason:       string;
-  status:       "pending" | "approved" | "rejected";
+  from_date: string;
+  to_date: string;
+  reason: string;
+  status: "pending" | "approved" | "rejected";
   teacher_note: string | null;
-  created_at:   string | null;
-  proof:        { url: string; name: string; type: string };
+  created_at: string | null;
+  proof?: { url: string; name: string; type: string } | null;
 }
 
-interface RouteParams {
-  teacherId:   string;
-  subjectId?:  string;
-  subjectName?: string;
-  courseId?:   string;
-}
+type Filter = "all" | "pending" | "approved" | "rejected";
 
-const STATUS_CONFIG = {
-  pending:  { color: AMBER,  bg: "#FEF3C7", icon: "time-outline",         label: "Pending"  },
-  approved: { color: GREEN,  bg: "#F0FDF4", icon: "checkmark-circle",     label: "Approved" },
-  rejected: { color: RED,    bg: "#FEF2F2", icon: "close-circle-outline", label: "Rejected" },
+const STATUS: Record<ODRequest["status"], { tone: Tone; icon: IconName; label: string }> = {
+  pending: { tone: "warning", icon: "time-outline", label: "Pending" },
+  approved: { tone: "success", icon: "checkmark-circle", label: "Approved" },
+  rejected: { tone: "danger", icon: "close-circle-outline", label: "Rejected" },
 };
 
-type FilterStatus = "all" | "pending" | "approved" | "rejected";
-
-function fmtDate(ymd: string) {
-  return new Date(ymd + "T12:00:00").toLocaleDateString("en-IN", {
-    day: "numeric", month: "short", year: "numeric",
-  });
+/** Weekdays (Mon to Sat) in the range, matching how the server marks OD. */
+function countDays(from: string, to: string): number {
+  const f = parseDate(from);
+  const t = parseDate(to);
+  if (!f || !t || t < f) return 0;
+  let n = 0;
+  for (const d = new Date(f); d <= t; d.setDate(d.getDate() + 1)) if (d.getDay() !== 0) n++;
+  return n;
 }
 
 export default function ODRequestsTeacher() {
   const navigation = useNavigation<any>();
-  const route      = useRoute<any>();
-  const { teacherId, subjectId, subjectName, courseId }: RouteParams = route.params;
+  const params = useRoute<any>().params ?? {};
+  const { teacherId, subjectId, subjectName } = params as { teacherId?: string; subjectId?: string; subjectName?: string };
 
-  const [requests,   setRequests]   = useState<ODRequest[]>([]);
-  const [summary,    setSummary]    = useState({ pending: 0, approved: 0, rejected: 0 });
-  const [loading,    setLoading]    = useState(true);
+  const report = useReport(teacherId ? `${API_URL}/api/od/teacher/${enc(teacherId)}${subjectId ? `?subject_id=${enc(subjectId)}` : ""}` : null);
+
+  const [filter, setFilter] = useState<Filter>("all");
   const [refreshing, setRefreshing] = useState(false);
-  const [filter,     setFilter]     = useState<FilterStatus>("all");
 
-  // ── Review modal state ───────────────────────────────────────────────────────
-  const [reviewModal,  setReviewModal]  = useState(false);
-  const [activeOD,     setActiveOD]     = useState<ODRequest | null>(null);
-  const [reviewAction, setReviewAction] = useState<"approved" | "rejected" | null>(null);
-  const [teacherNote,  setTeacherNote]  = useState("");
-  const [submitting,   setSubmitting]   = useState(false);
+  const [active, setActive] = useState<ODRequest | null>(null);
+  const [action, setAction] = useState<"approved" | "rejected" | null>(null);
+  const [note, setNote] = useState("");
+  const [noteError, setNoteError] = useState<string | null>(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [proofOD, setProofOD] = useState<ODRequest | null>(null);
 
-  // ── Proof viewer ─────────────────────────────────────────────────────────────
-  const [proofModal, setProofModal]   = useState(false);
-  const [proofOD,    setProofOD]      = useState<ODRequest | null>(null);
-
-  // ─── Fetch ───────────────────────────────────────────────────────────────────
-  const fetchRequests = useCallback(async (isRefresh = false) => {
-    try {
-      if (isRefresh) setRefreshing(true);
-      else setLoading(true);
-
-      let url = `${API_URL}/api/od/teacher/${teacherId}`;
-      if (subjectId) url += `?subject_id=${subjectId}`;
-
-      const res  = await fetch(url);
-      const json = await res.json();
-
-      if (json.success) {
-        setRequests(json.requests);
-        setSummary(json.summary);
+  // Refresh when coming back to this screen, but not twice on first open.
+  const first = useRef(true);
+  useFocusEffect(
+    useCallback(() => {
+      if (first.current) {
+        first.current = false;
+        return;
       }
-    } catch (e) {
-      console.log("OD TEACHER FETCH:", e);
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [teacherId, subjectId]);
+      report.reload(true);
+    }, [report.reload])
+  );
 
-  useFocusEffect(useCallback(() => { fetchRequests(); }, [fetchRequests]));
+  const requests: ODRequest[] = report.data?.requests ?? [];
+  const summary = report.data?.summary ?? { pending: 0, approved: 0, rejected: 0 };
 
-  // ─── Open review modal ───────────────────────────────────────────────────────
-  const openReview = (od: ODRequest, action: "approved" | "rejected") => {
-    setActiveOD(od);
-    setReviewAction(action);
-    setTeacherNote("");
-    setReviewModal(true);
+  // Pending first, then newest first.
+  const list = useMemo(() => {
+    const rank = { pending: 0, approved: 1, rejected: 1 } as const;
+    return requests
+      .filter((r) => filter === "all" || r.status === filter)
+      .sort((a, b) => rank[a.status] - rank[b.status] || String(b.created_at || "").localeCompare(String(a.created_at || "")));
+  }, [requests, filter]);
+
+  const openReview = (od: ODRequest, a: "approved" | "rejected") => {
+    setActive(od);
+    setAction(a);
+    setNote("");
+    setNoteError(null);
+  };
+  const closeReview = () => {
+    if (!submitting) setActive(null);
   };
 
-  // ─── Submit review ───────────────────────────────────────────────────────────
-  const handleReview = async () => {
-    if (!activeOD || !reviewAction) return;
+  const submit = async () => {
+    if (!active || !action || submitting) return;
+    if (action === "rejected" && note.trim().length < 3) return setNoteError("Tell the student why the request was rejected.");
+    setSubmitting(true);
     try {
-      setSubmitting(true);
-      const res  = await fetch(`${API_URL}/api/od/${activeOD.od_id}/review`, {
-        method:  "PUT",
+      const res = await apiFetch(`${API_URL}/api/od/${enc(active.od_id)}/review`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
-        body:    JSON.stringify({
-          teacher_id:  teacherId,
-          action:      reviewAction,
-          teacher_note: teacherNote.trim() || null,
-        }),
+        body: JSON.stringify({ teacher_id: teacherId, action, teacher_note: note.trim() || null }),
       });
-      const json = await res.json();
-
-      if (json.success) {
-        setReviewModal(false);
-        fetchRequests();
-        Alert.alert(
-          reviewAction === "approved" ? "Approved " : "Rejected ❌",
-          json.message
-        );
-      } else {
-        Alert.alert("Error", json.error || "Failed to update OD.");
-      }
+      let json: any = null;
+      try {
+        json = JSON.parse(await res.text());
+      } catch {}
+      if (!res.ok || !json?.success) return setNoteError(json?.error || "Could not update this request. Try again.");
+      setActive(null);
+      report.reload(true);
+      Alert.alert(action === "approved" ? "Approved" : "Rejected", json.message || "The student has been notified.");
     } catch {
-      Alert.alert("Error", "Network error.");
+      setNoteError("Could not reach the server. Check your connection.");
     } finally {
       setSubmitting(false);
     }
   };
 
-  // ─── View proof ───────────────────────────────────────────────────────────────
-  const viewProof = async (od: ODRequest) => {
-    if (!od.proof?.url) {
-      Alert.alert("No proof", "No proof document found for this request.");
-      return;
-    }
-    // For images open inline, for PDFs open in browser
-    const isImage = od.proof.type?.startsWith("image");
-    if (isImage) {
-      setProofOD(od);
-      setProofModal(true);
-    } else {
-      Linking.openURL(od.proof.url);
-    }
+  const openProof = (od: ODRequest) => {
+    if (!od.proof?.url) return Alert.alert("No proof", "The student did not attach a document.");
+    if (od.proof.type?.startsWith("image")) setProofOD(od);
+    else openUrl(od.proof.url);
   };
 
-  // ─── Filtered list ────────────────────────────────────────────────────────────
-  const filtered = filter === "all" ? requests : requests.filter((r) => r.status === filter);
-
-  // ─── Day count helper ─────────────────────────────────────────────────────────
-  const countDays = (from: string, to: string) => {
-    const f = new Date(from + "T12:00:00");
-    const t = new Date(to   + "T12:00:00");
-    let count = 0;
-    for (let d = new Date(f); d <= t; d.setDate(d.getDate() + 1)) {
-      if (d.getDay() !== 0) count++;
-    }
-    return count;
-  };
+  if (!teacherId) {
+    return (
+      <Screen>
+        <Header title="OD requests" onBack={() => navigation.goBack()} />
+        <EmptyState icon="alert-circle-outline" title="Teacher not found" text="Go back and try again." />
+      </Screen>
+    );
+  }
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <View style={S.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={S.backBtn}>
-          <Ionicons name="arrow-back" size={22} color={DARK} />
-        </TouchableOpacity>
-        <View style={S.headerCenter}>
-          <Text style={S.headerTitle}>OD Requests</Text>
-          {subjectName && (
-            <Text style={S.headerSub} numberOfLines={1}>{subjectName}</Text>
-          )}
-        </View>
-        {summary.pending > 0 && (
-          <View style={S.pendingPill}>
-            <Text style={S.pendingPillText}>{summary.pending} new</Text>
-          </View>
-        )}
-      </View>
+    <Screen>
+      <Header
+        title="OD requests"
+        subtitle={subjectName}
+        onBack={() => navigation.goBack()}
+        right={summary.pending > 0 ? <Chip label={`${summary.pending} new`} tone="warning" /> : undefined}
+      />
 
       <ScrollView
-        style={S.scroll}
-        contentContainerStyle={S.scrollContent}
+        contentContainerStyle={{ padding: SP.lg, paddingBottom: 60, gap: SP.md }}
         showsVerticalScrollIndicator={false}
         refreshControl={
           <RefreshControl
             refreshing={refreshing}
-            onRefresh={() => fetchRequests(true)}
-            tintColor={PRIMARY}
+            colors={[T.primary]}
+            tintColor={T.primary}
+            onRefresh={async () => {
+              setRefreshing(true);
+              await report.reload(true);
+              setRefreshing(false);
+            }}
           />
         }
       >
-        {/* ── Summary chips ─────────────────────────────────────────────────── */}
-        <View style={S.summaryRow}>
-          <View style={[S.summaryChip, { backgroundColor: "#FEF3C7" }]}>
-            <Text style={[S.chipNum, { color: AMBER }]}>{summary.pending}</Text>
-            <Text style={[S.chipLabel, { color: AMBER }]}>Pending</Text>
-          </View>
-          <View style={[S.summaryChip, { backgroundColor: "#F0FDF4" }]}>
-            <Text style={[S.chipNum, { color: GREEN }]}>{summary.approved}</Text>
-            <Text style={[S.chipLabel, { color: GREEN }]}>Approved</Text>
-          </View>
-          <View style={[S.summaryChip, { backgroundColor: "#FEF2F2" }]}>
-            <Text style={[S.chipNum, { color: RED }]}>{summary.rejected}</Text>
-            <Text style={[S.chipLabel, { color: RED }]}>Rejected</Text>
-          </View>
-        </View>
+        <LoadBoundary report={report} label="Loading requests">
+          <StatRow
+            items={[
+              { value: summary.pending ?? 0, label: "Pending", tone: "warning" },
+              { value: summary.approved ?? 0, label: "Approved", tone: "success" },
+              { value: summary.rejected ?? 0, label: "Rejected", tone: "danger" },
+            ]}
+          />
+          <Segmented<Filter> options={[{ value: "all", label: "All" }, { value: "pending", label: "Pending" }, { value: "approved", label: "Approved" }, { value: "rejected", label: "Rejected" }]} value={filter} onChange={setFilter} />
 
-        {/* ── Filter bar ───────────────────────────────────────────────────── */}
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={S.filterScroll}>
-          {(["all", "pending", "approved", "rejected"] as FilterStatus[]).map((f) => (
-            <TouchableOpacity
-              key={f}
-              style={[S.filterChip, filter === f && S.filterChipActive]}
-              onPress={() => setFilter(f)}
-            >
-              <Text style={[S.filterText, filter === f && S.filterTextActive]}>
-                {f.charAt(0).toUpperCase() + f.slice(1)}
-                {f === "pending" && summary.pending > 0
-                  ? ` (${summary.pending})` : ""}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </ScrollView>
-
-        {/* ── Request list ─────────────────────────────────────────────────── */}
-        {loading ? (
-          <ActivityIndicator size="large" color={PRIMARY} style={{ marginTop: 40 }} />
-        ) : filtered.length === 0 ? (
-          <View style={S.empty}>
-            <Ionicons name="document-text-outline" size={48} color={BORDER} />
-            <Text style={S.emptyText}>
-              {filter === "pending" ? "No pending OD requests" : "No OD requests found"}
-            </Text>
-          </View>
-        ) : (
-          filtered.map((od) => {
-            const cfg  = STATUS_CONFIG[od.status];
-            const days = countDays(od.from_date, od.to_date);
-
-            return (
-              <View
-                key={od.od_id}
-                style={[
-                  S.card,
-                  od.status === "pending" && S.cardPending,
-                ]}
-              >
-                {/* Top row */}
-                <View style={S.cardTop}>
-                  <View style={S.studentInfo}>
-                    <View style={S.avatar}>
-                      <Text style={S.avatarText}>
-                        {od.student_name.charAt(0).toUpperCase()}
+          {list.length === 0 ? (
+            <EmptyState icon="document-text-outline" title={filter === "pending" ? "Nothing waiting" : "No OD requests"} text={filter === "pending" ? "All requests have been reviewed." : undefined} />
+          ) : (
+            list.map((od) => {
+              const cfg = STATUS[od.status] ?? STATUS.pending;
+              const days = countDays(od.from_date, od.to_date);
+              const isImage = od.proof?.type?.startsWith("image");
+              return (
+                <Card key={od.od_id} style={od.status === "pending" ? { borderWidth: 1.5, borderColor: T.warning } : undefined}>
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: SP.md }}>
+                    <Avatar name={od.student_name} tone="primary" />
+                    <View style={{ flex: 1 }}>
+                      <Text style={font.h3} numberOfLines={1}>
+                        {od.student_name}
                       </Text>
+                      {!!od.created_at && <Text style={[font.small, { marginTop: 1 }]}>Requested {fmtDate(od.created_at)}</Text>}
                     </View>
-                    <View>
-                      <Text style={S.studentName}>{od.student_name}</Text>
-                      {od.created_at && (
-                        <Text style={S.submittedAt}>
-                          {new Date(od.created_at).toLocaleDateString("en-IN", {
-                            day: "numeric", month: "short",
-                          })}
-                        </Text>
-                      )}
+                    <Chip label={cfg.label} tone={cfg.tone} icon={cfg.icon} />
+                  </View>
+
+                  <View style={{ flexDirection: "row", alignItems: "center", gap: SP.sm, marginTop: SP.md }}>
+                    <Ionicons name="calendar-outline" size={15} color={T.primary} />
+                    <Text style={{ flex: 1, fontSize: 13.5, fontWeight: "700", color: T.ink }}>
+                      {fmtDate(od.from_date)}
+                      {od.to_date !== od.from_date ? ` to ${fmtDate(od.to_date)}` : ""}
+                    </Text>
+                    <Chip label={`${days} day${days === 1 ? "" : "s"}`} tone="primary" />
+                  </View>
+
+                  <View style={{ backgroundColor: T.bg, borderRadius: 12, padding: SP.md, marginTop: SP.md, gap: 4 }}>
+                    <Text style={font.label}>Reason</Text>
+                    <Text style={[font.body, { color: T.ink }]}>{od.reason}</Text>
+                  </View>
+
+                  <Pressable
+                    onPress={() => openProof(od)}
+                    accessibilityRole="button"
+                    style={({ pressed }) => [{ flexDirection: "row", alignItems: "center", gap: SP.sm, backgroundColor: T.primarySoft, borderRadius: 12, padding: SP.md, marginTop: SP.md }, pressed && { opacity: 0.7 }]}
+                  >
+                    <Ionicons name={isImage ? "image-outline" : "document-outline"} size={16} color={T.primary} />
+                    <Text style={{ flex: 1, fontSize: 13, fontWeight: "700", color: T.primary }} numberOfLines={1}>
+                      {od.proof?.name || (od.proof?.url ? "View proof" : "No proof attached")}
+                    </Text>
+                    {!!od.proof?.url && <Ionicons name="open-outline" size={14} color={T.primary} />}
+                  </Pressable>
+
+                  {!!od.teacher_note && (
+                    <Banner tone={cfg.tone} icon="chatbubble-ellipses-outline" style={{ marginTop: SP.md }}>
+                      {od.teacher_note}
+                    </Banner>
+                  )}
+                  {od.status === "approved" && (
+                    <Banner tone="success" icon="checkmark-done-circle" style={{ marginTop: SP.md }}>
+                      Attendance marked as OD for {days} day{days === 1 ? "" : "s"}
+                    </Banner>
+                  )}
+
+                  {od.status === "pending" && (
+                    <View style={{ flexDirection: "row", gap: SP.sm, marginTop: SP.md }}>
+                      <Button label="Reject" icon="close" variant="dangerSoft" size="md" onPress={() => openReview(od, "rejected")} style={{ flex: 1 }} />
+                      <Button label="Approve and mark OD" icon="checkmark" variant="success" size="md" onPress={() => openReview(od, "approved")} style={{ flex: 2 }} />
                     </View>
-                  </View>
-                  <View style={[S.statusBadge, { backgroundColor: cfg.bg }]}>
-                    <Ionicons name={cfg.icon as any} size={12} color={cfg.color} />
-                    <Text style={[S.statusText, { color: cfg.color }]}>{cfg.label}</Text>
-                  </View>
-                </View>
-
-                {/* Date range */}
-                <View style={S.dateRow}>
-                  <Ionicons name="calendar-outline" size={14} color={OD_COLOR} />
-                  <Text style={S.dateRange}>
-                    {fmtDate(od.from_date)}
-                    {od.to_date !== od.from_date ? ` → ${fmtDate(od.to_date)}` : ""}
-                  </Text>
-                  <View style={S.daysBadge}>
-                    <Text style={S.daysText}>{days} day{days !== 1 ? "s" : ""}</Text>
-                  </View>
-                </View>
-
-                {/* Reason */}
-                <View style={S.reasonBox}>
-                  <Text style={S.reasonLabel}>REASON</Text>
-                  <Text style={S.reasonText}>{od.reason}</Text>
-                </View>
-
-                {/* Proof */}
-                <TouchableOpacity style={S.proofBtn} onPress={() => viewProof(od)}>
-                  <Ionicons
-                    name={od.proof?.type?.startsWith("image") ? "image-outline" : "document-outline"}
-                    size={14}
-                    color={OD_COLOR}
-                  />
-                  <Text style={S.proofBtnText} numberOfLines={1}>
-                    {od.proof?.name || "View Proof"}
-                  </Text>
-                  <Ionicons name="open-outline" size={12} color={OD_COLOR} />
-                </TouchableOpacity>
-
-                {/* Teacher note (already reviewed) */}
-                {od.teacher_note && (
-                  <View style={[S.noteBox, { borderColor: cfg.color + "44", backgroundColor: cfg.bg }]}>
-                    <Ionicons name="chatbubble-ellipses-outline" size={12} color={cfg.color} />
-                    <Text style={[S.noteText, { color: DARK }]}>{od.teacher_note}</Text>
-                  </View>
-                )}
-
-                {/* OD marked banner */}
-                {od.status === "approved" && (
-                  <View style={S.odMarkedBanner}>
-                    <Ionicons name="checkmark-done-circle" size={13} color={GREEN} />
-                    <Text style={S.odMarkedText}>Attendance marked as OD for {days} day{days !== 1 ? "s" : ""}</Text>
-                  </View>
-                )}
-
-                {/* Action buttons — pending only */}
-                {od.status === "pending" && (
-                  <View style={S.actionRow}>
-                    <TouchableOpacity
-                      style={S.rejectBtn}
-                      onPress={() => openReview(od, "rejected")}
-                    >
-                      <Ionicons name="close-outline" size={16} color={RED} />
-                      <Text style={S.rejectBtnText}>Reject</Text>
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={S.approveBtn}
-                      onPress={() => openReview(od, "approved")}
-                    >
-                      <Ionicons name="checkmark-outline" size={16} color={WHITE} />
-                      <Text style={S.approveBtnText}>Approve & Mark OD</Text>
-                    </TouchableOpacity>
-                  </View>
-                )}
-              </View>
-            );
-          })
-        )}
-
-        <View style={{ height: 40 }} />
+                  )}
+                </Card>
+              );
+            })
+          )}
+        </LoadBoundary>
       </ScrollView>
 
-      {/* ══════════════════════════════════════════════════════════════════════
-          Review Confirmation Modal
-      ══════════════════════════════════════════════════════════════════════ */}
-      <Modal
-        visible={reviewModal}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setReviewModal(false)}
-      >
-        <View style={S.modalOverlay}>
-          <View style={S.modalSheet}>
-            {/* Header */}
-            <View style={S.modalHeader}>
-              <Text style={S.modalTitle}>
-                {reviewAction === "approved" ? " Approve OD" : "❌ Reject OD"}
-              </Text>
-              <TouchableOpacity onPress={() => setReviewModal(false)}>
-                <Ionicons name="close" size={22} color={DARK} />
-              </TouchableOpacity>
-            </View>
+      {/* Review sheet */}
+      <Modal visible={!!active} transparent animationType="slide" onRequestClose={closeReview}>
+        <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, backgroundColor: "rgba(15,23,42,0.5)", justifyContent: "flex-end" }}>
+          <View style={{ backgroundColor: T.surface, borderTopLeftRadius: 26, borderTopRightRadius: 26, maxHeight: "92%" }}>
+            <ScrollView contentContainerStyle={{ padding: SP.xl, gap: SP.lg, paddingBottom: 36 }} keyboardShouldPersistTaps="handled">
+              <View style={{ flexDirection: "row", alignItems: "center" }}>
+                <Text style={[font.h2, { flex: 1 }]}>{action === "approved" ? "Approve OD" : "Reject OD"}</Text>
+                <Pressable onPress={closeReview} hitSlop={10} accessibilityLabel="Close">
+                  <Ionicons name="close" size={24} color={T.ink} />
+                </Pressable>
+              </View>
 
-            {activeOD && (
-              <>
-                {/* Summary */}
-                <View style={S.modalSummary}>
-                  <Text style={S.modalStudentName}>{activeOD.student_name}</Text>
-                  <Text style={S.modalDates}>
-                    {fmtDate(activeOD.from_date)}
-                    {activeOD.to_date !== activeOD.from_date
-                      ? ` → ${fmtDate(activeOD.to_date)}` : ""}
+              {!!active && (
+                <View style={{ backgroundColor: T.bg, borderRadius: 14, padding: SP.md, gap: 4 }}>
+                  <Text style={font.h3}>{active.student_name}</Text>
+                  <Text style={{ fontSize: 13, fontWeight: "700", color: T.primary }}>
+                    {fmtDate(active.from_date)}
+                    {active.to_date !== active.from_date ? ` to ${fmtDate(active.to_date)}` : ""}
                   </Text>
-                  <Text style={S.modalReason}>{activeOD.reason}</Text>
+                  <Text style={font.body}>{active.reason}</Text>
                 </View>
+              )}
 
-                {reviewAction === "approved" && (
-                  <View style={S.modalWarning}>
-                    <Ionicons name="information-circle-outline" size={16} color={OD_COLOR} />
-                    <Text style={S.modalWarningText}>
-                      Approving will mark attendance as <Text style={{ fontWeight: "800" }}>OD</Text> for all
-                      weekdays in this range. This cannot be undone from here.
-                    </Text>
-                  </View>
-                )}
+              {action === "approved" && (
+                <Banner tone="primary" icon="information-circle-outline">
+                  Approving marks attendance as OD for every weekday in this range. You cannot undo this from here.
+                </Banner>
+              )}
 
-                {/* Note */}
-                <Text style={S.modalLabel}>
-                  {reviewAction === "rejected" ? "Rejection Reason" : "Note (optional)"}
-                </Text>
-                <TextInput
-                  style={S.modalInput}
-                  value={teacherNote}
-                  onChangeText={setTeacherNote}
-                  placeholder={
-                    reviewAction === "rejected"
-                      ? "Explain why the request was rejected..."
-                      : "Add a note for the student (optional)..."
-                  }
-                  placeholderTextColor="#9CA3AF"
-                  multiline
-                  numberOfLines={3}
-                  textAlignVertical="top"
-                />
+              <TextField
+                label={action === "rejected" ? "Reason for rejection" : "Note for the student (optional)"}
+                value={note}
+                onChangeText={(t) => {
+                  setNote(t);
+                  setNoteError(null);
+                }}
+                placeholder={action === "rejected" ? "Explain why this was rejected" : "Add a note"}
+                multiline
+                minHeight={90}
+                autoCapitalize="sentences"
+                autoCorrect
+                maxLength={300}
+              />
+              {!!noteError && <Banner tone="danger">{noteError}</Banner>}
 
-                {/* Confirm button */}
-                <TouchableOpacity
-                  style={[
-                    S.confirmBtn,
-                    { backgroundColor: reviewAction === "approved" ? GREEN : RED },
-                    submitting && { opacity: 0.6 },
-                  ]}
-                  onPress={handleReview}
-                  disabled={submitting}
-                >
-                  {submitting
-                    ? <ActivityIndicator size="small" color={WHITE} />
-                    : <Text style={S.confirmBtnText}>
-                        {reviewAction === "approved" ? "Confirm Approval" : "Confirm Rejection"}
-                      </Text>
-                  }
-                </TouchableOpacity>
-              </>
-            )}
+              <Button label={action === "approved" ? "Confirm approval" : "Confirm rejection"} icon={action === "approved" ? "checkmark" : "close"} variant={action === "approved" ? "success" : "danger"} loading={submitting} onPress={submit} />
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
 
-      {/* ══════════════════════════════════════════════════════════════════════
-          Proof Image Modal (for image proofs)
-      ══════════════════════════════════════════════════════════════════════ */}
-      <Modal
-        visible={proofModal}
-        transparent
-        animationType="fade"
-        onRequestClose={() => setProofModal(false)}
-      >
-        <View style={S.proofOverlay}>
-          <TouchableOpacity style={S.proofClose} onPress={() => setProofModal(false)}>
-            <Ionicons name="close-circle" size={32} color={WHITE} />
-          </TouchableOpacity>
-          {proofOD && (
+      {/* Image proof */}
+      <Modal visible={!!proofOD} transparent animationType="fade" onRequestClose={() => setProofOD(null)}>
+        <View style={{ flex: 1, backgroundColor: "rgba(0,0,0,0.92)", alignItems: "center", justifyContent: "center", padding: SP.xl }}>
+          <Pressable onPress={() => setProofOD(null)} hitSlop={12} style={{ position: "absolute", top: 48, right: 20 }} accessibilityLabel="Close proof">
+            <Ionicons name="close-circle" size={34} color="#fff" />
+          </Pressable>
+          {!!proofOD && (
             <>
-              <Text style={S.proofTitle}>{proofOD.student_name} — Proof</Text>
-              {/* eslint-disable-next-line @typescript-eslint/no-require-imports */}
-              {React.createElement(require("react-native").Image, {
-                source: { uri: proofOD.proof?.url },
-                style:  S.proofImage,
-                resizeMode: "contain",
-              })}
-              <TouchableOpacity
-                style={S.openBrowserBtn}
-                onPress={() => Linking.openURL(proofOD.proof?.url)}
-              >
-                <Text style={S.openBrowserText}>Open in Browser</Text>
-              </TouchableOpacity>
+              <Text style={{ color: "#fff", fontSize: 14, fontWeight: "600", marginBottom: SP.lg, textAlign: "center" }}>{proofOD.student_name} - proof</Text>
+              <Image source={{ uri: proofOD.proof?.url }} style={{ width: "100%", height: 420, borderRadius: 12 }} resizeMode="contain" />
+              <View style={{ width: "100%", marginTop: SP.lg }}>
+                <Button label="Open in browser" icon="open-outline" variant="secondary" onPress={() => openUrl(proofOD.proof?.url)} />
+              </View>
             </>
           )}
         </View>
       </Modal>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
-// ─── Styles ───────────────────────────────────────────────────────────────────
-const S = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: BG },
-
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    backgroundColor: WHITE,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-    gap: 10,
-  },
-  backBtn:     { padding: 4 },
-  headerCenter: { flex: 1 },
-  headerTitle: { fontSize: 17, fontWeight: "800", color: DARK },
-  headerSub:   { fontSize: 12, color: GREY, marginTop: 1 },
-  pendingPill: {
-    backgroundColor: AMBER + "22",
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  pendingPillText: { fontSize: 11, fontWeight: "700", color: AMBER },
-
-  scroll:        { flex: 1 },
-  scrollContent: { padding: 16, gap: 14 },
-
-  summaryRow: { flexDirection: "row", gap: 10 },
-  summaryChip: { flex: 1, borderRadius: 16, padding: 14, alignItems: "center" },
-  chipNum:   { fontSize: 22, fontWeight: "800" },
-  chipLabel: { fontSize: 11, fontWeight: "600", marginTop: 2 },
-
-  filterScroll: { flexGrow: 0, marginBottom: 2 },
-  filterChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: WHITE,
-    borderWidth: 1,
-    borderColor: BORDER,
-    marginRight: 8,
-  },
-  filterChipActive: { backgroundColor: PRIMARY_SOFT, borderColor: PRIMARY },
-  filterText:       { fontSize: 13, fontWeight: "600", color: GREY },
-  filterTextActive: { color: PRIMARY },
-
-  empty:     { paddingVertical: 60, alignItems: "center", gap: 12 },
-  emptyText: { fontSize: 14, color: GREY },
-
-  card: {
-    backgroundColor: WHITE,
-    borderRadius: 18,
-    padding: 16,
-    gap: 12,
-    borderWidth: 1,
-    borderColor: BORDER,
-    elevation: 1,
-  },
-  cardPending: {
-    borderColor: AMBER + "66",
-    borderWidth: 1.5,
-  },
-
-  cardTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  studentInfo: { flexDirection: "row", alignItems: "center", gap: 10 },
-  avatar: {
-    width: 38, height: 38, borderRadius: 19,
-    backgroundColor: OD_SOFT,
-    alignItems: "center", justifyContent: "center",
-  },
-  avatarText:   { fontSize: 16, fontWeight: "800", color: OD_COLOR },
-  studentName:  { fontSize: 14, fontWeight: "700", color: DARK },
-  submittedAt:  { fontSize: 11, color: GREY, marginTop: 1 },
-
-  statusBadge: {
-    flexDirection: "row", alignItems: "center", gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10,
-  },
-  statusText: { fontSize: 11, fontWeight: "700" },
-
-  dateRow: { flexDirection: "row", alignItems: "center", gap: 8 },
-  dateRange: { fontSize: 13, fontWeight: "700", color: DARK, flex: 1 },
-  daysBadge: {
-    backgroundColor: OD_SOFT,
-    borderRadius: 8,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-  },
-  daysText: { fontSize: 11, fontWeight: "700", color: OD_COLOR },
-
-  reasonBox: {
-    backgroundColor: BG, borderRadius: 10, padding: 12, gap: 4,
-  },
-  reasonLabel: {
-    fontSize: 10, fontWeight: "700", color: GREY,
-    textTransform: "uppercase", letterSpacing: 0.5,
-  },
-  reasonText: { fontSize: 13, color: DARK, lineHeight: 18 },
-
-  proofBtn: {
-    flexDirection: "row", alignItems: "center", gap: 6,
-    backgroundColor: OD_SOFT,
-    borderRadius: 10,
-    padding: 10,
-  },
-  proofBtnText: { flex: 1, fontSize: 12, color: OD_COLOR, fontWeight: "600" },
-
-  noteBox: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 6,
-    borderWidth: 1,
-    borderRadius: 8,
-    padding: 10,
-  },
-  noteText: { flex: 1, fontSize: 12, lineHeight: 16 },
-
-  odMarkedBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "#F0FDF4",
-    borderRadius: 8,
-    padding: 10,
-  },
-  odMarkedText: { fontSize: 12, color: GREEN, fontWeight: "600" },
-
-  actionRow: { flexDirection: "row", gap: 10, marginTop: 4 },
-  rejectBtn: {
-    flex: 1,
-    flexDirection: "row", alignItems: "center", justifyContent: "center",
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: 12,
-    borderWidth: 1.5,
-    borderColor: RED + "55",
-    backgroundColor: "#FEF2F2",
-  },
-  rejectBtnText:  { fontSize: 13, fontWeight: "700", color: RED },
-  approveBtn: {
-    flex: 2,
-    flexDirection: "row", alignItems: "center", justifyContent: "center",
-    gap: 6,
-    paddingVertical: 12,
-    borderRadius: 12,
-    backgroundColor: GREEN,
-  },
-  approveBtnText: { fontSize: 13, fontWeight: "700", color: WHITE },
-
-  // Modal
-  modalOverlay: { flex: 1, backgroundColor: "rgba(0,0,0,0.5)", justifyContent: "flex-end" },
-  modalSheet: {
-    backgroundColor: WHITE,
-    borderTopLeftRadius: 28,
-    borderTopRightRadius: 28,
-    padding: 24,
-    gap: 16,
-    paddingBottom: 44,
-  },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  modalTitle:       { fontSize: 18, fontWeight: "800", color: DARK },
-  modalSummary:     { backgroundColor: BG, borderRadius: 14, padding: 14, gap: 4 },
-  modalStudentName: { fontSize: 15, fontWeight: "700", color: DARK },
-  modalDates:       { fontSize: 13, color: OD_COLOR, fontWeight: "600" },
-  modalReason:      { fontSize: 12, color: GREY, marginTop: 4, lineHeight: 18 },
-  modalWarning: {
-    flexDirection: "row", gap: 8, alignItems: "flex-start",
-    backgroundColor: OD_SOFT, borderRadius: 10, padding: 12,
-  },
-  modalWarningText: { flex: 1, fontSize: 12, color: "#4C1D95", lineHeight: 17 },
-  modalLabel: {
-    fontSize: 12, fontWeight: "700", color: GREY,
-    textTransform: "uppercase", letterSpacing: 0.5,
-  },
-  modalInput: {
-    backgroundColor: BG,
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 14,
-    color: DARK,
-    borderWidth: 1,
-    borderColor: BORDER,
-    minHeight: 90,
-  },
-  confirmBtn: {
-    borderRadius: 50,
-    paddingVertical: 16,
-    alignItems: "center",
-    marginTop: 4,
-  },
-  confirmBtnText: { color: WHITE, fontWeight: "700", fontSize: 15 },
-
-  // Proof image modal
-  proofOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.92)",
-    alignItems: "center",
-    justifyContent: "center",
-    padding: 20,
-  },
-  proofClose: { position: "absolute", top: 48, right: 20 },
-  proofTitle: {
-    color: WHITE,
-    fontSize: 14,
-    fontWeight: "600",
-    marginBottom: 16,
-    marginTop: 72,
-    textAlign: "center",
-  },
-  proofImage: {
-    width: "100%",
-    height: 420,
-    borderRadius: 12,
-  },
-  openBrowserBtn: {
-    marginTop: 16,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: WHITE + "22",
-    borderWidth: 1,
-    borderColor: WHITE + "44",
-  },
-  openBrowserText: { color: WHITE, fontSize: 13, fontWeight: "600" },
-});
+async function openUrl(url?: string) {
+  if (!url) return;
+  try {
+    await Linking.openURL(url);
+  } catch {
+    Alert.alert("Could not open", "No app on this phone can open that file.");
+  }
+}

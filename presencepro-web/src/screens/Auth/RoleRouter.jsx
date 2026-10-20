@@ -13,15 +13,15 @@
  *
  * Decision table:
  *   Not logged in          → /              (login)
- *   role: student          → /dashboard/student
- *   role: teacher, is_head → /dashboard/head
+ *   role: student          → /dashboard/student   (student portal)
+ *   role: teacher, is_head → /dashboard/teacher   (heads also get the Manage menu)
  *   role: teacher          → /dashboard/teacher
- *   role: hod              → /dashboard/head
+ *   role: hod              → /dashboard/teacher
  */
 
 import { useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { isLoggedIn, getSessionUser, dashboardPathForRole } from "../../services/session";
+import { isLoggedIn, getSessionUser, getUserSession, dashboardPathForRole } from "../../services/session";
 
 export default function RoleRouter() {
   const navigate = useNavigate();
@@ -32,7 +32,25 @@ export default function RoleRouter() {
       return;
     }
     const user = getSessionUser();
-    navigate(dashboardPathForRole(user), { replace: true });
+    const profile = getUserSession()?.profile;
+
+    // Students always land in the student portal.
+    if (user?.role === "student") {
+      navigate("/dashboard/student", { replace: true });
+      return;
+    }
+
+    // Heads (is_head, hod/head_teacher, or profile.head_of set) use the
+    // teacher pages — the Manage section appears in the sidebar.
+    const isHead =
+      !!user?.is_head ||
+      user?.role === "hod" ||
+      user?.role === "head_teacher" ||
+      (user?.role === "teacher" && !!String(profile?.head_of || "").trim());
+
+    navigate(isHead ? "/dashboard/teacher" : dashboardPathForRole(user), {
+      replace: true,
+    });
   }, []);
 
   return null; // renders nothing — pure redirect

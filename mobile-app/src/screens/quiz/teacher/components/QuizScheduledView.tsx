@@ -1,312 +1,282 @@
-import React, { useState, useEffect } from "react";
-import {
-  View, Text, StyleSheet, ScrollView, TouchableOpacity,
-  TextInput, Alert, ActivityIndicator,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import {
-  PRIMARY, PRIMARY_LIGHT, BG, GREEN, GREY,
-  Quiz, QuizQuestion, API_URL, msToCountdown,
-} from "./quizViewConstants";
+// screens/quiz/teacher/components/QuizScheduledView.tsx — a quiz that has not started: edit questions or cancel
+import React, { useEffect, useState } from "react";
+import { Alert, Image, ScrollView, StyleSheet, Text, TextInput, View, Pressable } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
+import { apiFetch } from "../../../../services/api";
+import { Banner, Button, Chip, EmptyState, Header, Screen, SP, T, font } from "../../../../components/ui";
+import { API_URL, Quiz, QuizOptionValue, QuizQuestion, msToCountdown, optImage, optText, readJson } from "./quizViewConstants";
 import QuizHeaderCard from "./QuizHeaderCard";
-import RescheduleModal from "./RescheduleModal";
 
-// ─── Simple Question Card ────────────────────────────────────────────────────
-function QuestionCard({
-  question, index, onChange,
-}: {
-  question: QuizQuestion; index: number; onChange: (q: QuizQuestion) => void;
-}) {
+// ─── One editable question ────────────────────────────────────────────────────
+function QuestionCard({ question, index, onChange }: { question: QuizQuestion; index: number; onChange: (q: QuizQuestion) => void }) {
   const isMCQ = question.type === "mcq";
+  const options = question.options ?? [];
 
-  const updateOption = (i: number, text: string) => {
-    const opts = [...(question.options ?? [])];
-    const wasCorrect = opts[i] === question.correct_answer;
-    opts[i] = text;
-    onChange({ ...question, options: opts, correct_answer: wasCorrect ? text : question.correct_answer });
-  };
-
-  const markCorrect = (i: number) => {
-    onChange({ ...question, correct_answer: (question.options ?? [])[i] });
+  const setOptionText = (i: number, text: string) => {
+    const next = [...options];
+    const old = next[i];
+    const wasCorrect = optText(old) === question.correct_answer;
+    // keep the picture when the option is an object, stay a plain string when it was one
+    next[i] = typeof old === "string" || old == null ? text : { ...old, text };
+    onChange({ ...question, options: next as QuizOptionValue[], correct_answer: wasCorrect ? text : question.correct_answer });
   };
 
   return (
-    <View style={S.qCard}>
-      {/* Header */}
-      <View style={S.qHeader}>
-        <Text style={S.qNum}>Q{index + 1}</Text>
-        <Text style={S.qType}>{isMCQ ? "MCQ" : "Open"}</Text>
+    <View style={st.qCard}>
+      <View style={st.qHeader}>
+        <View style={st.qNum}>
+          <Text style={st.qNumTxt}>Q{index + 1}</Text>
+        </View>
+        <Chip label={isMCQ ? "MCQ" : "Written"} tone={isMCQ ? "primary" : "warning"} />
         <View style={{ flex: 1 }} />
-        <View style={S.marksBadge}>
+        <View style={st.marksWrap}>
           <TextInput
-            style={S.marksInput}
+            style={st.marksInput}
             keyboardType="numeric"
-            value={String(question.marks)}
-            onChangeText={(v) => onChange({ ...question, marks: Number(v) || 1 })}
+            value={String(question.marks ?? "")}
+            onChangeText={(v) => onChange({ ...question, marks: v.replace(/[^0-9]/g, "") === "" ? ("" as any) : Number(v.replace(/[^0-9]/g, "")) })}
             maxLength={3}
+            accessibilityLabel={`Marks for question ${index + 1}`}
           />
-          <Text style={S.marksPt}>pts</Text>
+          <Text style={st.marksPt}>marks</Text>
         </View>
       </View>
 
-      {/* Question text */}
       <TextInput
-        style={[S.input, S.textarea]}
+        style={[st.input, st.textarea]}
         value={question.question}
         onChangeText={(v) => onChange({ ...question, question: v })}
         multiline
-        placeholder="Enter question..."
-        placeholderTextColor="#9CA3AF"
+        placeholder="Question text"
+        placeholderTextColor={T.muted}
       />
+      {!!question.image_url && <Image source={{ uri: question.image_url }} style={st.qImage} resizeMode="contain" />}
 
-      {/* MCQ options */}
-      {isMCQ && (question.options ?? []).map((opt, i) => {
-        const isCorrect = opt === question.correct_answer;
-        return (
-          <View key={i} style={S.optRow}>
-            <TouchableOpacity
-              style={[S.radio, isCorrect && S.radioDone]}
-              onPress={() => markCorrect(i)}
-            >
-              {isCorrect && <Text style={S.radioCheck}>✓</Text>}
-            </TouchableOpacity>
-            <TextInput
-              style={[S.input, S.optInput, isCorrect && S.optInputDone]}
-              value={opt}
-              onChangeText={(v) => updateOption(i, v)}
-              placeholder={`Option ${String.fromCharCode(65 + i)}`}
-              placeholderTextColor="#9CA3AF"
-              multiline
-            />
-          </View>
-        );
-      })}
+      {isMCQ &&
+        options.map((opt, i) => {
+          const text = optText(opt);
+          const correct = !!text && text === question.correct_answer;
+          const img = optImage(opt);
+          return (
+            <View key={i} style={st.optRow}>
+              <Pressable
+                onPress={() => onChange({ ...question, correct_answer: optText(options[i]) })}
+                style={[st.tick, correct && st.tickOn]}
+                accessibilityRole="radio"
+                accessibilityState={{ selected: correct }}
+                accessibilityLabel={`Mark option ${String.fromCharCode(65 + i)} correct`}
+              >
+                {correct && <Ionicons name="checkmark" size={15} color="#fff" />}
+              </Pressable>
+              <View style={{ flex: 1 }}>
+                <TextInput
+                  style={[st.input, { marginBottom: 0 }, correct && st.optOn]}
+                  value={text}
+                  onChangeText={(v) => setOptionText(i, v)}
+                  placeholder={`Option ${String.fromCharCode(65 + i)}`}
+                  placeholderTextColor={T.muted}
+                  multiline
+                />
+                {!!img && <Image source={{ uri: img }} style={st.optImg} resizeMode="cover" />}
+              </View>
+            </View>
+          );
+        })}
 
-      {/* Open-ended answer */}
       {!isMCQ && (
-        <TextInput
-          style={[S.input, S.textarea]}
-          value={question.correct_answer}
-          onChangeText={(v) => onChange({ ...question, correct_answer: v })}
-          multiline
-          placeholder="Model answer..."
-          placeholderTextColor="#9CA3AF"
-        />
+        <>
+          <Text style={st.sub}>Model answer</Text>
+          <TextInput
+            style={[st.input, st.textarea]}
+            value={question.correct_answer}
+            onChangeText={(v) => onChange({ ...question, correct_answer: v })}
+            multiline
+            placeholder="Model answer"
+            placeholderTextColor={T.muted}
+          />
+        </>
       )}
     </View>
   );
+}
+
+// The ticking clock lives in its own component so the rest of the screen
+// is NOT re-rendered every second.
+function Countdown({ startIso }: { startIso: string }) {
+  const [text, setText] = useState(() => msToCountdown(new Date(startIso).getTime() - Date.now()));
+  useEffect(() => {
+    const tick = () => setText(msToCountdown(new Date(startIso).getTime() - Date.now()));
+    tick();
+    const id = setInterval(tick, 1000);
+    return () => clearInterval(id);
+  }, [startIso]);
+  return <Text style={st.cdTime}>{text}</Text>;
 }
 
 // ─── Main ──────────────────────────────────────────────────────────────────────
 interface Props {
   quiz: Quiz;
   questions: QuizQuestion[];
-  countdown: string;
   onBack: () => void;
   onRefresh: () => void;
 }
 
-export default function QuizScheduledView({ quiz, questions, countdown, onBack, onRefresh }: Props) {
-  const [localQuestions, setLocalQuestions] = useState<QuizQuestion[]>(questions);
-  const [savingEdit, setSavingEdit] = useState(false);
-  const [rescheduleVisible, setRescheduleVisible] = useState(false);
-  const [liveCountdown, setLiveCountdown] = useState(countdown);
+export default function QuizScheduledView({ quiz, questions, onBack, onRefresh }: Props) {
+  const [local, setLocal] = useState<QuizQuestion[]>(questions);
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
 
+  // A background refresh must not wipe what the teacher is typing.
   useEffect(() => {
-    setLocalQuestions(questions);
-  }, [questions]);
+    if (!dirty) setLocal(questions);
+  }, [questions]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  useEffect(() => {
-    const interval = setInterval(() => {
-      const remaining = new Date(quiz.scheduled_start).getTime() - Date.now();
-      setLiveCountdown(msToCountdown(remaining));
-    }, 1000);
-    return () => clearInterval(interval);
-  }, [quiz.scheduled_start]);
+  const edit = (i: number, q: QuizQuestion) => {
+    setDirty(true);
+    setLocal((prev) => prev.map((x, idx) => (idx === i ? q : x)));
+  };
 
-  const handleSaveQuestions = async () => {
-    if (localQuestions.length === 0) return;
+  const validate = (): string | null => {
+    for (let i = 0; i < local.length; i++) {
+      const q = local[i];
+      if (!q.question?.trim()) return `Q${i + 1}: the question text is empty.`;
+      if (!Number(q.marks) || Number(q.marks) < 1) return `Q${i + 1}: marks must be at least 1.`;
+      if (q.type === "mcq") {
+        const texts = (q.options ?? []).map(optText).filter((t) => t.trim());
+        if (texts.length < 2) return `Q${i + 1}: add at least two options.`;
+        if (!texts.includes(q.correct_answer)) return `Q${i + 1}: choose a correct option.`;
+      } else if (!q.correct_answer?.trim()) {
+        return `Q${i + 1}: add a model answer.`;
+      }
+    }
+    return null;
+  };
+
+  const save = async () => {
+    if (saving || local.length === 0) return;
+    const problem = validate();
+    if (problem) {
+      Alert.alert("Check your changes", problem);
+      return;
+    }
+    setSaving(true);
     try {
-      setSavingEdit(true);
-      const res = await fetch(`${API_URL}/api/quizzes/${quiz.quiz_id}/update-questions`, {
+      const res = await apiFetch(`${API_URL}/api/quizzes/${encodeURIComponent(quiz.quiz_id)}/update-questions`, {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           teacher_id: quiz.teacher_id,
-          questions: localQuestions.map((q) => ({
+          questions: local.map((q) => ({
             question_id: q.question_id,
             type: q.type,
             question: q.question,
+            image_url: q.image_url ?? null,
             options: q.type === "mcq" ? q.options : null,
             correct_answer: q.correct_answer,
             marks: Number(q.marks),
           })),
         }),
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error ?? "Failed to save");
-      Alert.alert("Saved ✓", "Questions updated successfully.");
+      const data = await readJson(res);
+      if (!data?.success) throw new Error(data?.error ?? "Failed to save");
+      setDirty(false);
+      Alert.alert("Saved", "Questions updated.");
+      onRefresh();
     } catch (e: any) {
-      Alert.alert("Error", e.message);
+      Alert.alert("Could not save", e?.message || "Check your connection and try again.");
     } finally {
-      setSavingEdit(false);
+      setSaving(false);
     }
   };
 
-  const handleCancel = () => {
-    Alert.alert(
-      "Cancel Quiz",
-      "Are you sure? This cannot be undone.",
-      [
-        { text: "Keep Quiz" },
-        {
-          text: "Cancel",
-          style: "destructive",
-          onPress: async () => {
-            try {
-              const res = await fetch(`${API_URL}/api/quizzes/${quiz.quiz_id}`, {
-                method: "DELETE",
-                headers: { "Content-Type": "application/json" },
-                body: JSON.stringify({ teacher_id: quiz.teacher_id }),
-              });
-              const data = await res.json();
-              if (!data.success) throw new Error(data.error ?? "Failed");
-              Alert.alert("Cancelled", "Quiz has been cancelled.", [
-                { text: "OK", onPress: onBack },
-              ]);
-            } catch (e: any) {
-              Alert.alert("Error", e.message);
-            }
-          },
+  const cancelQuiz = () =>
+    Alert.alert("Cancel this quiz?", "Students will no longer see it. This cannot be undone.", [
+      { text: "Keep quiz", style: "cancel" },
+      {
+        text: "Cancel quiz",
+        style: "destructive",
+        onPress: async () => {
+          setCancelling(true);
+          try {
+            const res = await apiFetch(`${API_URL}/api/quizzes/${encodeURIComponent(quiz.quiz_id)}`, {
+              method: "DELETE",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ teacher_id: quiz.teacher_id }),
+            });
+            const data = await readJson(res);
+            if (!data?.success) throw new Error(data?.error ?? "Failed");
+            Alert.alert("Quiz cancelled", "The quiz has been cancelled.", [{ text: "OK", onPress: onBack }]);
+          } catch (e: any) {
+            Alert.alert("Could not cancel", e?.message || "Check your connection and try again.");
+          } finally {
+            setCancelling(false);
+          }
         },
-      ]
-    );
-  };
+      },
+    ]);
 
-  // FIX: Previously this called setRescheduleVisible(false) AND onRefresh(),
-  // but RescheduleModal's handleSave was also calling onClose() after onSuccess(),
-  // causing a double-close race. Now the modal owns its own close-after-save
-  // (via the Alert OK button), and onSuccess here just closes + refreshes.
-  const handleRescheduleSuccess = () => {
-    setRescheduleVisible(false);
-    onRefresh();
+  const back = () => {
+    if (!dirty) return onBack();
+    Alert.alert("Discard changes?", "You have unsaved question edits.", [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Discard", style: "destructive", onPress: onBack },
+    ]);
   };
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      <ScrollView contentContainerStyle={S.content} keyboardShouldPersistTaps="handled">
-        <TouchableOpacity style={S.backBtn} onPress={onBack}>
-          <Text style={S.backIcon}>‹</Text>
-        </TouchableOpacity>
-
-        <Text style={S.title}>Scheduled Test</Text>
-        <Text style={S.subtitle}>{quiz.subject_name}</Text>
-
-        {/* Countdown */}
-        <View style={S.countdownBox}>
-          <Text style={S.countdownLabel}>Starts in</Text>
-          <Text style={S.countdownTime}>{liveCountdown}</Text>
+    <Screen>
+      <Header title="Scheduled test" subtitle={quiz.subject_name} onBack={back} />
+      <ScrollView contentContainerStyle={st.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+        <View style={st.countdown}>
+          <Text style={st.cdLabel}>Starts in</Text>
+          <Countdown startIso={quiz.scheduled_start} />
         </View>
 
         <QuizHeaderCard quiz={quiz} status="scheduled" submissionCount={0} />
 
-        {/* Action buttons */}
-        <View style={S.buttonRow}>
-          <TouchableOpacity style={S.btn} onPress={() => setRescheduleVisible(true)}>
-            <Text style={S.btnText}>📅 Reschedule</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={[S.btn, S.btnDanger]} onPress={handleCancel}>
-            <Text style={[S.btnText, S.btnTextDanger]}>✕ Cancel</Text>
-          </TouchableOpacity>
-        </View>
+        <Button label="Cancel quiz" icon="close-circle-outline" variant="dangerSoft" size="md" onPress={cancelQuiz} loading={cancelling} />
 
-        {/* Questions */}
-        {localQuestions.length > 0 ? (
+        {local.length > 0 ? (
           <>
-            <Text style={S.sectionTitle}>Edit Questions</Text>
-            {localQuestions.map((q, i) => (
-              <QuestionCard
-                key={q.question_id ?? i}
-                question={q}
-                index={i}
-                onChange={(updated) => {
-                  const copy = [...localQuestions];
-                  copy[i] = updated;
-                  setLocalQuestions(copy);
-                }}
-              />
+            <Text style={font.h2}>Edit questions</Text>
+            {dirty && <Banner tone="warning" icon="create-outline">You have unsaved changes.</Banner>}
+            {local.map((q, i) => (
+              <QuestionCard key={q.question_id ?? i} question={q} index={i} onChange={(u) => edit(i, u)} />
             ))}
-
-            <TouchableOpacity
-              style={[S.saveBtn, savingEdit && { opacity: 0.7 }]}
-              onPress={handleSaveQuestions}
-              disabled={savingEdit}
-            >
-              {savingEdit
-                ? <ActivityIndicator color="#FFF" />
-                : <Text style={S.saveBtnText}>Save Changes</Text>
-              }
-            </TouchableOpacity>
+            <Button label="Save changes" icon="save-outline" variant="success" onPress={save} loading={saving} disabled={!dirty} />
           </>
         ) : (
-          <Text style={S.emptyText}>No questions loaded</Text>
+          <EmptyState icon="help-circle-outline" title="No questions loaded" text="Pull back and open the quiz again." />
         )}
-
-        <View style={{ height: 40 }} />
       </ScrollView>
 
-      <RescheduleModal
-        visible={rescheduleVisible}
-        quiz={quiz}
-        onClose={() => setRescheduleVisible(false)}
-        onSuccess={handleRescheduleSuccess}
-      />
-    </SafeAreaView>
+    </Screen>
   );
 }
 
-const S = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: BG },
-  content: { paddingHorizontal: 20, paddingTop: 16, paddingBottom: 20 },
+const st = StyleSheet.create({
+  scroll: { padding: SP.xl, gap: SP.lg, paddingBottom: 40 },
+  countdown: { backgroundColor: T.surface, borderRadius: 18, padding: SP.lg, borderWidth: 1, borderColor: T.line, flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  cdLabel: { fontSize: 13, color: T.sub, fontWeight: "600" },
+  cdTime: { fontSize: 22, fontWeight: "800", color: T.primary, fontVariant: ["tabular-nums"] },
 
-  backBtn: { width: 38, height: 38, borderRadius: 19, backgroundColor: "#FFF", alignItems: "center", justifyContent: "center", marginBottom: 12, elevation: 2, shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 6 },
-  backIcon: { fontSize: 22, fontWeight: "700", color: PRIMARY },
+  qCard: { backgroundColor: T.surface, borderRadius: 20, padding: SP.lg, borderWidth: 1, borderColor: T.line, gap: SP.sm },
+  qHeader: { flexDirection: "row", alignItems: "center", gap: SP.sm, marginBottom: 2 },
+  qNum: { backgroundColor: T.primary, borderRadius: 8, paddingHorizontal: 9, paddingVertical: 3 },
+  qNumTxt: { color: "#fff", fontWeight: "800", fontSize: 12.5 },
+  marksWrap: { flexDirection: "row", alignItems: "center", gap: 5 },
+  marksInput: { fontSize: 14, fontWeight: "800", color: T.primary, textAlign: "center", minWidth: 38, backgroundColor: T.primarySoft, borderRadius: 8, paddingVertical: 5 },
+  marksPt: { fontSize: 11.5, color: T.sub, fontWeight: "600" },
 
-  title: { fontSize: 28, fontWeight: "800", color: "#111827", marginBottom: 4 },
-  subtitle: { fontSize: 14, color: GREY, marginBottom: 16 },
+  input: { backgroundColor: T.bg, borderWidth: 1.5, borderColor: T.line, borderRadius: 12, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14.5, color: T.ink },
+  textarea: { minHeight: 76, textAlignVertical: "top" },
+  qImage: { width: "100%", height: 150, borderRadius: 10, backgroundColor: T.bg },
+  sub: { fontSize: 11.5, fontWeight: "700", color: T.sub, textTransform: "uppercase", letterSpacing: 0.6, marginTop: 4 },
 
-  countdownBox: { backgroundColor: "#FFF", borderRadius: 14, padding: 14, marginBottom: 16, borderWidth: 1, borderColor: "#E5E7EB" },
-  countdownLabel: { fontSize: 12, color: GREY, fontWeight: "600" },
-  countdownTime: { fontSize: 20, fontWeight: "800", color: PRIMARY, marginTop: 4, fontVariant: ["tabular-nums"] },
-
-  buttonRow: { flexDirection: "row", gap: 10, marginBottom: 20 },
-  btn: { flex: 1, height: 48, borderRadius: 12, backgroundColor: PRIMARY_LIGHT, alignItems: "center", justifyContent: "center", borderWidth: 1.5, borderColor: PRIMARY },
-  btnText: { color: PRIMARY, fontWeight: "700", fontSize: 13 },
-  btnDanger: { backgroundColor: "#FEE2E2", borderColor: "#FCA5A5" },
-  btnTextDanger: { color: "#DC2626" },
-
-  sectionTitle: { fontSize: 16, fontWeight: "700", color: "#111827", marginBottom: 12, marginTop: 8 },
-
-  qCard: { backgroundColor: "#FFF", borderRadius: 14, padding: 14, marginBottom: 12, borderWidth: 1, borderColor: "#E5E7EB" },
-  qHeader: { flexDirection: "row", alignItems: "center", gap: 8, marginBottom: 10 },
-  qNum: { fontWeight: "800", fontSize: 14, color: PRIMARY, minWidth: 30 },
-  qType: { fontSize: 11, fontWeight: "700", color: GREY, backgroundColor: "#F3F4F6", paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
-  marksBadge: { flexDirection: "row", alignItems: "center", gap: 4 },
-  marksInput: { fontSize: 14, fontWeight: "700", color: PRIMARY, textAlign: "center", minWidth: 30, backgroundColor: "#F3F4F6", borderRadius: 6, paddingVertical: 4 },
-  marksPt: { fontSize: 11, color: GREY, fontWeight: "600" },
-
-  input: { backgroundColor: "#F9FAFB", borderWidth: 1.5, borderColor: "#E5E7EB", borderRadius: 10, paddingHorizontal: 12, paddingVertical: 10, fontSize: 14, color: "#111827", marginBottom: 10 },
-  textarea: { minHeight: 80, textAlignVertical: "top" },
-
-  optRow: { flexDirection: "row", alignItems: "flex-start", gap: 10, marginBottom: 10 },
-  radio: { width: 24, height: 24, borderRadius: 6, borderWidth: 2, borderColor: "#E5E7EB", alignItems: "center", justifyContent: "center", marginTop: 8 },
-  radioDone: { borderColor: GREEN, backgroundColor: GREEN },
-  radioCheck: { color: "#FFF", fontWeight: "800", fontSize: 14 },
-  optInput: { flex: 1, minHeight: 40 },
-  optInputDone: { borderColor: GREEN, backgroundColor: "#F0FDF4" },
-
-  saveBtn: { backgroundColor: GREEN, borderRadius: 12, height: 50, alignItems: "center", justifyContent: "center", marginTop: 16 },
-  saveBtnText: { color: "#FFF", fontWeight: "800", fontSize: 15 },
-
-  emptyText: { color: GREY, textAlign: "center", marginTop: 20, fontSize: 14 },
+  optRow: { flexDirection: "row", alignItems: "flex-start", gap: SP.md },
+  tick: { width: 26, height: 26, borderRadius: 8, borderWidth: 2, borderColor: T.line, alignItems: "center", justifyContent: "center", marginTop: 9, backgroundColor: T.surface },
+  tickOn: { borderColor: T.success, backgroundColor: T.success },
+  optOn: { borderColor: T.success, backgroundColor: T.successSoft },
+  optImg: { width: "100%", height: 90, borderRadius: 8, marginTop: 6, backgroundColor: T.bg },
 });

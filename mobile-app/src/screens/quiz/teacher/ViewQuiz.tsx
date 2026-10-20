@@ -1,157 +1,160 @@
-import React, { useState, useEffect, useCallback } from "react";
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, Alert } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
-import { useRoute, useNavigation, useFocusEffect } from "@react-navigation/native";
+// screens/quiz/teacher/ViewQuiz.tsx — picks the right view (scheduled / live / completed) for a quiz
+// Fixes: the first load ran twice (mount + focus), a live quiz that ended stayed on the live view until you left,
+// and a failed 15-second background refresh popped an error alert every time.
+
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { Alert, View } from "react-native";
+import { useFocusEffect, useNavigation, useRoute } from "@react-navigation/native";
+import { apiFetch } from "../../../services/api";
 import { getUserSession } from "../../../services/session";
-
-import {
-  PRIMARY, BG, RED, GREY,
-  Quiz, QuizQuestion, Submission, QuizStatus,
-  API_URL, getStatus, msToCountdown,
-} from "./components/quizViewConstants";
-
-import QuizLiveView      from "./components/QuizLiveView";
+import { Button, EmptyState, Header, ResultView, Screen, SP } from "../../../components/ui";
+import { API_URL, Quiz, QuizQuestion, QuizStatus, Submission, getStatus, readJson } from "./components/quizViewConstants";
+import QuizLiveView from "./components/QuizLiveView";
 import QuizCompletedView from "./components/QuizCompletedView";
 import QuizScheduledView from "./components/QuizScheduledView";
 
 export default function ViewQuiz() {
-  const navigation        = useNavigation<any>();
-  const route             = useRoute<any>();
-  const { quiz_id }       = route.params;
+  const navigation = useNavigation<any>();
+  const { quiz_id } = (useRoute<any>().params || {}) as { quiz_id: string };
 
-  const [quiz,        setQuiz]        = useState<Quiz | null>(null);
-  const [questions,   setQuestions]   = useState<QuizQuestion[]>([]);
+  const [quiz, setQuiz] = useState<Quiz | null>(null);
+  const [questions, setQuestions] = useState<QuizQuestion[]>([]);
   const [submissions, setSubmissions] = useState<Submission[]>([]);
-  const [loading,     setLoading]     = useState(true);
-  const [refreshing,  setRefreshing]  = useState(false);
-  const [countdown,   setCountdown]   = useState("");
+  const [loading, setLoading] = useState(true);
+  const [failed, setFailed] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [, setTick] = useState(0); // bumps once when the quiz starts / ends so the view flips on time
+  const loadedOnce = useRef(false);
+  const lastStatus = useRef<QuizStatus | null>(null);
 
-  // ── Fetch everything ───────────────────────────────────────────────
-  const loadData = useCallback(async (silent = false) => {
-    try {
-      if (!silent) setLoading(true);
+  const loadData = useCallback(
+    async (silent = false) => {
+      try {
+        if (!silent) setLoading(true);
+        const session = await getUserSession();
+        const teacher_id = session?.teacher_id;
 
-      const session = await getUserSession();
-      const teacher_id = session?.teacher_id;
-
-      // 1. Fetch quiz + questions
-      const quizRes  = await fetch(`${API_URL}/api/quizzes/${quiz_id}?teacher_id=${teacher_id}`);
-      const quizData = await quizRes.json();
-      if (!quizData.success) { Alert.alert("Error", quizData.error ?? "Could not load quiz"); return; }
-
-      const fetchedQuiz: Quiz = quizData.quiz;
-      setQuiz(fetchedQuiz);
-      setQuestions(quizData.questions ?? []);
-
-      // 2. Fetch submissions (for live + completed)
-      const status: QuizStatus = getStatus(fetchedQuiz);
-      if (status === "live" || status === "completed") {
-        const subRes  = await fetch(`${API_URL}/api/quizzes/${quiz_id}/results?teacher_id=${teacher_id}`);
-        const subData = await subRes.json();
-        if (subData.success) {
-          const sorted = [...(subData.submissions ?? [])].sort(
-            (a, b) => (b.marks_obtained ?? 0) - (a.marks_obtained ?? 0)
-          );
-          setSubmissions(sorted);
+        const quizRes = await apiFetch(`${API_URL}/api/quizzes/${encodeURIComponent(quiz_id)}?teacher_id=${encodeURIComponent(teacher_id ?? "")}`);
+        const quizData = await readJson(quizRes);
+        if (!quizData?.success) {
+          if (!silent) {
+            setFailed(true);
+            Alert.alert("Error", quizData?.error ?? "Could not load quiz");
+          }
+          return;
         }
+
+        const fetched: Quiz = quizData.quiz;
+        setQuiz(fetched);
+        setQuestions(quizData.questions ?? []);
+        setFailed(false);
+
+        const status = getStatus(fetched);
+        if (status === "live" || status === "completed") {
+          const subRes = await apiFetch(`${API_URL}/api/quizzes/${encodeURIComponent(quiz_id)}/results?teacher_id=${encodeURIComponent(teacher_id ?? "")}`);
+          const subData = await readJson(subRes);
+          if (subData?.success) {
+            setSubmissions([...(subData.submissions ?? [])].sort((a: Submission, b: Submission) => (b.marks_obtained ?? 0) - (a.marks_obtained ?? 0)));
+          }
+        }
+      } catch {
+        if (!silent) setFailed(true); // background refreshes fail quietly
+      } finally {
+        setLoading(false);
+        setRefreshing(false);
       }
-    } catch (e) {
-      Alert.alert("Error", "Failed to load quiz. Check your connection.");
-    } finally {
-      setLoading(false);
-      setRefreshing(false);
-    }
-  }, [quiz_id]);
+    },
+    [quiz_id]
+  );
 
-  // Load on mount + every time screen is focused
-  useEffect(() => { loadData(); }, []);
-  useFocusEffect(useCallback(() => { loadData(true); }, [loadData]));
+  // once on mount, again (quietly) every time the screen regains focus
+  useFocusEffect(
+    useCallback(() => {
+      loadData(loadedOnce.current);
+      loadedOnce.current = true;
+    }, [loadData])
+  );
 
-  // Auto-refresh every 15s when live
+  const status = quiz ? getStatus(quiz) : null;
+
+  // One timer set for the next moment the state changes (start or end), instead of re-rendering every
+  // second: a per-second re-render wasted work.
   useEffect(() => {
-    if (!quiz || getStatus(quiz) !== "live") return;
-    const interval = setInterval(() => loadData(true), 15000);
-    return () => clearInterval(interval);
-  }, [quiz, loadData]);
+    if (!quiz) return;
+    const now = Date.now();
+    const s = new Date(quiz.scheduled_start).getTime();
+    const e = new Date(quiz.scheduled_end).getTime();
+    const next = now < s ? s : now <= e ? e : null;
+    if (next === null || Number.isNaN(next)) return;
+    const id = setTimeout(() => setTick((t) => t + 1), Math.min(Math.max(next - now + 300, 300), 2_000_000_000));
+    return () => clearTimeout(id);
+  }, [quiz, status]);
 
-  // Countdown ticker for scheduled
+  // scheduled -> live -> completed: reload so the new view has its data
   useEffect(() => {
-    if (!quiz || getStatus(quiz) !== "scheduled") return;
-    const tick = () => {
-      const ms = new Date(quiz.scheduled_start).getTime() - Date.now();
-      setCountdown(msToCountdown(ms));
-    };
-    tick();
-    const interval = setInterval(tick, 1000);
-    return () => clearInterval(interval);
-  }, [quiz]);
+    if (!status) return;
+    if (lastStatus.current && lastStatus.current !== status) loadData(true);
+    lastStatus.current = status;
+  }, [status, loadData]);
 
-  // ── Loading ────────────────────────────────────────────────────────
+  // auto-refresh submissions while live
+  useEffect(() => {
+    if (status !== "live") return;
+    const id = setInterval(() => loadData(true), 15000);
+    return () => clearInterval(id);
+  }, [status, loadData]);
+
   if (loading) {
     return (
-      <SafeAreaView style={S.safe}>
-        <View style={S.center}>
-          <ActivityIndicator size="large" color={PRIMARY} />
-          <Text style={S.loadingTxt}>Loading quiz...</Text>
-        </View>
-      </SafeAreaView>
+      <Screen>
+        <Header title="Quiz" onBack={() => navigation.goBack()} />
+        <ResultView icon="document-text-outline" tone="primary" title="Loading quiz" loading />
+      </Screen>
     );
   }
 
   if (!quiz) {
     return (
-      <SafeAreaView style={S.safe}>
-        <View style={S.center}>
-          <Text style={S.errorTxt}>Quiz not found.</Text>
-          <TouchableOpacity onPress={() => navigation.goBack()} style={{ marginTop: 16 }}>
-            <Text style={S.backLink}>← Go Back</Text>
-          </TouchableOpacity>
+      <Screen>
+        <Header title="Quiz" onBack={() => navigation.goBack()} />
+        <EmptyState
+          icon={failed ? "cloud-offline-outline" : "alert-circle-outline"}
+          title={failed ? "Could not load the quiz" : "Quiz not found"}
+          text={failed ? "Check your connection and try again." : "It may have been cancelled."}
+        />
+        <View style={{ paddingHorizontal: SP.xl, gap: SP.sm }}>
+          {failed && <Button label="Try again" icon="refresh" onPress={() => loadData()} />}
+          <Button label="Go back" variant="secondary" onPress={() => navigation.goBack()} />
         </View>
-      </SafeAreaView>
+      </Screen>
     );
   }
 
-  const status = getStatus(quiz);
-
-  // ── Route to the correct view ──────────────────────────────────────
   if (status === "live") {
     return (
       <QuizLiveView
         quiz={quiz}
         submissions={submissions}
         refreshing={refreshing}
-        onRefresh={() => { setRefreshing(true); loadData(true); }}
+        onRefresh={() => {
+          setRefreshing(true);
+          loadData(true);
+        }}
         onBack={() => navigation.goBack()}
       />
     );
   }
 
   if (status === "completed") {
-    return (
-      <QuizCompletedView
-        quiz={quiz}
-        submissions={submissions}
-        onBack={() => navigation.goBack()}
-      />
-    );
+    return <QuizCompletedView quiz={quiz} submissions={submissions} onBack={() => navigation.goBack()} />;
   }
 
-  // status === "scheduled"
   return (
     <QuizScheduledView
       quiz={quiz}
       questions={questions}
-      countdown={countdown}
       onBack={() => navigation.goBack()}
       onRefresh={() => loadData(true)}
     />
   );
 }
-
-const S = StyleSheet.create({
-  safe:       { flex: 1, backgroundColor: BG },
-  center:     { flex: 1, alignItems: "center", justifyContent: "center", gap: 12 },
-  loadingTxt: { fontSize: 14, color: GREY, fontWeight: "600" },
-  errorTxt:   { fontSize: 15, color: RED, fontWeight: "700" },
-  backLink:   { fontSize: 15, color: PRIMARY, fontWeight: "700" },
-});

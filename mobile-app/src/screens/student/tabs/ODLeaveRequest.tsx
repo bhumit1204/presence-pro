@@ -1,48 +1,24 @@
 /**
  * ODLeaveRequest.tsx
- * Student screen — submit OD leave request with proof upload.
- * Shows existing OD requests for the subject and lets student
- * cancel pending ones.
+ * Student screen: submit an OD leave request with proof upload.
+ * Shows existing OD requests for the subject and lets the student cancel pending ones.
  */
+import { apiFetch, API_BASE } from "../../../services/api";
 import React, { useEffect, useState, useCallback } from "react";
 import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  TouchableOpacity,
-  TextInput,
-  ActivityIndicator,
-  Alert,
-  Modal,
-  Platform,
+  View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator, Alert,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import * as DocumentPicker from "expo-document-picker";
 import * as ImagePicker from "expo-image-picker";
-// ─── AttendanceCalendar REMOVED ──────────────────────────────────────────────
-// It was receiving no attendanceData prop, causing every date to render as
-// "unavailable". We now use a self-contained mini date-picker instead.
+import { Banner, Button, Card, Chip, EmptyState, Header, Screen, SectionLabel, Sheet, SP, T, TextField, Tone, font } from "../../../components/ui";
 
-// ─── Palette (matches rest of app) ───────────────────────────────────────────
-const PRIMARY      = "#4834D4";
-const PRIMARY_SOFT = "#EEF2FF";
-const BG           = "#F3F4F6";
-const WHITE        = "#FFFFFF";
-const GREY         = "#6B7280";
-const DARK         = "#111827";
-const GREEN        = "#10B981";
-const AMBER        = "#F59E0B";
-const RED          = "#EF4444";
-const BORDER       = "#E5E7EB";
-const OD_COLOR     = "#7C3AED";
-const OD_SOFT      = "#EDE9FE";
+const OD_COLOR = "#7C3AED";
+const OD_SOFT  = "#EDE9FE";
 
-const API_URL = "http://10.132.90.56:5000";
+const API_URL = API_BASE;
 
-// ─── Safe JSON parser ─────────────────────────────────────────────────────────
 // Guards against the server returning an HTML error page instead of JSON,
 // which causes "SyntaxError: JSON Parse error: Unexpected character: <".
 async function safeJson(res: Response): Promise<any> {
@@ -78,11 +54,10 @@ interface RouteParams {
   courseId:     string;
 }
 
-// ─── Status config ────────────────────────────────────────────────────────────
-const STATUS_CONFIG = {
-  pending:  { color: AMBER, bg: "#FEF3C7", icon: "time-outline",         label: "Pending"  },
-  approved: { color: GREEN, bg: "#F0FDF4", icon: "checkmark-circle",     label: "Approved" },
-  rejected: { color: RED,   bg: "#FEF2F2", icon: "close-circle-outline", label: "Rejected" },
+const STATUS_CONFIG: Record<ODRequest["status"], { tone: Tone; color: string; icon: any; label: string }> = {
+  pending:  { tone: "warning", color: T.warning, icon: "time-outline",         label: "Pending"  },
+  approved: { tone: "success", color: T.success, icon: "checkmark-circle",     label: "Approved" },
+  rejected: { tone: "danger",  color: T.danger,  icon: "close-circle-outline", label: "Rejected" },
 };
 
 function fmtDate(ymd: string) {
@@ -98,12 +73,14 @@ const MONTH_NAMES = [
 const DAY_LABELS = ["Su","Mo","Tu","We","Th","Fr","Sa"];
 
 // ─── Mini Date Picker ─────────────────────────────────────────────────────────
-// A plain calendar with no attendance data — every date is selectable.
+// A plain calendar with no attendance data: every non-Sunday date is selectable.
 function MiniDatePicker({
   minDate,
+  selected,
   onSelect,
 }: {
-  minDate?: string;   // "YYYY-MM-DD" — dates before this are disabled
+  minDate?: string;   // "YYYY-MM-DD": dates before this are disabled
+  selected?: string;
   onSelect: (ymd: string) => void;
 }) {
   const today = new Date();
@@ -114,8 +91,7 @@ function MiniDatePicker({
   const firstDow    = new Date(viewYear, viewMonth, 1).getDay(); // 0=Sun
 
   const pad = (n: number) => String(n).padStart(2, "0");
-  const toYmd = (y: number, m: number, d: number) =>
-    `${y}-${pad(m + 1)}-${pad(d)}`;
+  const toYmd = (y: number, m: number, d: number) => `${y}-${pad(m + 1)}-${pad(d)}`;
 
   const prevMonth = () => {
     if (viewMonth === 0) { setViewYear(y => y - 1); setViewMonth(11); }
@@ -130,72 +106,70 @@ function MiniDatePicker({
     ...Array(firstDow).fill(null),
     ...Array.from({ length: daysInMonth }, (_, i) => i + 1),
   ];
-  // Pad to full rows
   while (cells.length % 7 !== 0) cells.push(null);
 
+  const todayYmd = toYmd(today.getFullYear(), today.getMonth(), today.getDate());
+
   return (
-    <View>
-      {/* Month navigation */}
+    <View style={{ paddingBottom: SP.lg }}>
       <View style={dp.nav}>
-        <TouchableOpacity onPress={prevMonth} style={dp.navBtn}>
-          <Ionicons name="chevron-back" size={20} color={DARK} />
+        <TouchableOpacity onPress={prevMonth} style={dp.navBtn} accessibilityLabel="Previous month">
+          <Ionicons name="chevron-back" size={20} color={T.ink} />
         </TouchableOpacity>
-        <Text style={dp.monthLabel}>
-          {MONTH_NAMES[viewMonth]} {viewYear}
-        </Text>
-        <TouchableOpacity onPress={nextMonth} style={dp.navBtn}>
-          <Ionicons name="chevron-forward" size={20} color={DARK} />
+        <Text style={font.h3}>{MONTH_NAMES[viewMonth]} {viewYear}</Text>
+        <TouchableOpacity onPress={nextMonth} style={dp.navBtn} accessibilityLabel="Next month">
+          <Ionicons name="chevron-forward" size={20} color={T.ink} />
         </TouchableOpacity>
       </View>
 
-      {/* Day-of-week headers */}
       <View style={dp.row}>
         {DAY_LABELS.map((d) => (
-          <Text key={d} style={dp.dayLabel}>{d}</Text>
+          <Text key={d} style={[dp.dayLabel, d === "Su" && { color: T.danger }]}>{d}</Text>
         ))}
       </View>
 
-      {/* Date grid */}
       {Array.from({ length: cells.length / 7 }, (_, row) => (
         <View key={row} style={dp.row}>
           {cells.slice(row * 7, row * 7 + 7).map((day, col) => {
             if (!day) return <View key={col} style={dp.cell} />;
             const ymd      = toYmd(viewYear, viewMonth, day);
-            const isSunday = (firstDow + cells.indexOf(day)) % 7 === 0;
+            const isSunday = col === 0;
             const disabled = isSunday || (!!minDate && ymd < minDate);
+            const isSel    = ymd === selected;
+            const isToday  = ymd === todayYmd;
             return (
               <TouchableOpacity
                 key={col}
-                style={[dp.cell, disabled && dp.cellDisabled]}
+                style={dp.cell}
                 onPress={() => !disabled && onSelect(ymd)}
                 disabled={disabled}
+                activeOpacity={0.7}
               >
-                <Text style={[dp.cellText, disabled && dp.cellTextDisabled, isSunday && dp.sunday]}>
-                  {day}
-                </Text>
+                <View style={[dp.dayPill, isSel && { backgroundColor: OD_COLOR }, !isSel && isToday && { borderWidth: 1.5, borderColor: OD_COLOR }]}>
+                  <Text style={[dp.cellText, disabled && { color: T.muted, opacity: 0.5 }, isSunday && { color: T.danger }, isSel && { color: "#FFF", fontWeight: "800" }]}>
+                    {day}
+                  </Text>
+                </View>
               </TouchableOpacity>
             );
           })}
         </View>
       ))}
 
-      <Text style={dp.hint}>Sundays are excluded from OD requests</Text>
+      <Text style={dp.hint}>Sundays are excluded</Text>
     </View>
   );
 }
 
 const dp = StyleSheet.create({
-  nav:     { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 12 },
-  navBtn:  { padding: 6 },
-  monthLabel: { fontSize: 15, fontWeight: "700", color: DARK },
-  row:     { flexDirection: "row" },
-  dayLabel:{ flex: 1, textAlign: "center", fontSize: 11, fontWeight: "700", color: GREY, paddingVertical: 4 },
-  cell:    { flex: 1, aspectRatio: 1, alignItems: "center", justifyContent: "center" },
-  cellDisabled: { opacity: 0.3 },
-  cellText:     { fontSize: 13, color: DARK },
-  cellTextDisabled: { color: GREY },
-  sunday:  { color: RED },
-  hint:    { textAlign: "center", fontSize: 11, color: GREY, marginTop: 10 },
+  nav:      { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: SP.md },
+  navBtn:   { padding: 8 },
+  row:      { flexDirection: "row" },
+  dayLabel: { flex: 1, textAlign: "center", fontSize: 11, fontWeight: "700", color: T.muted, paddingVertical: 6 },
+  cell:     { flex: 1, aspectRatio: 1, alignItems: "center", justifyContent: "center" },
+  dayPill:  { width: 36, height: 36, borderRadius: 18, alignItems: "center", justifyContent: "center" },
+  cellText: { fontSize: 14, color: T.ink, fontWeight: "600" },
+  hint:     { textAlign: "center", fontSize: 11.5, color: T.muted, marginTop: SP.md },
 });
 
 // ─── Main Screen ──────────────────────────────────────────────────────────────
@@ -226,7 +200,7 @@ export default function ODLeaveRequest() {
   const fetchRequests = useCallback(async () => {
     try {
       setLoading(true);
-      const res  = await fetch(
+      const res  = await apiFetch(
         `${API_URL}/api/od/student/${studentUid}?subject_id=${subjectId}`
       );
       const json = await safeJson(res);
@@ -333,7 +307,7 @@ export default function ODLeaveRequest() {
         type: proofFile.type,
       } as any);
 
-      const res  = await fetch(`${API_URL}/api/od/request`, {
+      const res  = await apiFetch(`${API_URL}/api/od/request`, {
         method:  "POST",
         body:    form,
         headers: { Accept: "application/json" },
@@ -342,7 +316,7 @@ export default function ODLeaveRequest() {
 
       if (json.success) {
         Alert.alert(
-          "Request Submitted ",
+          "Request submitted",
           "Your OD leave request has been sent to the teacher. You'll be notified once it's reviewed.",
           [{ text: "OK" }]
         );
@@ -372,7 +346,7 @@ export default function ODLeaveRequest() {
           text: "Yes, Cancel", style: "destructive",
           onPress: async () => {
             try {
-              const res  = await fetch(`${API_URL}/api/od/${od.od_id}`, {
+              const res  = await apiFetch(`${API_URL}/api/od/${od.od_id}`, {
                 method:  "DELETE",
                 headers: { "Content-Type": "application/json" },
                 body:    JSON.stringify({ student_uid: studentUid }),
@@ -402,222 +376,167 @@ export default function ODLeaveRequest() {
   const pendingCount = requests.filter((r) => r.status === "pending").length;
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      {/* ── Header ─────────────────────────────────────────────────────────── */}
-      <View style={S.header}>
-        <TouchableOpacity onPress={() => navigation.goBack()} style={S.backBtn}>
-          <Ionicons name="arrow-back" size={22} color={DARK} />
-        </TouchableOpacity>
-        <View style={S.headerCenter}>
-          <Text style={S.headerTitle}>OD Leave Request</Text>
-          <Text style={S.headerSub} numberOfLines={1}>{subjectName}</Text>
-        </View>
-        {pendingCount > 0 && (
-          <View style={S.pendingBadge}>
-            <Text style={S.pendingBadgeText}>{pendingCount} pending</Text>
-          </View>
-        )}
-      </View>
+    <Screen edges={["top"]}>
+      <Header
+        title="OD leave request"
+        subtitle={subjectName}
+        onBack={() => navigation.goBack()}
+        right={pendingCount > 0 ? <Chip label={`${pendingCount} pending`} tone="warning" /> : undefined}
+      />
 
       <ScrollView
-        style={S.scroll}
-        contentContainerStyle={S.scrollContent}
+        contentContainerStyle={S.scroll}
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* ── Info Banner ──────────────────────────────────────────────────── */}
-        <View style={S.infoBanner}>
-          <Ionicons name="information-circle" size={18} color={OD_COLOR} />
-          <Text style={S.infoText}>
-            Submit an OD request with a valid proof document (medical certificate, event letter, etc.).
-            Teacher will review and mark your attendance as{" "}
-            <Text style={{ fontWeight: "800" }}>OD</Text> upon approval.
-          </Text>
-        </View>
+        <Banner tone="info" icon="information-circle" style={{ backgroundColor: OD_SOFT }}>
+          Attach a valid proof (medical certificate, event letter). Approved days are marked OD in your attendance.
+        </Banner>
 
-        {/* ══════════════════════════════════════════════════════════════════
-            NEW REQUEST FORM
-        ══════════════════════════════════════════════════════════════════ */}
-        <View style={S.card}>
-          <Text style={S.cardTitle}>New Request</Text>
+        {/* New request form */}
+        <Card style={{ gap: SP.lg }}>
+          <Text style={font.h2}>New request</Text>
 
-          {/* From Date */}
-          <Text style={S.label}>From Date <Text style={S.required}>*</Text></Text>
-          <TouchableOpacity style={S.dateInput} onPress={() => setActivePicker("from")}>
-            <Ionicons name="calendar-outline" size={16} color={GREY} />
-            <Text style={[S.dateInputText, !fromDate && S.placeholder]}>
-              {fromDate ? fmtDate(fromDate) : "Select start date"}
-            </Text>
-          </TouchableOpacity>
+          <View>
+            <Text style={S.label}>From date <Text style={{ color: T.danger }}>*</Text></Text>
+            <TouchableOpacity style={S.dateInput} onPress={() => setActivePicker("from")} activeOpacity={0.8}>
+              <Ionicons name="calendar-outline" size={18} color={fromDate ? OD_COLOR : T.muted} />
+              <Text style={[S.dateText, !fromDate && { color: T.muted }]}>
+                {fromDate ? fmtDate(fromDate) : "Select start date"}
+              </Text>
+            </TouchableOpacity>
+          </View>
 
-          {/* To Date */}
-          <Text style={S.label}>
-            To Date{" "}
-            <Text style={S.labelNote}>(optional — leave blank for single day)</Text>
-          </Text>
-          <TouchableOpacity style={S.dateInput} onPress={() => setActivePicker("to")}>
-            <Ionicons name="calendar-outline" size={16} color={GREY} />
-            <Text style={[S.dateInputText, !toDate && S.placeholder]}>
-              {toDate ? fmtDate(toDate) : "Select end date (optional)"}
-            </Text>
-            {toDate ? (
-              <TouchableOpacity onPress={() => setToDate("")} style={S.clearIcon}>
-                <Ionicons name="close-circle" size={16} color={GREY} />
-              </TouchableOpacity>
-            ) : null}
-          </TouchableOpacity>
+          <View>
+            <Text style={S.label}>To date <Text style={S.optional}>(optional, blank for one day)</Text></Text>
+            <TouchableOpacity style={S.dateInput} onPress={() => setActivePicker("to")} activeOpacity={0.8}>
+              <Ionicons name="calendar-outline" size={18} color={toDate ? OD_COLOR : T.muted} />
+              <Text style={[S.dateText, !toDate && { color: T.muted }]}>
+                {toDate ? fmtDate(toDate) : "Select end date"}
+              </Text>
+              {toDate ? (
+                <TouchableOpacity onPress={() => setToDate("")} hitSlop={10} accessibilityLabel="Clear end date">
+                  <Ionicons name="close-circle" size={18} color={T.muted} />
+                </TouchableOpacity>
+              ) : null}
+            </TouchableOpacity>
+          </View>
 
           {fromDate ? (
             <View style={S.datePreview}>
-              <Ionicons name="checkmark-circle" size={13} color={OD_COLOR} />
+              <Ionicons name="checkmark-circle" size={14} color={OD_COLOR} />
               <Text style={S.datePreviewText}>
                 {toDate && toDate >= fromDate
-                  ? `${fmtDate(fromDate)} → ${fmtDate(toDate)} (Sundays excluded)`
+                  ? `${fmtDate(fromDate)} to ${fmtDate(toDate)} (Sundays excluded)`
                   : `Single day: ${fmtDate(fromDate)}`}
               </Text>
             </View>
           ) : null}
 
-          {/* Reason */}
-          <Text style={S.label}>Reason <Text style={S.required}>*</Text></Text>
-          <TextInput
-            style={S.textarea}
+          <TextField
+            label="Reason *"
             value={reason}
             onChangeText={setReason}
-            placeholder="Describe the reason (e.g. Medical appointment, Inter-college event...)"
-            placeholderTextColor="#9CA3AF"
+            placeholder="e.g. Medical appointment, inter-college event"
             multiline
-            numberOfLines={3}
-            textAlignVertical="top"
+            minHeight={96}
+            autoCapitalize="sentences"
           />
 
-          {/* Proof Upload */}
-          <Text style={S.label}>Proof Document <Text style={S.required}>*</Text></Text>
-          <Text style={S.labelNote2}>
-            Upload a photo or PDF (medical certificate, event letter, ID card, etc.)
-          </Text>
-
-          {proofFile ? (
-            <View style={S.filePreview}>
-              <View style={S.fileIcon}>
-                <Ionicons
-                  name={proofFile.type.startsWith("image") ? "image-outline" : "document-outline"}
-                  size={22}
-                  color={OD_COLOR}
-                />
+          <View>
+            <Text style={S.label}>Proof document <Text style={{ color: T.danger }}>*</Text></Text>
+            {proofFile ? (
+              <View style={S.filePreview}>
+                <View style={S.fileIcon}>
+                  <Ionicons
+                    name={proofFile.type.startsWith("image") ? "image-outline" : "document-outline"}
+                    size={22}
+                    color={OD_COLOR}
+                  />
+                </View>
+                <View style={{ flex: 1 }}>
+                  <Text style={font.h3} numberOfLines={1}>{proofFile.name}</Text>
+                  {proofFile.size ? <Text style={font.small}>{fmtSize(proofFile.size)}</Text> : null}
+                </View>
+                <TouchableOpacity onPress={() => setProofFile(null)} hitSlop={10} accessibilityLabel="Remove file">
+                  <Ionicons name="close-circle" size={22} color={T.danger} />
+                </TouchableOpacity>
               </View>
-              <View style={S.fileInfo}>
-                <Text style={S.fileName} numberOfLines={1}>{proofFile.name}</Text>
-                {proofFile.size ? <Text style={S.fileSize}>{fmtSize(proofFile.size)}</Text> : null}
-              </View>
-              <TouchableOpacity onPress={() => setProofFile(null)} style={S.removeFile}>
-                <Ionicons name="close-circle" size={20} color={RED} />
+            ) : (
+              <TouchableOpacity style={S.uploadBtn} onPress={showProofOptions} activeOpacity={0.8}>
+                <Ionicons name="cloud-upload-outline" size={24} color={OD_COLOR} />
+                <Text style={S.uploadText}>Attach proof</Text>
+                <Text style={font.small}>PDF, image or Word doc, max 10 MB</Text>
               </TouchableOpacity>
-            </View>
-          ) : (
-            <TouchableOpacity style={S.uploadBtn} onPress={showProofOptions}>
-              <Ionicons name="cloud-upload-outline" size={22} color={OD_COLOR} />
-              <Text style={S.uploadBtnText}>Attach Proof</Text>
-              <Text style={S.uploadBtnSub}>PDF, Image, or Word doc · Max 10 MB</Text>
-            </TouchableOpacity>
-          )}
+            )}
+          </View>
 
-          {/* Submit */}
-          <TouchableOpacity
-            style={[S.submitBtn, submitting && { opacity: 0.6 }]}
+          <Button
+            label="Submit OD request"
+            icon="send-outline"
+            loading={submitting}
             onPress={handleSubmit}
-            disabled={submitting}
-          >
-            {submitting
-              ? <ActivityIndicator size="small" color={WHITE} />
-              : <>
-                  <Ionicons name="send-outline" size={16} color={WHITE} />
-                  <Text style={S.submitBtnText}>Submit OD Request</Text>
-                </>
-            }
-          </TouchableOpacity>
-        </View>
+            style={{ backgroundColor: OD_COLOR }}
+          />
+        </Card>
 
-        {/* ══════════════════════════════════════════════════════════════════
-            EXISTING REQUESTS
-        ══════════════════════════════════════════════════════════════════ */}
-        <Text style={S.sectionTitle}>Your OD Requests ({requests.length})</Text>
+        {/* Existing requests */}
+        <SectionLabel style={{ marginTop: SP.sm, marginBottom: 0 }}>Your requests ({requests.length})</SectionLabel>
 
         {loading ? (
-          <ActivityIndicator size="large" color={PRIMARY} style={{ marginTop: 24 }} />
+          <ActivityIndicator size="large" color={T.primary} style={{ marginTop: SP.xl }} />
         ) : requests.length === 0 ? (
-          <View style={S.empty}>
-            <Ionicons name="document-text-outline" size={48} color={BORDER} />
-            <Text style={S.emptyText}>No OD requests for this subject yet</Text>
-          </View>
+          <EmptyState icon="document-text-outline" title="No OD requests yet" text="Requests for this subject will show here." />
         ) : (
           requests.map((od) => {
             const cfg = STATUS_CONFIG[od.status];
             return (
-              <View
-                key={od.od_id}
-                style={[S.requestCard, { borderLeftColor: cfg.color, borderLeftWidth: 4 }]}
-              >
-                <View style={S.requestTop}>
-                  <View style={S.requestDates}>
-                    <Text style={S.requestDateMain}>{fmtDate(od.from_date)}</Text>
-                    {od.to_date !== od.from_date && (
-                      <Text style={S.requestDateTo}>→ {fmtDate(od.to_date)}</Text>
-                    )}
+              <Card key={od.od_id} flat padded={false} style={S.reqCard}>
+                <View style={[S.reqAccent, { backgroundColor: cfg.color }]} />
+                <View style={S.reqBody}>
+                  <View style={S.reqTop}>
+                    <View style={{ flex: 1 }}>
+                      <Text style={font.h3}>{fmtDate(od.from_date)}</Text>
+                      {od.to_date !== od.from_date && (
+                        <Text style={font.small}>to {fmtDate(od.to_date)}</Text>
+                      )}
+                    </View>
+                    <Chip label={cfg.label} icon={cfg.icon} tone={cfg.tone} />
                   </View>
-                  <View style={[S.statusBadge, { backgroundColor: cfg.bg }]}>
-                    <Ionicons name={cfg.icon as any} size={12} color={cfg.color} />
-                    <Text style={[S.statusText, { color: cfg.color }]}>{cfg.label}</Text>
+
+                  <Text style={font.body}>{od.reason}</Text>
+
+                  <View style={S.proofRow}>
+                    <Ionicons name="attach-outline" size={14} color={T.muted} />
+                    <Text style={[font.small, { flex: 1 }]} numberOfLines={1}>
+                      {od.proof?.name || "Proof attached"}
+                    </Text>
                   </View>
-                </View>
 
-                <Text style={S.requestReason}>{od.reason}</Text>
-
-                <View style={S.proofRow}>
-                  <Ionicons name="attach-outline" size={13} color={GREY} />
-                  <Text style={S.proofName} numberOfLines={1}>
-                    {od.proof?.name || "Proof attached"}
-                  </Text>
-                </View>
-
-                {od.teacher_note && (
-                  <View style={S.teacherNote}>
-                    <Ionicons
-                      name="chatbubble-outline"
-                      size={12}
-                      color={od.status === "rejected" ? RED : GREEN}
-                    />
-                    <Text style={[S.teacherNoteText, { color: od.status === "rejected" ? RED : DARK }]}>
+                  {od.teacher_note && (
+                    <Banner tone={od.status === "rejected" ? "danger" : "success"} icon="chatbubble-outline">
                       {od.teacher_note}
+                    </Banner>
+                  )}
+
+                  {od.status === "approved" && (
+                    <Banner tone="success">Attendance marked as OD for these dates</Banner>
+                  )}
+
+                  {od.status === "pending" && (
+                    <Button label="Cancel request" icon="close-outline" variant="dangerSoft" size="md" onPress={() => handleCancel(od)} />
+                  )}
+
+                  {od.created_at && (
+                    <Text style={font.small}>
+                      Submitted{" "}
+                      {new Date(od.created_at).toLocaleDateString("en-IN", {
+                        day: "numeric", month: "short", year: "numeric",
+                      })}
                     </Text>
-                  </View>
-                )}
-
-                {od.status === "approved" && (
-                  <View style={S.approvedBanner}>
-                    <Ionicons name="checkmark-circle" size={13} color={GREEN} />
-                    <Text style={S.approvedBannerText}>
-                      Attendance marked as OD for these dates
-                    </Text>
-                  </View>
-                )}
-
-                {od.status === "pending" && (
-                  <TouchableOpacity style={S.cancelBtn} onPress={() => handleCancel(od)}>
-                    <Ionicons name="close-outline" size={14} color={RED} />
-                    <Text style={S.cancelBtnText}>Cancel Request</Text>
-                  </TouchableOpacity>
-                )}
-
-                {od.created_at && (
-                  <Text style={S.requestDate}>
-                    Submitted:{" "}
-                    {new Date(od.created_at).toLocaleDateString("en-IN", {
-                      day: "numeric", month: "short", year: "numeric",
-                    })}
-                  </Text>
-                )}
-              </View>
+                  )}
+                </View>
+              </Card>
             );
           })
         )}
@@ -625,265 +544,51 @@ export default function ODLeaveRequest() {
         <View style={{ height: 40 }} />
       </ScrollView>
 
-      {/* ── Date Picker Modal ───────────────────────────────────────────────── */}
-      <Modal
+      {/* Date picker */}
+      <Sheet
         visible={activePicker !== null}
-        transparent
-        animationType="slide"
-        onRequestClose={() => setActivePicker(null)}
+        onClose={() => setActivePicker(null)}
+        title={activePicker === "from" ? "Select start date" : "Select end date"}
       >
-        <View style={S.calendarOverlay}>
-          <View style={S.calendarSheet}>
-            <View style={S.calendarHeader}>
-              <Text style={S.calendarTitle}>
-                {activePicker === "from" ? "Select Start Date" : "Select End Date"}
-              </Text>
-              <TouchableOpacity onPress={() => setActivePicker(null)}>
-                <Ionicons name="close" size={22} color={DARK} />
-              </TouchableOpacity>
-            </View>
-
-            {/* ── Self-contained date picker — no attendance data needed ── */}
-            <MiniDatePicker
-              minDate={activePicker === "to" ? fromDate || undefined : undefined}
-              onSelect={handleDateSelect}
-            />
-          </View>
-        </View>
-      </Modal>
-    </SafeAreaView>
+        <MiniDatePicker
+          minDate={activePicker === "to" ? fromDate || undefined : undefined}
+          selected={activePicker === "from" ? fromDate : toDate}
+          onSelect={handleDateSelect}
+        />
+      </Sheet>
+    </Screen>
   );
 }
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const S = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: BG },
+  scroll: { padding: SP.lg, gap: SP.lg },
 
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    backgroundColor: WHITE,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-    gap: 10,
-  },
-  backBtn:      { padding: 4 },
-  headerCenter: { flex: 1 },
-  headerTitle:  { fontSize: 17, fontWeight: "800", color: DARK },
-  headerSub:    { fontSize: 12, color: GREY, marginTop: 1 },
-  pendingBadge: {
-    backgroundColor: AMBER + "22",
-    borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-  },
-  pendingBadgeText: { fontSize: 11, fontWeight: "700", color: AMBER },
-
-  scroll:        { flex: 1 },
-  scrollContent: { padding: 16, gap: 16 },
-
-  infoBanner: {
-    flexDirection: "row",
-    gap: 10,
-    backgroundColor: OD_SOFT,
-    borderRadius: 14,
-    padding: 14,
-    alignItems: "flex-start",
-    borderWidth: 1,
-    borderColor: OD_COLOR + "33",
-  },
-  infoText: { flex: 1, fontSize: 13, color: "#4C1D95", lineHeight: 18 },
-
-  card: {
-    backgroundColor: WHITE,
-    borderRadius: 20,
-    padding: 20,
-    gap: 12,
-    borderWidth: 1,
-    borderColor: BORDER,
-    elevation: 1,
-  },
-  cardTitle: { fontSize: 16, fontWeight: "800", color: DARK },
-
-  label: {
-    fontSize: 12, fontWeight: "700", color: GREY,
-    textTransform: "uppercase", letterSpacing: 0.5,
-  },
-  labelNote:  { fontSize: 11, fontWeight: "400", color: GREY, textTransform: "none" },
-  labelNote2: { fontSize: 11, color: GREY, marginTop: -8 },
-  required:   { color: RED },
+  label:    { fontSize: 12.5, fontWeight: "700", color: T.sub, marginBottom: 6 },
+  optional: { fontSize: 11.5, fontWeight: "500", color: T.muted },
 
   dateInput: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 8,
-    backgroundColor: BG,
-    borderRadius: 12,
-    padding: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
+    flexDirection: "row", alignItems: "center", gap: SP.sm,
+    backgroundColor: T.surface, borderRadius: 14, paddingHorizontal: SP.lg, height: 52,
+    borderWidth: 1.5, borderColor: T.line,
   },
-  dateInputText: { flex: 1, fontSize: 14, color: DARK },
-  placeholder:   { color: "#9CA3AF" },
-  clearIcon:     { marginLeft: "auto" as any },
+  dateText: { flex: 1, fontSize: 15, color: T.ink },
 
-  datePreview: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: OD_SOFT,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    marginTop: -4,
-  },
-  datePreviewText: { fontSize: 12, color: OD_COLOR, fontWeight: "600" },
-
-  textarea: {
-    backgroundColor: BG,
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 14,
-    color: DARK,
-    borderWidth: 1,
-    borderColor: BORDER,
-    minHeight: 90,
-  },
+  datePreview: { flexDirection: "row", alignItems: "center", gap: 6, backgroundColor: OD_SOFT, borderRadius: 10, paddingHorizontal: 12, paddingVertical: 9, marginTop: -SP.xs },
+  datePreviewText: { fontSize: 12.5, color: OD_COLOR, fontWeight: "700", flex: 1 },
 
   uploadBtn: {
-    borderWidth: 2,
-    borderStyle: "dashed",
-    borderColor: OD_COLOR + "66",
-    borderRadius: 14,
-    padding: 20,
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: OD_SOFT + "66",
+    borderWidth: 1.5, borderStyle: "dashed", borderColor: OD_COLOR + "77", borderRadius: 16,
+    paddingVertical: SP.xl, alignItems: "center", gap: 4, backgroundColor: OD_SOFT + "88",
   },
-  uploadBtnText: { fontSize: 15, fontWeight: "700", color: OD_COLOR },
-  uploadBtnSub:  { fontSize: 11, color: GREY },
+  uploadText: { fontSize: 15, fontWeight: "700", color: OD_COLOR },
 
-  filePreview: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 12,
-    backgroundColor: OD_SOFT,
-    borderRadius: 12,
-    padding: 12,
-    borderWidth: 1,
-    borderColor: OD_COLOR + "33",
-  },
-  fileIcon: {
-    width: 40, height: 40, borderRadius: 10,
-    backgroundColor: WHITE,
-    alignItems: "center", justifyContent: "center",
-  },
-  fileInfo:   { flex: 1 },
-  fileName:   { fontSize: 13, fontWeight: "700", color: DARK },
-  fileSize:   { fontSize: 11, color: GREY, marginTop: 2 },
-  removeFile: { padding: 4 },
+  filePreview: { flexDirection: "row", alignItems: "center", gap: SP.md, backgroundColor: OD_SOFT, borderRadius: 14, padding: SP.md },
+  fileIcon:    { width: 42, height: 42, borderRadius: 12, backgroundColor: "#FFF", alignItems: "center", justifyContent: "center" },
 
-  submitBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 8,
-    backgroundColor: OD_COLOR,
-    borderRadius: 50,
-    paddingVertical: 16,
-    marginTop: 4,
-  },
-  submitBtnText: { color: WHITE, fontWeight: "700", fontSize: 15 },
-
-  sectionTitle: {
-    fontSize: 13, fontWeight: "800", color: GREY,
-    textTransform: "uppercase", letterSpacing: 1,
-  },
-
-  empty:     { paddingVertical: 48, alignItems: "center", gap: 10 },
-  emptyText: { fontSize: 14, color: GREY },
-
-  requestCard: {
-    backgroundColor: WHITE,
-    borderRadius: 16,
-    padding: 16,
-    gap: 10,
-    borderWidth: 1,
-    borderColor: BORDER,
-    elevation: 1,
-  },
-  requestTop: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-  },
-  requestDates:    { gap: 2 },
-  requestDateMain: { fontSize: 15, fontWeight: "700", color: DARK },
-  requestDateTo:   { fontSize: 13, color: GREY },
-  statusBadge: {
-    flexDirection: "row", alignItems: "center", gap: 4,
-    paddingHorizontal: 8, paddingVertical: 4, borderRadius: 10,
-  },
-  statusText: { fontSize: 11, fontWeight: "700" },
-
-  requestReason: { fontSize: 13, color: DARK, lineHeight: 18 },
-
+  reqCard:   { flexDirection: "row", overflow: "hidden" },
+  reqAccent: { width: 4 },
+  reqBody:   { flex: 1, padding: SP.lg, gap: SP.md },
+  reqTop:    { flexDirection: "row", alignItems: "flex-start", gap: SP.sm },
   proofRow:  { flexDirection: "row", alignItems: "center", gap: 6 },
-  proofName: { fontSize: 12, color: GREY, flex: 1 },
-
-  teacherNote: {
-    flexDirection: "row",
-    alignItems: "flex-start",
-    gap: 6,
-    backgroundColor: "#FEF2F2",
-    borderRadius: 8,
-    padding: 10,
-  },
-  teacherNoteText: { fontSize: 12, flex: 1, lineHeight: 16 },
-
-  approvedBanner: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    backgroundColor: "#F0FDF4",
-    borderRadius: 8,
-    padding: 10,
-  },
-  approvedBannerText: { fontSize: 12, color: GREEN, fontWeight: "600" },
-
-  cancelBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 6,
-    alignSelf: "flex-start" as any,
-    borderWidth: 1,
-    borderColor: RED + "44",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-  },
-  cancelBtnText: { fontSize: 12, color: RED, fontWeight: "600" },
-
-  requestDate: { fontSize: 11, color: GREY },
-
-  calendarOverlay: {
-    flex: 1,
-    backgroundColor: "rgba(0,0,0,0.5)",
-    justifyContent: "center",
-    padding: 20,
-  },
-  calendarSheet: {
-    backgroundColor: WHITE,
-    borderRadius: 20,
-    padding: 16,
-    gap: 12,
-  },
-  calendarHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-  calendarTitle: { fontSize: 16, fontWeight: "700", color: DARK },
 });

@@ -1,9 +1,13 @@
 // @ts-nocheck
 import { useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
+import { signOut } from "firebase/auth";
+import { auth } from "../services/firebase";
 import { clearUserSession, getUserSession } from "../services/session";
 import webLogo from "../assets/web_logo.png";
 import "./AppSidebar.css";
+import "./AppSidebarManage.css";
+import { useSessionVersion } from "../services/refreshSession";
 
 const NAV = {
   teacher: [
@@ -13,6 +17,8 @@ const NAV = {
       label: "Schedule",
       icon: <CalIcon />,
     },
+    // Public full-screen QR page for the classroom projector. Opens in a new tab and needs no extra login.
+    { path: "/qr", label: "QR Display", icon: <QrIcon />, external: true },
     {
       path: "/dashboard/teacher/assignments",
       label: "Assignments",
@@ -36,74 +42,108 @@ const NAV = {
       icon: <ReportIcon />,
     },
   ],
-  head: [
-    { path: "/dashboard/head", label: "Dashboard", icon: <GridIcon /> },
-    { path: "/dashboard/head/schedule", label: "Schedule", icon: <CalIcon /> },
-    {
-      path: "/dashboard/head/assignments",
-      label: "Assignments",
-      icon: <FileIcon />,
-    },
-    { path: "/dashboard/head/tests", label: "Tests", icon: <QuizIcon /> },
-    {
-      path: "/dashboard/head/od",
-      label: "OD Requests",
-      icon: <OdIcon />,
-      badgeKey: "pendingOD",
-    },
-    {
-      path: "/dashboard/head/announcements",
-      label: "Announcements",
-      icon: <MegIcon />,
-    },
-    { path: "/dashboard/head/reports", label: "Reports", icon: <ReportIcon /> },
-  ],
   student: [
     { path: "/dashboard/student", label: "Home", icon: <GridIcon /> },
-    {
-      path: "/dashboard/student/attendance",
-      label: "Attendance",
-      icon: <CalIcon />,
-    },
+    { path: "/dashboard/student/classes", label: "My Classes", icon: <ClassIcon /> },
     {
       path: "/dashboard/student/assignments",
       label: "Assignments",
       icon: <FileIcon />,
+      badgeKey: "todo",
     },
-    { path: "/dashboard/student/tests", label: "Tests", icon: <QuizIcon /> },
-    { path: "/dashboard/student/od", label: "OD Requests", icon: <OdIcon /> },
+    {
+      path: "/dashboard/student/tests",
+      label: "Tests",
+      icon: <QuizIcon />,
+      badgeKey: "liveTests",
+    },
     {
       path: "/dashboard/student/announcements",
       label: "Announcements",
       icon: <MegIcon />,
+      badgeKey: "unread",
     },
+    { path: "/dashboard/student/profile", label: "My Profile", icon: <UserIcon /> },
   ],
 };
 
-export default function AppSidebar({ role = "teacher", pendingOD = 0 }) {
+// Head-only management section (collapsible group in the sidebar).
+// Routes are placeholders until each page is built.
+const MANAGE_ITEMS = [
+  { path: "/dashboard/teacher/manage/semesters", label: "Semesters" },
+  { path: "/dashboard/teacher/manage/subjects",  label: "Subjects & Faculty" },
+  { path: "/dashboard/teacher/manage/divisions", label: "Divisions" },
+  { path: "/dashboard/teacher/manage/timetable", label: "Timetable" },
+  { path: "/dashboard/teacher/manage/calendar",  label: "Academic Calendar" },
+  { path: "/dashboard/teacher/manage/reports",   label: "Student Reports" },
+];
+
+// "Master of Computer Applications" -> "MCA" (short names like "B.Tech" / "MCA" are kept as they are)
+const COURSE_STOP = new Set(["of", "in", "and", "the", "for", "&"]);
+function courseAbbr(name) {
+  const n = String(name || "").trim();
+  if (!n || n.length <= 6 || !/\s/.test(n)) return n;
+  const letters = n.split(/\s+/).filter((w) => !COURSE_STOP.has(w.toLowerCase())).map((w) => w[0].toUpperCase()).join("");
+  return letters.length >= 2 ? letters : n;
+}
+const TAG_TONES = {
+  course: { background: "#EDE9FE", color: "#6D28D9" },
+  sem: { background: "#D1FAE5", color: "#047857" },
+};
+
+export default function AppSidebar({ role = "teacher", pendingOD = 0, badges: extraBadges = {} }) {
   const navigate = useNavigate();
   const location = useLocation();
+  useSessionVersion(); // re-render when head status etc. changes server-side
   const session = getUserSession();
   const profile = session?.profile || {};
   const user = session?.user || {};
   const [collapsed, setCollapsed] = useState(false);
 
+  // A head uses the teacher pages; the only difference is the Manage group.
+  const baseRole = role === "head" ? "teacher" : role;
+  const isHead =
+    baseRole === "teacher" &&
+    (role === "head" ||
+      !!user.is_head ||
+      user.role === "hod" ||
+      user.role === "head_teacher" ||
+      // The institute app marks a head with head_of (e.g. "MCA"); the
+      // designation can be anything ("head", "Professor"...), so don't use it.
+      !!String(profile.head_of || "").trim());
+  const [manageOpen, setManageOpen] = useState(() =>
+    location.pathname.includes("/manage"),
+  );
+
   const displayName = profile.first_name
     ? `${profile.first_name} ${profile.last_name || ""}`.trim()
-    : user.email || "User";
+    : profile.name || user.email || "User";
 
   const roleLabel =
-    role === "head"
-      ? "Head of Department"
-      : role === "teacher"
+    isHead
+      ? "Head Teacher"
+      : baseRole === "teacher"
         ? "Teacher"
         : "Student";
 
-  const navItems = NAV[role] || NAV.teacher;
-  const badges = { pendingOD };
+  const navItems = NAV[baseRole] || NAV.teacher;
+  const tagList =
+    baseRole === "student"
+      ? [
+          profile.course_name ? { text: courseAbbr(profile.course_code || profile.course_name), tone: "course", title: profile.course_name } : null,
+          profile.semester ? { text: `Sem ${profile.semester}`, tone: "sem" } : null,
+        ].filter(Boolean)
+      : (profile.departments || []).map((d) => ({ text: d }));
+
+  // "/dashboard/student" (home) only matches exactly; every other item also matches its sub-pages
+  const isHomePath = (p) => p === "/dashboard/teacher" || p === "/dashboard/student";
+  const isActivePath = (p) =>
+    isHomePath(p) ? location.pathname === p : location.pathname === p || location.pathname.startsWith(p + "/");
+  const badges = { pendingOD, ...extraBadges };
 
   const handleLogout = () => {
     clearUserSession();
+    signOut(auth).catch(() => {}); // end the Firebase session too, not just the stored copy
     navigate("/", { replace: true });
   };
 
@@ -134,11 +174,11 @@ export default function AppSidebar({ role = "teacher", pendingOD = 0 }) {
           <div className="app-sidebar-profile-info">
             <span className="app-sidebar-profile-name">{displayName}</span>
             <span className="app-sidebar-profile-role">{roleLabel}</span>
-            {profile.departments?.length > 0 && (
+            {tagList.length > 0 && (
               <div className="app-sidebar-depts">
-                {profile.departments.map((d) => (
-                  <span key={d} className="app-sidebar-dept-tag">
-                    {d}
+                {tagList.map((t) => (
+                  <span key={t.text} className="app-sidebar-dept-tag" title={t.title} style={TAG_TONES[t.tone]}>
+                    {t.text}
                   </span>
                 ))}
               </div>
@@ -149,15 +189,17 @@ export default function AppSidebar({ role = "teacher", pendingOD = 0 }) {
 
       {/* Nav */}
       <nav className="app-sidebar-nav">
-        {navItems.map(({ path, label, icon, badgeKey }) => {
-          const isActive = location.pathname === path;
+        {navItems.map(({ path, label, icon, badgeKey, external }) => {
+          const isActive = !external && isActivePath(path);
           const badge = badgeKey ? badges[badgeKey] || 0 : 0;
           return (
             <a
               key={path}
               href={path}
               className={`app-sidebar-nav-item${isActive ? " app-sidebar-nav-item--active" : ""}`}
+              {...(external ? { target: "_blank", rel: "noopener noreferrer" } : {})}
               onClick={(e) => {
+                if (external) return; // let the browser open the new tab
                 e.preventDefault();
                 navigate(path);
               }}
@@ -176,6 +218,66 @@ export default function AppSidebar({ role = "teacher", pendingOD = 0 }) {
             </a>
           );
         })}
+
+        {/* Manage — heads only, collapsible */}
+        {isHead && (
+          <div className="app-sidebar-group">
+            <button
+              type="button"
+              className={`app-sidebar-nav-item app-sidebar-group-toggle${
+                location.pathname.includes("/manage")
+                  ? " app-sidebar-nav-item--active"
+                  : ""
+              }`}
+              onClick={() => {
+                if (collapsed) {
+                  setCollapsed(false);
+                  setManageOpen(true);
+                } else {
+                  setManageOpen((v) => !v);
+                }
+              }}
+              aria-expanded={manageOpen}
+              title={collapsed ? "Manage" : undefined}
+            >
+              <span className="app-sidebar-nav-icon">
+                <SettingsIcon />
+              </span>
+              {!collapsed && (
+                <>
+                  <span className="app-sidebar-nav-label">Manage</span>
+                  <span
+                    className={`app-sidebar-chevron${manageOpen ? " app-sidebar-chevron--open" : ""}`}
+                  >
+                    <ChevronDownIcon />
+                  </span>
+                </>
+              )}
+            </button>
+
+            {!collapsed && manageOpen && (
+              <div className="app-sidebar-sub">
+                {MANAGE_ITEMS.map(({ path, label }) => (
+                  <a
+                    key={path}
+                    href={path}
+                    className={`app-sidebar-nav-item app-sidebar-sub-item${
+                      location.pathname === path
+                        ? " app-sidebar-nav-item--active"
+                        : ""
+                    }`}
+                    onClick={(e) => {
+                      e.preventDefault();
+                      navigate(path);
+                    }}
+                  >
+                    <span className="app-sidebar-nav-label">{label}</span>
+                  </a>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
       </nav>
 
       {/* Logout */}
@@ -272,6 +374,47 @@ function LogoutIcon() {
       <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4" />
       <polyline points="16 17 21 12 16 7" />
       <line x1="21" y1="12" x2="9" y2="12" />
+    </Svg>
+  );
+}
+function SettingsIcon() {
+  return (
+    <Svg>
+      <circle cx="12" cy="12" r="3" />
+      <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09a1.65 1.65 0 0 0-1-1.51 1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09a1.65 1.65 0 0 0 1.51-1 1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33h0a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51h0a1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82v0a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+    </Svg>
+  );
+}
+function QrIcon() {
+  return (
+    <Svg>
+      <rect x="3" y="3" width="7" height="7" rx="1" />
+      <rect x="14" y="3" width="7" height="7" rx="1" />
+      <rect x="3" y="14" width="7" height="7" rx="1" />
+      <path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3" />
+    </Svg>
+  );
+}
+function ClassIcon() {
+  return (
+    <Svg>
+      <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20" />
+      <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z" />
+    </Svg>
+  );
+}
+function UserIcon() {
+  return (
+    <Svg>
+      <path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2" />
+      <circle cx="12" cy="7" r="4" />
+    </Svg>
+  );
+}
+function ChevronDownIcon() {
+  return (
+    <Svg size={14}>
+      <polyline points="6 9 12 15 18 9" />
     </Svg>
   );
 }

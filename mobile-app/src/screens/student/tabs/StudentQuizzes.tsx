@@ -1,30 +1,36 @@
+import { apiFetch } from "../../../services/api";
 import React, { useState, useCallback, useEffect, useRef } from "react";
 import {
   View, Text, StyleSheet, ScrollView,
   TouchableOpacity, RefreshControl, Alert, AppState, AppStateStatus,
 } from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
 import { useNavigation, useFocusEffect } from "@react-navigation/native";
 import { auth } from "../../../services/firebase";
-import {
-  PRIMARY, PRIMARY_LIGHT, BG, GREEN, GREEN_LIGHT,
-  AMBER, AMBER_LIGHT, GREY, RED, RED_LIGHT,
-  API_URL, StudentQuiz, fmtDate, isJoinCodeExpired,
-} from "../../quiz/student/components/studentQuizConstants";
+import { StudentQuiz, fmtDate, isJoinCodeExpired, API_URL } from "../../quiz/student/components/studentQuizConstants";
 import { QuizCardSkeleton } from "../../quiz/student/components/QuizSkeleton";
 import { Ionicons } from "@expo/vector-icons";
+import { Card, Chip, EmptyState, ProgressBar, Screen, SP, T, Tone, font } from "../../../components/ui";
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 const POLL_INTERVAL_MS = 8_000; // 8 seconds
 
 // ─── Tab config ───────────────────────────────────────────────────────────────
-const TABS = [
-  { key: "live",      label: "Live",      color: GREEN, bg: GREEN_LIGHT },
-  { key: "scheduled", label: "Scheduled", color: AMBER, bg: AMBER_LIGHT },
-  { key: "completed", label: "Completed", color: GREY,  bg: "#F3F4F6"  },
-] as const;
+const TABS: { key: "live" | "scheduled" | "completed"; label: string; tone: Tone }[] = [
+  { key: "live",      label: "Live",      tone: "success" },
+  { key: "scheduled", label: "Scheduled", tone: "warning" },
+  { key: "completed", label: "Completed", tone: "neutral" },
+];
 
 type TabKey = "live" | "scheduled" | "completed";
+
+function Meta({ icon, text, color = T.sub }: { icon: any; text: string; color?: string }) {
+  return (
+    <View style={{ flexDirection: "row", alignItems: "center", gap: 4 }}>
+      <Ionicons name={icon} size={13} color={color} />
+      <Text style={{ fontSize: 12.5, fontWeight: "600", color }}>{text}</Text>
+    </View>
+  );
+}
 
 // ─── Quiz card ────────────────────────────────────────────────────────────────
 function QuizCard({
@@ -32,123 +38,104 @@ function QuizCard({
 }: {
   quiz: StudentQuiz; tab: TabKey; onPress: () => void;
 }) {
-  const tabInfo   = TABS.find((t) => t.key === tab)!;
-  const isOpen    = !quiz.join_code;
+  const isOpen      = !quiz.join_code;
   const codeExpired = tab === "live" && isJoinCodeExpired(quiz);
+  const accent      = tab === "live" ? T.success : tab === "scheduled" ? T.warning : T.line;
 
   return (
-    <TouchableOpacity style={S.card} onPress={onPress} activeOpacity={0.82}>
-
-      {/* Top row */}
-      <View style={S.cardTop}>
-        <Text style={S.cardTitle} numberOfLines={1}>{quiz.title}</Text>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 6 }}>
-          {isOpen && tab === "live" && (
-            <View style={S.openBadge}>
-              <Text style={S.openBadgeText}>🔓 Open</Text>
+    <TouchableOpacity onPress={onPress} activeOpacity={0.82}>
+      <Card padded={false} style={S.card}>
+        <View style={[S.accent, { backgroundColor: accent }]} />
+        <View style={S.cardBody}>
+          {/* Title + status */}
+          <View style={S.cardTop}>
+            <View style={{ flex: 1 }}>
+              <Text style={font.h3} numberOfLines={1}>{quiz.title}</Text>
+              <Text style={[font.small, { marginTop: 1 }]} numberOfLines={1}>{quiz.subject_name}</Text>
             </View>
-          )}
-          {codeExpired && (
-            <View style={S.expiredBadge}>
-              <Text style={S.expiredBadgeText}>Code expired</Text>
+            <View style={{ alignItems: "flex-end", gap: 4 }}>
+              <Chip
+                label={tab === "live" ? "Live" : tab === "scheduled" ? "Scheduled" : "Done"}
+                tone={tab === "live" ? "success" : tab === "scheduled" ? "warning" : "neutral"}
+              />
+              {isOpen && tab === "live" && <Chip label="Open" icon="lock-open-outline" tone="info" />}
+              {codeExpired && <Chip label="Code expired" tone="danger" />}
             </View>
-          )}
-          <View style={[S.statusBadge, { backgroundColor: tabInfo.bg }]}>
-            <Text style={[S.statusText, { color: tabInfo.color }]}>
-              {tab === "live" ? "LIVE" : tab === "scheduled" ? "Scheduled" : "Done"}
-            </Text>
           </View>
-        </View>
-      </View>
 
-      {/* Subject */}
-      <Text style={S.cardSubject}>{quiz.subject_name}</Text>
-
-      {/* Info row */}
-      <View style={S.cardInfo}>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
-          <Ionicons name="list-outline" size={12} color="#374151" />
-          <Text style={S.cardInfoItem}>{quiz.question_count}Q</Text>
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
-          <Ionicons name="ribbon-outline" size={12} color="#374151" />
-          <Text style={S.cardInfoItem}>{quiz.total_marks} marks</Text>
-        </View>
-        <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
-          <Ionicons name="time-outline" size={12} color="#374151" />
-          <Text style={S.cardInfoItem}>{quiz.time_limit_minutes}m</Text>
-        </View>
-        {tab === "live" && !isOpen && quiz.join_code_expiry_at && !codeExpired && (
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 3 }}>
-            <Ionicons name="key-outline" size={12} color="#92400E" />
-            <Text style={[S.cardInfoItem, { color: "#92400E" }]}>
-              expires {new Date(quiz.join_code_expiry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}
-            </Text>
-          </View>
-        )}
-      </View>
-
-      {/* Date row */}
-      <View style={S.cardDateRow}>
-        {tab === "live" ? (
-          <>
-            <Text style={S.cardDateItem}>Started: {fmtDate(quiz.scheduled_start)}</Text>
-            <Text style={S.cardDateItem}>Ends: {fmtDate(quiz.scheduled_end)}</Text>
-          </>
-        ) : tab === "scheduled" ? (
-          <>
-            <Text style={S.cardDateItem}>Starts: {fmtDate(quiz.scheduled_start)}</Text>
-            <Text style={S.cardDateItem}>Ends: {fmtDate(quiz.scheduled_end)}</Text>
-          </>
-        ) : (
-          <Text style={S.cardDateItem}>
-            {fmtDate(quiz.scheduled_start)} – {fmtDate(quiz.scheduled_end)}
-          </Text>
-        )}
-      </View>
-
-      {/* Bottom row */}
-      <View style={S.cardBottom}>
-        {tab === "completed" && quiz.submission ? (
-          <View style={S.completedBottom}>
-            <View style={S.scoreRow}>
-              <Text style={S.scoreText}>
-                Score: {quiz.submission.marks_obtained}/{quiz.total_marks}
-              </Text>
-              <View style={[S.pctBadge, { backgroundColor: quiz.submission.percentage >= 50 ? GREEN_LIGHT : RED_LIGHT }]}>
-                <Text style={[S.pctText, { color: quiz.submission.percentage >= 50 ? GREEN : RED }]}>
-                  {quiz.submission.percentage.toFixed(1)}%
-                </Text>
-              </View>
-            </View>
-            {quiz.submission.submitted_at && (
-              <Text style={S.submittedAtText}>Submitted: {fmtDate(quiz.submission.submitted_at)}</Text>
+          {/* Info */}
+          <View style={S.info}>
+            <Meta icon="list-outline" text={`${quiz.question_count} questions`} />
+            <Meta icon="ribbon-outline" text={`${quiz.total_marks} marks`} />
+            <Meta icon="time-outline" text={`${quiz.time_limit_minutes} min`} />
+            {tab === "live" && !isOpen && quiz.join_code_expiry_at && !codeExpired && (
+              <Meta
+                icon="key-outline"
+                color={T.warning}
+                text={`expires ${new Date(quiz.join_code_expiry_at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`}
+              />
             )}
           </View>
-        ) : tab === "completed" && !quiz.submission ? (
-          <View style={[S.pctBadge, { backgroundColor: "#FEF2F2", borderWidth: 1, borderColor: "#FECACA" }]}>
-            <Text style={[S.pctText, { color: RED }]}>Missed</Text>
+
+          {/* Dates */}
+          <View style={S.dates}>
+            {tab === "live" ? (
+              <>
+                <Text style={font.small}>Started {fmtDate(quiz.scheduled_start)}</Text>
+                <Text style={font.small}>Ends {fmtDate(quiz.scheduled_end)}</Text>
+              </>
+            ) : tab === "scheduled" ? (
+              <>
+                <Text style={font.small}>Starts {fmtDate(quiz.scheduled_start)}</Text>
+                <Text style={font.small}>Ends {fmtDate(quiz.scheduled_end)}</Text>
+              </>
+            ) : (
+              <Text style={font.small}>
+                {fmtDate(quiz.scheduled_start)} - {fmtDate(quiz.scheduled_end)}
+              </Text>
+            )}
           </View>
-        ) : null}
-      </View>
+
+          {/* Result */}
+          {tab === "completed" && quiz.submission ? (
+            <View style={S.result}>
+              <View style={S.scoreRow}>
+                <Text style={font.h3}>
+                  {quiz.submission.marks_obtained}/{quiz.total_marks}
+                </Text>
+                <Chip
+                  label={`${quiz.submission.percentage.toFixed(1)}%`}
+                  tone={quiz.submission.percentage >= 50 ? "success" : "danger"}
+                />
+              </View>
+              <ProgressBar
+                value={quiz.submission.percentage / 100}
+                tone={quiz.submission.percentage >= 50 ? "success" : "danger"}
+              />
+              {quiz.submission.submitted_at && (
+                <Text style={font.small}>Submitted {fmtDate(quiz.submission.submitted_at)}</Text>
+              )}
+            </View>
+          ) : tab === "completed" && !quiz.submission ? (
+            <View style={{ marginTop: SP.sm, alignSelf: "flex-start" }}>
+              <Chip label="Missed" icon="close-circle-outline" tone="danger" />
+            </View>
+          ) : null}
+        </View>
+      </Card>
     </TouchableOpacity>
   );
 }
 
 // ─── Empty state ──────────────────────────────────────────────────────────────
-function EmptyState({ tab }: { tab: TabKey }) {
+function Empty({ tab }: { tab: TabKey }) {
   const MAP = {
     live:      { icon: "radio-outline" as const,    msg: "No live quizzes right now" },
     scheduled: { icon: "calendar-outline" as const, msg: "No upcoming quizzes"       },
     completed: { icon: "checkbox-outline" as const, msg: "No completed quizzes yet"  },
   };
   const { icon, msg } = MAP[tab];
-  return (
-    <View style={S.empty}>
-      <Ionicons name={icon} size={44} color={GREY} style={{ marginBottom: 12 }} />
-      <Text style={S.emptyText}>{msg}</Text>
-    </View>
-  );
+  return <EmptyState icon={icon} title={msg} />;
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
@@ -175,7 +162,7 @@ export default function StudentQuizzes() {
       const uid = auth.currentUser?.uid;
       if (!uid) { setError("User not authenticated"); setLoading(false); setRefreshing(false); return; }
 
-      const res = await fetch(`${API_URL}/api/quizzes/student-quizzes/${uid}`);
+      const res = await apiFetch(`${API_URL}/api/quizzes/student-quizzes/${uid}`);
       if (!res.ok) { setError(`API returned status ${res.status}`); setLoading(false); setRefreshing(false); return; }
 
       const data = await res.json();
@@ -256,11 +243,11 @@ export default function StudentQuizzes() {
   const currentList = quizzes[activeTab];
 
   return (
-    <SafeAreaView style={S.safe}>
+    <Screen edges={["top"]}>
       {/* Header */}
       <View style={S.header}>
-        <Text style={S.title}>Quizzes</Text>
-        <Text style={S.subtitle}>Your tests & assessments</Text>
+        <Text style={font.display}>Quizzes</Text>
+        <Text style={[font.body, { marginTop: 2 }]}>Your tests and assessments</Text>
       </View>
 
       {/* Tab bar */}
@@ -271,15 +258,14 @@ export default function StudentQuizzes() {
           return (
             <TouchableOpacity
               key={tab.key}
-              style={[S.tab, active && { borderBottomColor: tab.color, borderBottomWidth: 2.5 }]}
+              style={[S.tab, active && S.tabOn]}
               onPress={() => setActiveTab(tab.key)}
+              activeOpacity={0.8}
             >
-              <Text style={[S.tabText, active && { color: tab.color, fontWeight: "800" }]}>
-                {tab.label}
-              </Text>
+              <Text style={[S.tabText, active && { color: T.primary }]}>{tab.label}</Text>
               {count > 0 && (
-                <View style={[S.tabBadge, { backgroundColor: tab.bg }]}>
-                  <Text style={[S.tabBadgeText, { color: tab.color }]}>{count}</Text>
+                <View style={[S.tabBadge, { backgroundColor: active ? T.primary : T.line }]}>
+                  <Text style={[S.tabBadgeText, { color: active ? "#FFF" : T.sub }]}>{count}</Text>
                 </View>
               )}
             </TouchableOpacity>
@@ -295,14 +281,16 @@ export default function StudentQuizzes() {
           <RefreshControl
             refreshing={refreshing}
             onRefresh={() => { setRefreshing(true); fetchQuizzes(true); }}
-            colors={[PRIMARY]}
+            colors={[T.primary]}
           />
         }
       >
         {loading ? (
           [1, 2, 3].map((i) => <QuizCardSkeleton key={i} />)
+        ) : error && currentList.length === 0 ? (
+          <EmptyState icon="cloud-offline-outline" title="Couldn't load quizzes" text={error} />
         ) : currentList.length === 0 ? (
-          <EmptyState tab={activeTab} />
+          <Empty tab={activeTab} />
         ) : (
           currentList.map((q) => (
             <QuizCard
@@ -313,63 +301,36 @@ export default function StudentQuizzes() {
             />
           ))
         )}
-        <View style={{ height: 40 }} />
+        <View style={{ height: 120 }} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
 
 const S = StyleSheet.create({
-  safe:     { flex: 1, backgroundColor: BG },
-  header:   { paddingHorizontal: 20, paddingTop: 16, marginBottom: 4 },
-  title:    { fontSize: 28, fontWeight: "800", color: "#111827" },
-  subtitle: { fontSize: 14, color: GREY, marginTop: 4 },
+  header: { paddingHorizontal: SP.xl, paddingTop: SP.lg, marginBottom: SP.md },
 
-  tabBar:      { flexDirection: "row", paddingHorizontal: 20, borderBottomWidth: 1, borderBottomColor: "#E5E7EB", marginBottom: 16 },
-  tab:         { flex: 1, alignItems: "center", paddingVertical: 12, flexDirection: "row", justifyContent: "center", gap: 6 },
-  tabText:     { fontSize: 14, fontWeight: "600", color: GREY },
-  tabBadge:    { borderRadius: 10, paddingHorizontal: 6, paddingVertical: 2 },
-  tabBadgeText:{ fontSize: 11, fontWeight: "700" },
-
-  list: { paddingHorizontal: 20 },
-
-  card: {
-    backgroundColor: "#FFF",
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 10,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-    shadowColor: "#000",
-    shadowOpacity: 0.04,
-    shadowRadius: 6,
-    elevation: 2,
+  tabBar: {
+    flexDirection: "row", marginHorizontal: SP.xl, marginBottom: SP.lg, padding: 4,
+    backgroundColor: T.lineSoft, borderRadius: 14, gap: 4,
   },
-  cardTop:     { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 4 },
-  cardTitle:   { fontSize: 16, fontWeight: "700", color: "#111827", flex: 1, marginRight: 8 },
-  statusBadge: { paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
-  statusText:  { fontSize: 11, fontWeight: "700" },
+  tab: {
+    flex: 1, flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, paddingVertical: 10, borderRadius: 11,
+  },
+  tabOn:        { backgroundColor: T.surface, shadowColor: "#000", shadowOpacity: 0.06, shadowRadius: 4, elevation: 1 },
+  tabText:      { fontSize: 13.5, fontWeight: "700", color: T.sub },
+  tabBadge:     { borderRadius: 10, minWidth: 20, paddingHorizontal: 6, paddingVertical: 1, alignItems: "center" },
+  tabBadgeText: { fontSize: 11, fontWeight: "800" },
 
-  openBadge:     { backgroundColor: "#D1FAE5", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8 },
-  openBadgeText: { fontSize: 11, fontWeight: "700", color: "#065F46" },
+  list: { paddingHorizontal: SP.xl },
 
-  expiredBadge:     { backgroundColor: "#FEF2F2", paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8, borderWidth: 1, borderColor: "#FECACA" },
-  expiredBadgeText: { fontSize: 11, fontWeight: "700", color: RED },
-
-  cardSubject:  { fontSize: 13, color: GREY, marginBottom: 10 },
-  cardInfo:     { flexDirection: "row", flexWrap: "wrap", gap: 12, marginBottom: 10 },
-  cardInfoItem: { fontSize: 12, color: "#374151", fontWeight: "600" },
-  cardDateRow:  { gap: 2, marginBottom: 10 },
-  cardDateItem: { fontSize: 12, color: GREY, fontWeight: "500" },
-
-  cardBottom:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  completedBottom: { flex: 1, gap: 6 },
-  scoreRow:        { flexDirection: "row", alignItems: "center", gap: 8 },
-  scoreText:       { fontSize: 13, fontWeight: "700", color: "#111827" },
-  submittedAtText: { fontSize: 11, color: GREY, fontStyle: "italic" },
-  pctBadge:        { borderRadius: 8, paddingHorizontal: 8, paddingVertical: 3 },
-  pctText:         { fontSize: 12, fontWeight: "700" },
-
-  empty:     { alignItems: "center", paddingTop: 60 },
-  emptyText: { fontSize: 15, color: GREY, fontWeight: "600" },
+  card:     { flexDirection: "row", overflow: "hidden", marginBottom: SP.md },
+  accent:   { width: 4 },
+  cardBody: { flex: 1, padding: SP.lg, gap: SP.sm },
+  cardTop:  { flexDirection: "row", alignItems: "flex-start", gap: SP.sm },
+  info:     { flexDirection: "row", flexWrap: "wrap", gap: SP.md },
+  dates:    { gap: 1 },
+  result:   { gap: 6, marginTop: 2, paddingTop: SP.sm, borderTopWidth: 1, borderTopColor: T.lineSoft },
+  scoreRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between" },
 });

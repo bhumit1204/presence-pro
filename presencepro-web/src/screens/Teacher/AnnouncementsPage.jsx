@@ -1,16 +1,28 @@
 // @ts-nocheck
 import { useEffect, useState, useCallback } from "react";
 import { useNavigate } from "react-router-dom";
-import { getUserSession } from "../../services/session";
+import { getUserSession, getSessionToken } from "../../services/session";
+import { auth } from "../../services/firebase";
 import AppSidebar from "../../components/AppSidebar";
 import "./AnnouncementsPage.css";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:5000";
 
+// The server verifies the Firebase login on every call, so always send a fresh ID token.
+async function authHeaders() {
+  let token = getSessionToken();
+  try { if (auth.currentUser) token = await auth.currentUser.getIdToken(); } catch { /* use the stored token */ }
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function apiFetch(path, opts = {}) {
-  const res  = await fetch(`${API}${path}`, opts);
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || "Request failed");
+  const res = await fetch(`${API}${path}`, {
+    ...opts,
+    headers: { ...(await authHeaders()), ...(opts.headers || {}) },
+  });
+  let data = {};
+  try { data = await res.json(); } catch { /* not JSON (proxy or server error page) */ }
+  if (!res.ok) throw new Error(data.error || (res.status === 401 ? "Please log in again" : `Request failed (${res.status})`));
   return data;
 }
 const get  = (p)    => apiFetch(p);
@@ -50,10 +62,9 @@ export default function AnnouncementsPage() {
   const navigate = useNavigate();
   const session  = getUserSession();
   useEffect(() => { if (!session) navigate("/", { replace: true }); }, []);
-  if (!session) return null;
 
-  const uid    = session.user?.uid;
-  const isHead = session.user?.is_head;
+  const uid    = session?.user?.uid;
+  const isHead = session?.user?.is_head;
   const role   = isHead ? "head" : "teacher";
 
   // resolved teacher_id (Firestore doc ID) from timetable endpoint
@@ -73,14 +84,16 @@ export default function AnnouncementsPage() {
   const [attFilter,  setAttFilter]  = useState("none");
   const [saving,     setSaving]     = useState(false);
   const [createErr,  setCreateErr]  = useState("");
+  const [sentNote,   setSentNote]   = useState(""); // confirmation shown on the list after sending
 
   // Load teacher_id and subjects via the web timetable route
   // This returns teacher_id (Firestore doc ID) correctly
   useEffect(() => {
+    if (!uid) return;
     (async () => {
       try {
         const data = await get(`/api/web/teacher/timetable?uid=${encodeURIComponent(uid)}`);
-        if (!data.success) return;
+        if (!data.success) { setError("Could not load your subjects. Refresh the page."); setLoading(false); return; }
         setTeacherId(data.teacher_id);
         // Build unique subjects map from lectures
         const map = {};
@@ -100,6 +113,8 @@ export default function AnnouncementsPage() {
         if (subjs.length > 0) setSubjectId(subjs[0].subject_id);
       } catch (e) {
         console.error("Failed to load teacher info:", e);
+        setError(e.message || "Could not load your subjects. Refresh the page.");
+        setLoading(false);
       }
     })();
   }, [uid]);
@@ -128,6 +143,7 @@ export default function AnnouncementsPage() {
     if (!title.trim())  { setCreateErr("Title is required"); return; }
     if (!text.trim())   { setCreateErr("Message is required"); return; }
     if (targetType === "class" && !subjectId) { setCreateErr("Select a subject"); return; }
+    if (saving) return;
     setSaving(true); setCreateErr("");
     try {
       const body = {
@@ -142,12 +158,18 @@ export default function AnnouncementsPage() {
         body.attendance_filter = attFilter;
       }
       const data = await post("/api/broadcasts", body);
-      if (!data.success && data.message !== undefined && data.recipient_count === 0) {
-        setCreateErr("No students matched this filter.");
+      // the server answers success with 0 recipients when nobody matched: nothing was sent
+      if (!data.success || !data.broadcast_id || !(data.recipient_count > 0)) {
+        setCreateErr(
+          attFilter !== "none"
+            ? "No students matched this attendance filter, so nothing was sent."
+            : "No approved students are enrolled in this subject, so nothing was sent."
+        );
         return;
       }
       resetForm();
       setView("list");
+      setSentNote(`Announcement sent to ${data.recipient_count} student${data.recipient_count === 1 ? "" : "s"}. They will see it in their Broadcasts inbox and get a notification.`);
       loadBroadcasts(teacherId);
     } catch (e) { setCreateErr(e.message); }
     finally { setSaving(false); }
@@ -160,6 +182,8 @@ export default function AnnouncementsPage() {
       setBroadcasts((prev) => prev.filter((x) => x.broadcast_id !== b.broadcast_id));
     } catch (e) { alert(e.message); }
   };
+
+  if (!session) return null;
 
   // ── Create form ─────────────────────────────────────────────────────────────
   const renderCreate = () => (
@@ -280,7 +304,7 @@ export default function AnnouncementsPage() {
         <header className="an-topbar">
           <h1 className="an-topbar-title">Announcements</h1>
           {view === "list" && (
-            <button className="an-new-btn" onClick={() => setView("create")}>
+            <button className="an-new-btn" onClick={() => { setSentNote(""); setView("create"); }}>
               + New Announcement
             </button>
           )}
@@ -291,6 +315,7 @@ export default function AnnouncementsPage() {
 
           {view === "list" && (
             <>
+              {sentNote && <div className="an-success">{sentNote}</div>}
               {error   && <div className="an-error">{error}</div>}
               {loading && <div className="an-loading">Loading announcements…</div>}
 

@@ -1,3 +1,4 @@
+import { apiFetch } from "../../../services/api";
 import React, { useEffect, useState, useRef, useCallback } from "react";
 import {
   View,
@@ -11,7 +12,7 @@ import {
 } from "react-native";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import AttendanceCard from "../../../components/AttendanceCard";
-import { getUserSession } from "../../../services/session";
+import { getUserSession, updateSessionProfile } from "../../../services/session";
 import {
   collection,
   doc,
@@ -23,20 +24,11 @@ import {
 } from "firebase/firestore";
 import { db, auth } from "../../../services/firebase";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
-import Ionicons from "@expo/vector-icons/build/Ionicons";
+import { Ionicons } from "@expo/vector-icons";
+import { API_BASE } from "../../../services/api";
+import { Avatar, Banner, Card, Chip, Screen, SP, T, Tone, font, shadow } from "../../../components/ui";
 
-// ─── Theme ────────────────────────────────────────────────────────────────────
-const PRIMARY       = "#4834D4";
-const PRIMARY_LIGHT = "#EEF2FF";
-const BG            = "#F3F4F6";
-const GREEN         = "#10B981";
-const GREEN_LIGHT   = "#D1FAE5";
-const AMBER         = "#F59E0B";
-const AMBER_LIGHT   = "#FEF3C7";
-const RED           = "#EF4444";
-const RED_LIGHT     = "#FEF2F2";
-const GREY          = "#6B7280";
-const API_URL       = "http://10.132.90.56:5000";
+const API_URL = API_BASE;
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 interface LectureData {
@@ -113,6 +105,8 @@ const StudentHome = () => {
   const [ongoingLecture, setOngoingLecture] = useState<LectureData | null>(null);
   const [nextLecture, setNextLecture]       = useState<LectureData | null>(null);
   const [alreadyMarked, setAlreadyMarked]   = useState(false);
+  const [markPending, setMarkPending]       = useState(false);   // unverified: waiting for the teacher
+  const [attendanceSessionId, setAttendanceSessionId] = useState<string | null>(null);
   const [lectureState, setLectureState]     = useState<"idle" | "ongoing">("idle");
   const [timerSeconds, setTimerSeconds]     = useState(0);
   const [lectureSessionId, setLectureSessionId] = useState<string | null>(null);
@@ -120,6 +114,8 @@ const StudentHome = () => {
   const [markingStatus, setMarkingStatus]   = useState<"open" | "closed">("closed");
   const [markingMethod, setMarkingMethod]   = useState<string | null>(null);
   const [unreadCount, setUnreadCount]       = useState(0);
+  const [studentName, setStudentName]     = useState("");
+  const [electivesPending, setElectivesPending] = useState(0); // elective groups the student still has to choose
 
   const appState      = useRef(AppState.currentState);
   const studentMeta   = useRef<{ aishe_code: string; course_id: string } | null>(null);
@@ -146,6 +142,8 @@ const StudentHome = () => {
     setMarkingStatus("closed");
     setMarkingMethod(null);
     setAlreadyMarked(false);
+    setMarkPending(false);
+    setAttendanceSessionId(null);
     await AsyncStorage.multiRemove([...STORAGE_KEYS]);
   }, []);
 
@@ -171,6 +169,45 @@ const StudentHome = () => {
     });
     return () => subscription.remove();
   }, [lectureSessionId, clearLectureState]);
+
+  // ─── Electives still to choose? (shows a banner; silent when anything fails) ──
+  useFocusEffect(
+    useCallback(() => {
+      let alive = true;
+      (async () => {
+        try {
+          const session = await getUserSession();
+          if (!session?.uid) return;
+          // 1) did the semester change since this phone last looked? (automatic semester change on the server)
+          try {
+            const pr = await apiFetch(`${API_BASE}/api/profile/student/${session.uid}`);
+            if (pr.ok) {
+              const pj = await pr.json();
+              const fresh = pj.success ? pj.profile : null;
+              const before = session.profile;
+              if (fresh && before && alive) {
+                const wasDone = before.semester_status === "completed";
+                const nowDone = fresh.semester_status === "completed";
+                if (!wasDone && nowDone) {
+                  Alert.alert("Course completed", "You have finished your final semester. Congratulations.");
+                } else if (before.semester != null && Number(before.semester) !== Number(fresh.semester)) {
+                  Alert.alert("Semester updated", `You are now in Semester ${fresh.semester}. Your subjects have been updated.`);
+                }
+              }
+              if (fresh) await updateSessionProfile(fresh);
+            }
+          } catch {}
+
+          // 2) electives still to choose?
+          const res = await apiFetch(`${API_BASE}/api/profile/student/${session.uid}/electives`);
+          if (!res.ok) return;
+          const json = await res.json();
+          if (alive && json.success) setElectivesPending(json.pending || 0);
+        } catch {}
+      })();
+      return () => { alive = false; };
+    }, [])
+  );
 
   // ─── Focus effect — recheck session validity on every screen focus ────────
   useFocusEffect(
@@ -210,6 +247,7 @@ const StudentHome = () => {
 
         setMarkingStatus(data.marking_status || "closed");
         setMarkingMethod(data.marking_method || null);
+        setAttendanceSessionId(data.attendance_session_id || null);
 
         if (data.attendance_session_id) {
           try {
@@ -222,6 +260,9 @@ const StudentHome = () => {
               setAlreadyMarked(
                 currentUid ? (attData.present_students?.includes(currentUid) ?? false) : false
               );
+              setMarkPending(
+                currentUid ? (attData.pending_students?.includes(currentUid) ?? false) : false
+              );
             }
           } catch {}
         }
@@ -230,12 +271,27 @@ const StudentHome = () => {
     return () => unsubscribe();
   }, [lectureSessionId]);
 
+  // ─── Live "my status" for the open attendance session ─────────────────────
+  // Updates the button when the student is counted (pending -> present after the teacher confirms).
+  useEffect(() => {
+    if (!attendanceSessionId) return;
+    const unsub = onSnapshot(doc(db, "attendance_sessions", attendanceSessionId), (snap) => {
+      if (!snap.exists()) return;
+      const d: any = snap.data();
+      const me = auth.currentUser?.uid;
+      if (!me) return;
+      setAlreadyMarked(d.present_students?.includes(me) ?? false);
+      setMarkPending(d.pending_students?.includes(me) ?? false);
+    }, () => {});
+    return () => unsub();
+  }, [attendanceSessionId]);
+
   // ─── Boot ─────────────────────────────────────────────────────────────────
   const fetchUnreadCount = useCallback(async () => {
     try {
       const session = await getUserSession();
       if (!session?.uid) return;
-      const res  = await fetch(`${API_URL}/api/broadcasts/student/${session.uid}`);
+      const res  = await apiFetch(`${API_URL}/api/broadcasts/student/${session.uid}`);
       const data = await res.json();
       if (data.success) {
         const count = (data.broadcasts || []).filter((b: any) => !b.is_read).length;
@@ -255,6 +311,7 @@ const StudentHome = () => {
       if (!studentSnap.exists()) { setLoading(false); return; }
 
       const studentData      = studentSnap.data();
+      setStudentName(studentData.name || studentData.first_name || "");
       const aishe_code: string  = studentData.aishe_code;
       const course_name: string = studentData.course_name;
       const enrolledSubjects: string[] = studentData.enrolled_subjects || [];
@@ -325,7 +382,7 @@ const StudentHome = () => {
 
       // Assignments
       if (profile.enrolled_subjects.length > 0 && profile.course_id) {
-        const subRes = await fetch(
+        const subRes = await apiFetch(
           `${API_URL}/api/assignments/my-submissions?student_uid=${profile.uid}`
         );
         const subData = await subRes.json();
@@ -339,7 +396,7 @@ const StudentHome = () => {
           await Promise.all(
             chunk.map(async (subject_id) => {
               try {
-                const res  = await fetch(
+                const res  = await apiFetch(
                   `${API_URL}/api/assignments?subject_id=${subject_id}&course_id=${profile.course_id}&limit=50`
                 );
                 const data = await res.json();
@@ -375,7 +432,7 @@ const StudentHome = () => {
 
       // Quizzes
       try {
-        const qRes  = await fetch(`${API_URL}/api/quizzes/student-quizzes/${profile.uid}`);
+        const qRes  = await apiFetch(`${API_URL}/api/quizzes/student-quizzes/${profile.uid}`);
         const qData = await qRes.json();
         if (qData.success) {
           const allQuizzes = [
@@ -547,6 +604,7 @@ const StudentHome = () => {
 
       setMarkingStatus(data.marking_status || "closed");
       setMarkingMethod(data.marking_method || null);
+      setAttendanceSessionId(data.attendance_session_id || null);
 
       if (data.attendance_session_id) {
         try {
@@ -557,6 +615,7 @@ const StudentHome = () => {
             const attData    = attSnap.data();
             const currentUid = auth.currentUser?.uid || uid;
             setAlreadyMarked(attData.present_students?.includes(currentUid) ?? false);
+            setMarkPending(attData.pending_students?.includes(currentUid) ?? false);
           }
         } catch {}
       }
@@ -580,7 +639,7 @@ const StudentHome = () => {
   // ─── Fetch daily timetable (next lecture) ─────────────────────────────────
   const fetchDailyLectures = async (uid: string) => {
     try {
-      const res  = await fetch(`${API_URL}/api/lectures/student/today?uid=${uid}`);
+      const res  = await apiFetch(`${API_URL}/api/lectures/student/today?uid=${uid}`);
       const json = await res.json();
       if (json.success) {
         setToday(json.today);
@@ -606,7 +665,7 @@ const StudentHome = () => {
       return;
     }
     try {
-      const methodRes = await fetch(
+      const methodRes = await apiFetch(
         `${API_URL}/api/lectures/attendance/method?lecture_session_id=${lectureSessionId}`
       );
       if (!methodRes.ok) {
@@ -625,10 +684,15 @@ const StudentHome = () => {
         navigation.navigate("QRMarkingScreen", { lectureSessionId });
       } else if (method === "code") {
         navigation.navigate("CodeMarkingScreen", { attendanceSessionId, lectureSessionId });
+      } else if (method === "multi") {
+        navigation.navigate("MultiMarkingScreen", { attendanceSessionId, lectureSessionId });
       } else if (method === "bio_wifi_ble") {
         navigation.navigate("BioGeoMarkingScreen", { attendanceSessionId });
       } else if (method === "iot") {
         navigation.navigate("IoTMarkingScreen", { attendanceSessionId });
+      } else if (method === "iot_multi") {
+        // device first; the screen offers code / biometric if the device path fails
+        navigation.navigate("IoTMarkingScreen", { attendanceSessionId, lectureSessionId, fallback: true });
       } else {
         Alert.alert("Attendance method not available");
       }
@@ -653,66 +717,67 @@ const StudentHome = () => {
 
   const statusConfig: Record<
     TodoItem["status"],
-    { label: string; color: string; bg: string; icon: string }
+    { label: string; tone: Tone; icon: any }
   > = {
-    pending:   { label: "Pending",   color: AMBER,   bg: AMBER_LIGHT,  icon: "time-outline"             },
-    live:      { label: "Live",      color: GREEN,   bg: GREEN_LIGHT,  icon: "radio-outline"            },
-    scheduled: { label: "Upcoming",  color: PRIMARY, bg: PRIMARY_LIGHT,icon: "calendar-outline"         },
-    submitted: { label: "Submitted", color: GREEN,   bg: GREEN_LIGHT,  icon: "checkmark-circle-outline" },
-    missed:    { label: "Missed",    color: RED,     bg: RED_LIGHT,    icon: "close-circle-outline"     },
+    pending:   { label: "Pending",   tone: "warning", icon: "time-outline"             },
+    live:      { label: "Live",      tone: "success", icon: "radio-outline"            },
+    scheduled: { label: "Upcoming",  tone: "primary", icon: "calendar-outline"         },
+    submitted: { label: "Submitted", tone: "success", icon: "checkmark-circle-outline" },
+    missed:    { label: "Missed",    tone: "danger",  icon: "close-circle-outline"     },
   };
 
   const FILTER_LABELS: { key: TodoFilter; label: string }[] = [
-    { key: "thisWeek",  label: "This Week"  },
-    { key: "nextWeek",  label: "Next Week"  },
-    { key: "thisMonth", label: "This Month" },
+    { key: "thisWeek",  label: "This week"  },
+    { key: "nextWeek",  label: "Next week"  },
+    { key: "thisMonth", label: "This month" },
   ];
 
   // ─── Render ───────────────────────────────────────────────────────────────
   if (loading) {
     return (
       <View style={styles.loader}>
-        <ActivityIndicator size="large" color={PRIMARY} />
+        <ActivityIndicator size="large" color={T.primary} />
       </View>
     );
   }
 
   return (
-    <View style={styles.container}>
-      <ScrollView
-        showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.content}
-      >
+    <Screen edges={["top"]}>
+      <ScrollView showsVerticalScrollIndicator={false} contentContainerStyle={styles.content}>
         {/* ── Header ── */}
         <View style={styles.header}>
-          <View>
-            <Text style={styles.title}>Dashboard</Text>
-            <Text style={styles.subtitle}>Today, {today}</Text>
+          <View style={{ flex: 1 }}>
+            <Text style={font.display}>Dashboard</Text>
+            <Text style={[font.body, { marginTop: 2 }]}>Today, {today}</Text>
           </View>
-          <View style={{ flexDirection: "row", alignItems: "center", gap: 12 }}>
-            <TouchableOpacity
-              style={styles.headerIcon}
-              onPress={() => navigation.navigate("BroadcastInbox")}
-            >
-              <Ionicons name="notifications-outline" size={22} color={PRIMARY} />
-              {unreadCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>
-                    {unreadCount > 9 ? "9+" : unreadCount}
-                  </Text>
-                </View>
-              )}
-            </TouchableOpacity>
-            <TouchableOpacity onPress={() => navigation.navigate("StudentProfile")}>
-              <View style={styles.avatar}>
-                <Text style={styles.avatarText}>S</Text>
+          <TouchableOpacity
+            style={styles.bell}
+            onPress={() => navigation.navigate("BroadcastInbox")}
+            activeOpacity={0.8}
+            accessibilityLabel="Announcements"
+          >
+            <Ionicons name="notifications-outline" size={22} color={T.primary} />
+            {unreadCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unreadCount > 9 ? "9+" : unreadCount}</Text>
               </View>
-            </TouchableOpacity>
-          </View>
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => navigation.navigate("StudentProfile")} activeOpacity={0.8} accessibilityLabel="Profile">
+            <Avatar name={studentName || "Student"} initials tone="primary" size={44} />
+          </TouchableOpacity>
         </View>
 
+        {electivesPending > 0 && (
+          <TouchableOpacity activeOpacity={0.85} onPress={() => navigation.navigate("ElectiveSelection")} style={{ marginBottom: SP.md }}>
+            <Banner tone="warning" icon="library-outline" title="Choose your electives">
+              {`${electivesPending} elective group${electivesPending === 1 ? "" : "s"} waiting. Tap to choose your subjects for this semester.`}
+            </Banner>
+          </TouchableOpacity>
+        )}
+
         {/* ── Attendance Card ── */}
-        <View style={styles.mainCardContainer}>
+        <Card style={styles.mainCard}>
           {activeLecture ? (
             <AttendanceCard
               lecture={activeLecture}
@@ -722,130 +787,121 @@ const StudentHome = () => {
               userRole="student"
               markingMethod={markingMethod}
               alreadyMarked={alreadyMarked}
+              markPending={markPending}
               onStartLecture={() => {}}
               onEndLecture={() => {}}
               onMarkAttendance={handleMarkAttendance}
               onMethodSelected={() => {}}
             />
           ) : (
-            <View style={styles.emptyContainer}>
-              <View style={styles.emptyIconCircle}>
-                <Text style={{ fontSize: 32 }}>☕</Text>
+            <View style={styles.empty}>
+              <View style={styles.emptyIcon}>
+                <Ionicons name="cafe-outline" size={30} color={T.primary} />
               </View>
-              <Text style={styles.emptyTitle}>No Ongoing Lecture</Text>
-              <Text style={styles.emptySubtitle}>You are free right now.</Text>
+              <Text style={font.h3}>No ongoing lecture</Text>
+              <Text style={[font.small, { marginTop: 2 }]}>You are free right now.</Text>
             </View>
           )}
-        </View>
+        </Card>
 
         {/* ── Next Lecture ── */}
         {nextLecture && !activeLecture && (
-          <View style={styles.nextCard}>
-            <View style={styles.nextHeader}>
-              <Text style={styles.nextLabel}>Next Up</Text>
-              <View
-                style={[
-                  styles.dayBadge,
-                  { backgroundColor: nextLecture.day === today ? "#E0F7FA" : "#FFF3E0" },
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.dayText,
-                    { color: nextLecture.day === today ? "#00ACC1" : "#FF9800" },
-                  ]}
-                >
-                  {nextLecture.day === today ? "Today" : nextLecture.day}
-                </Text>
-              </View>
+          <Card style={{ marginTop: SP.md }}>
+            <View style={styles.nextTop}>
+              <Text style={font.label}>Next up</Text>
+              <Chip
+                label={nextLecture.day === today ? "Today" : nextLecture.day || ""}
+                tone={nextLecture.day === today ? "info" : "warning"}
+              />
             </View>
-            <Text style={styles.nextSubject}>{nextLecture.subject_name}</Text>
-            <View style={styles.nextTimeRow}>
-              <Text style={{ color: PRIMARY, fontWeight: "bold", marginRight: 6 }}>🕒</Text>
+            <Text style={[font.h2, { marginTop: SP.sm }]}>{nextLecture.subject_name}</Text>
+            <View style={styles.nextTime}>
+              <Ionicons name="time-outline" size={15} color={T.primary} />
               <Text style={styles.nextTimeText}>{nextLecture.start_time}</Text>
+              {!!nextLecture.room && (
+                <>
+                  <Text style={font.small}>·</Text>
+                  <Ionicons name="location-outline" size={14} color={T.muted} />
+                  <Text style={font.small}>{nextLecture.room}</Text>
+                </>
+              )}
             </View>
-          </View>
+          </Card>
         )}
 
         {/* ── ToDo Section ── */}
-        <View style={styles.todoSection}>
-          <View style={styles.todoHeader}>
-            <Text style={styles.todoTitle}>To‑Do</Text>
-            <Text style={styles.todoSubtitle}>Assignments & Quizzes</Text>
+        <View style={styles.todoHeader}>
+          <Text style={font.h1}>To-do</Text>
+          <Text style={[font.small, { marginTop: 2 }]}>Assignments and quizzes</Text>
+        </View>
+
+        <View style={styles.filterRow}>
+          {FILTER_LABELS.map((f) => {
+            const active = todoFilter === f.key;
+            return (
+              <TouchableOpacity
+                key={f.key}
+                style={[styles.filterChip, active && styles.filterChipActive]}
+                onPress={() => setTodoFilter(f.key)}
+                activeOpacity={0.75}
+              >
+                <Text style={[styles.filterText, active && { color: T.primary }]}>{f.label}</Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+
+        {todoLoading ? (
+          <View style={styles.todoLoading}>
+            <ActivityIndicator size="small" color={T.primary} />
+            <Text style={font.small}>Loading</Text>
           </View>
-
-          {/* Filter chips */}
-          <View style={styles.filterRow}>
-            {FILTER_LABELS.map((f) => {
-              const active = todoFilter === f.key;
-              return (
-                <TouchableOpacity
-                  key={f.key}
-                  style={[styles.filterChip, active && styles.filterChipActive]}
-                  onPress={() => setTodoFilter(f.key)}
-                  activeOpacity={0.75}
-                >
-                  <Text style={[styles.filterChipText, active && styles.filterChipTextActive]}>
-                    {f.label}
-                  </Text>
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-
-          {/* Items */}
-          {todoLoading ? (
-            <View style={styles.todoLoading}>
-              <ActivityIndicator size="small" color={PRIMARY} />
-              <Text style={styles.todoLoadingText}>Loading…</Text>
-            </View>
-          ) : todoItems.length === 0 ? (
-            <View style={styles.todoEmpty}>
-              <Ionicons name="checkmark-done-circle-outline" size={38} color={GREY} />
-              <Text style={styles.todoEmptyText}>Nothing due in this period!</Text>
-            </View>
-          ) : (
-            todoItems.map((item) => {
-              const cfg       = statusConfig[item.status];
-              const typeIcon  = item.type === "assignment" ? "document-text-outline" : "help-circle-outline";
-              const typeColor = item.type === "assignment" ? PRIMARY : "#8B5CF6";
-              const typeBg    = item.type === "assignment" ? PRIMARY_LIGHT : "#F5F3FF";
-
-              return (
-                <TouchableOpacity
-                  key={item.id}
-                  style={styles.todoCard}
-                  onPress={() => handleTodoPress(item)}
-                  activeOpacity={0.8}
-                >
-                  <View style={[styles.todoTypeIcon, { backgroundColor: typeBg }]}>
-                    <Ionicons name={typeIcon as any} size={18} color={typeColor} />
+        ) : todoItems.length === 0 ? (
+          <Card flat style={styles.todoEmpty}>
+            <Ionicons name="checkmark-done-circle-outline" size={36} color={T.muted} />
+            <Text style={[font.body, { marginTop: SP.sm }]}>Nothing due in this period</Text>
+          </Card>
+        ) : (
+          todoItems.map((item) => {
+            const cfg       = statusConfig[item.status];
+            const isAssign  = item.type === "assignment";
+            const typeTone: Tone = isAssign ? "primary" : "info";
+            return (
+              <TouchableOpacity
+                key={item.id}
+                onPress={() => handleTodoPress(item)}
+                activeOpacity={0.8}
+              >
+                <Card flat padded={false} style={styles.todoCard}>
+                  <View style={[styles.todoIcon, { backgroundColor: isAssign ? T.primarySoft : T.infoSoft }]}>
+                    <Ionicons
+                      name={isAssign ? "document-text-outline" : "help-circle-outline"}
+                      size={19}
+                      color={isAssign ? T.primary : T.info}
+                    />
                   </View>
-                  <View style={styles.todoContent}>
-                    <Text style={styles.todoItemTitle} numberOfLines={1}>{item.title}</Text>
-                    <Text style={styles.todoItemSubject} numberOfLines={1}>{item.subject_name}</Text>
-                    <View style={styles.todoMetaRow}>
-                      <Ionicons name="time-outline" size={11} color={GREY} />
-                      <Text style={styles.todoMetaText}>
+                  <View style={{ flex: 1, gap: 2 }}>
+                    <Text style={font.h3} numberOfLines={1}>{item.title}</Text>
+                    <Text style={font.small} numberOfLines={1}>{item.subject_name}</Text>
+                    <View style={styles.metaRow}>
+                      <Ionicons name="time-outline" size={11} color={T.muted} />
+                      <Text style={font.small} numberOfLines={1}>
                         {item.type === "quiz" && item.startDate
-                          ? `${fmtShortDate(item.startDate)} ${fmtTime(item.startDate)} – ${fmtShortDate(item.dueDate)} ${fmtTime(item.dueDate)}`
-                          : `Due: ${fmtShortDate(item.dueDate)} ${fmtTime(item.dueDate)}`}
+                          ? `${fmtShortDate(item.startDate)} ${fmtTime(item.startDate)} - ${fmtShortDate(item.dueDate)} ${fmtTime(item.dueDate)}`
+                          : `Due ${fmtShortDate(item.dueDate)} ${fmtTime(item.dueDate)}`}
                       </Text>
                     </View>
                   </View>
-                  <View style={[styles.todoBadge, { backgroundColor: cfg.bg }]}>
-                    <Ionicons name={cfg.icon as any} size={11} color={cfg.color} />
-                    <Text style={[styles.todoBadgeText, { color: cfg.color }]}>{cfg.label}</Text>
-                  </View>
-                </TouchableOpacity>
-              );
-            })
-          )}
-        </View>
+                  <Chip label={cfg.label} tone={cfg.tone} icon={cfg.icon} />
+                </Card>
+              </TouchableOpacity>
+            );
+          })
+        )}
 
         <View style={{ height: 120 }} />
       </ScrollView>
-    </View>
+    </Screen>
   );
 };
 
@@ -853,89 +909,46 @@ export default StudentHome;
 
 // ─── Styles ───────────────────────────────────────────────────────────────────
 const styles = StyleSheet.create({
-  container:   { flex: 1, backgroundColor: BG },
-  content:     { paddingHorizontal: 20, paddingTop: 60 },
-  loader:      { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: BG },
+  loader:  { flex: 1, justifyContent: "center", alignItems: "center", backgroundColor: T.bg },
+  content: { paddingHorizontal: SP.xl, paddingTop: SP.lg },
 
-  header:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 26 },
-  title:       { fontSize: 28, fontWeight: "bold", color: "black" },
-  subtitle:    { marginTop: 6, fontSize: 14, color: "grey", fontWeight: "bold" },
-  avatar:      { width: 45, height: 45, borderRadius: 50, backgroundColor: "#7C73E6", alignItems: "center", justifyContent: "center", elevation: 4 },
-  avatarText:  { color: "#FFF", fontWeight: "bold", fontSize: 16 },
-
-  headerIcon: {
-    width: 42, height: 42, borderRadius: 14,
-    backgroundColor: "#EEF2FF",
-    alignItems: "center", justifyContent: "center",
-    position: "relative", marginRight: 8,
+  header: { flexDirection: "row", alignItems: "center", gap: SP.md, marginBottom: SP.xl },
+  bell: {
+    width: 44, height: 44, borderRadius: 15,
+    backgroundColor: T.primarySoft, alignItems: "center", justifyContent: "center",
   },
   bellBadge: {
     position: "absolute", top: -4, right: -4,
-    backgroundColor: "#EF4444", borderRadius: 10,
-    minWidth: 18, height: 18,
-    alignItems: "center", justifyContent: "center",
-    paddingHorizontal: 3, borderWidth: 2, borderColor: BG,
+    backgroundColor: T.danger, borderRadius: 10, minWidth: 18, height: 18,
+    alignItems: "center", justifyContent: "center", paddingHorizontal: 3,
+    borderWidth: 2, borderColor: T.bg,
   },
   bellBadgeText: { color: "#FFF", fontSize: 9, fontWeight: "800" },
 
-  mainCardContainer: {
-    backgroundColor: "#FFFFFF", borderRadius: 30, padding: 24, marginBottom: 24,
-    shadowColor: PRIMARY, shadowOpacity: 0.08, shadowRadius: 20,
-    shadowOffset: { width: 0, height: 10 }, elevation: 5,
-    minHeight: 200, justifyContent: "center",
+  mainCard: { padding: SP.xl, minHeight: 190, justifyContent: "center", borderRadius: 26 },
+  empty:    { alignItems: "center", justifyContent: "center", paddingVertical: SP.lg },
+  emptyIcon: {
+    width: 68, height: 68, borderRadius: 24, backgroundColor: T.primarySoft,
+    alignItems: "center", justifyContent: "center", marginBottom: SP.md,
   },
-  emptyContainer:  { alignItems: "center", justifyContent: "center", paddingVertical: 20 },
-  emptyIconCircle: { width: 80, height: 80, borderRadius: 40, backgroundColor: "#F5F5F5", alignItems: "center", justifyContent: "center", marginBottom: 16 },
-  emptyTitle:      { fontWeight: "bold", color: "#424242", fontSize: 16, marginBottom: 4 },
-  emptySubtitle:   { fontSize: 12, color: "grey" },
 
-  nextCard:    { backgroundColor: "#FFFFFF", borderRadius: 30, padding: 24, marginBottom: 18, shadowColor: "black", shadowOpacity: 0.05, shadowRadius: 10, elevation: 2 },
-  nextHeader:  { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  nextLabel:   { fontSize: 16, fontWeight: "bold", color: "grey" },
-  dayBadge:    { paddingHorizontal: 10, paddingVertical: 6, borderRadius: 10 },
-  dayText:     { fontSize: 12, fontWeight: "bold" },
-  nextSubject: { fontSize: 18, fontWeight: "bold", color: "#2D3436", marginTop: 12 },
-  nextTimeRow: { flexDirection: "row", marginTop: 8, alignItems: "center" },
-  nextTimeText:{ color: PRIMARY, fontWeight: "bold", fontSize: 14 },
+  nextTop:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
+  nextTime:     { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
+  nextTimeText: { color: T.primary, fontWeight: "700", fontSize: 14 },
 
-  todoSection:  { padding: 8 },
-  todoHeader:   { marginBottom: 14 },
-  todoTitle:    { fontSize: 20, fontWeight: "800", color: "#111827" },
-  todoSubtitle: { fontSize: 13, color: GREY, marginTop: 2 },
-
-  filterRow: { flexDirection: "row", gap: 8, marginBottom: 16 },
+  todoHeader: { marginTop: SP.xxl, marginBottom: SP.md },
+  filterRow:  { flexDirection: "row", gap: SP.sm, marginBottom: SP.lg },
   filterChip: {
-    flex: 1, paddingVertical: 8, paddingHorizontal: 4,
-    borderRadius: 12, backgroundColor: "#F3F4F6",
-    alignItems: "center", justifyContent: "center",
-    borderWidth: 1.5, borderColor: "transparent",
+    flex: 1, paddingVertical: 9, borderRadius: 12, backgroundColor: T.surface,
+    alignItems: "center", borderWidth: 1.5, borderColor: T.line,
   },
-  filterChipActive:     { backgroundColor: PRIMARY_LIGHT, borderColor: PRIMARY },
-  filterChipText:       { fontSize: 12, fontWeight: "700", color: GREY },
-  filterChipTextActive: { color: PRIMARY },
+  filterChipActive: { backgroundColor: T.primarySoft, borderColor: T.primary },
+  filterText:       { fontSize: 12.5, fontWeight: "700", color: T.sub },
 
-  todoLoading:     { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 24 },
-  todoLoadingText: { fontSize: 13, color: GREY },
-  todoEmpty:       { alignItems: "center", paddingVertical: 30, gap: 10 },
-  todoEmptyText:   { fontSize: 14, color: GREY, fontWeight: "600" },
+  todoLoading: { flexDirection: "row", alignItems: "center", justifyContent: "center", gap: 8, paddingVertical: 28 },
+  todoEmpty:   { alignItems: "center", paddingVertical: 28 },
 
-  todoCard: {
-    flexDirection: "row", alignItems: "center", gap: 12,
-    backgroundColor: "#F9FAFB", borderRadius: 14,
-    padding: 12, marginBottom: 8,
-    borderWidth: 1, borderColor: "#E5E7EB",
-  },
-  todoTypeIcon:    { width: 38, height: 38, borderRadius: 10, alignItems: "center", justifyContent: "center", flexShrink: 0 },
-  todoContent:     { flex: 1, gap: 3 },
-  todoItemTitle:   { fontSize: 14, fontWeight: "700", color: "#111827" },
-  todoItemSubject: { fontSize: 12, color: GREY, fontWeight: "500" },
-  todoMetaRow:     { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 2 },
-  todoMetaText:    { fontSize: 11, color: GREY, fontWeight: "500" },
-
-  todoBadge: {
-    flexDirection: "row", alignItems: "center", gap: 4,
-    paddingHorizontal: 8, paddingVertical: 5,
-    borderRadius: 10, flexShrink: 0,
-  },
-  todoBadgeText: { fontSize: 10, fontWeight: "700" },
+  todoCard: { flexDirection: "row", alignItems: "center", gap: SP.md, padding: SP.md, marginBottom: SP.sm },
+  todoIcon: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
+  metaRow:  { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 1 },
 });

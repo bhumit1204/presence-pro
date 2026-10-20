@@ -1,492 +1,249 @@
-import React, { useState, useEffect } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  TouchableOpacity,
-  ActivityIndicator,
-  Alert,
-  ScrollView,
-} from "react-native";
-import { SafeAreaView } from "react-native-safe-area-context";
+// screens/reports/teacher/ExportReport.tsx — build a PDF of a student's report and share it.
+// Fixes: names/titles were pasted into the HTML unescaped (broke the PDF and allowed markup injection),
+// OD and late days were printed as "absent", failed sections were silently left out, emoji in the PDF.
+
+import React, { useCallback, useEffect, useState } from "react";
+import { Alert, Pressable, ScrollView, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useNavigation, useRoute } from "@react-navigation/native";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
+import { apiFetch } from "../../../services/api";
+import { Avatar, Banner, Button, Card, Checkbox, EmptyState, Header, Screen, SectionLabel, SP, T, font } from "../../../components/ui";
+import { API_URL, IconName, enc, fmtDate, num } from "./ReportShared";
 
-const PRIMARY = "#4834D4";
-const PRIMARY_SOFT = "#EEF2FF";
-const BG = "#F3F4F6";
-const WHITE = "#FFFFFF";
-const GREY = "#6B7280";
-const DARK = "#111827";
-const GREEN = "#10B981";
-const AMBER = "#F59E0B";
-const RED = "#EF4444";
-const BORDER = "#E5E7EB";
+type Section = "quiz" | "assignments" | "attendance";
 
-const API_URL = "http://10.132.90.56:5000";
+const SECTIONS: { key: Section; label: string; desc: string; icon: IconName; path: string }[] = [
+  { key: "quiz", label: "Quiz report", desc: "Scores, attempts and averages", icon: "help-circle-outline", path: "quiz" },
+  { key: "assignments", label: "Assignment report", desc: "Submissions, grades and feedback", icon: "document-text-outline", path: "assignments" },
+  { key: "attendance", label: "Attendance report", desc: "Full attendance history and totals", icon: "calendar-outline", path: "attendance" },
+];
 
-type ReportSection = "quiz" | "assignments" | "attendance";
+/** Escape anything that comes from the database before it goes into HTML. */
+const esc = (v: any): string =>
+  String(v ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+
+const pctColor = (p: number) => (p >= 75 ? "#0E9F6E" : p >= 60 ? "#C77700" : "#DC2626");
+
+async function loadSection(uid: string, teacherId: string, subjectId: string, path: string): Promise<any> {
+  const res = await apiFetch(`${API_URL}/api/reports/student/${enc(uid)}/${path}?teacher_id=${enc(teacherId)}&subject_id=${enc(subjectId)}`);
+  const text = await res.text();
+  let json: any = null;
+  try {
+    json = JSON.parse(text);
+  } catch {}
+  if (!res.ok || !json?.success) throw new Error(json?.error || `status ${res.status}`);
+  return json;
+}
 
 export default function ExportReport() {
   const navigation = useNavigation<any>();
-  const route = useRoute<any>();
-  const { student, subject, teacher_id } = route.params;
-  const subjectId = (subject as any)?.subject_id || "";
+  const params = useRoute<any>().params ?? {};
+  const { student, subject, teacher_id } = params;
+  const subjectId: string = subject?.subject_id || "";
 
-  const [selectedSections, setSelectedSections] = useState<ReportSection[]>(["quiz", "assignments", "attendance"]);
+  const [selected, setSelected] = useState<Section[]>(["quiz", "assignments", "attendance"]);
+  const [data, setData] = useState<Partial<Record<Section, any>>>({});
+  const [failed, setFailed] = useState<Section[]>([]);
+  const [loading, setLoading] = useState(true);
   const [generating, setGenerating] = useState(false);
-  const [quizData, setQuizData] = useState<any>(null);
-  const [assignData, setAssignData] = useState<any>(null);
-  const [attendanceData, setAttendanceData] = useState<any>(null);
-  const [loadingData, setLoadingData] = useState(true);
 
-  useEffect(() => { fetchAllData(); }, []);
-
-  const fetchAllData = async () => {
-    try {
-      setLoadingData(true);
-      const [qRes, aRes, atRes] = await Promise.all([
-        fetch(`${API_URL}/api/reports/student/${student.uid}/quiz?teacher_id=${teacher_id}&subject_id=${subjectId}`),
-        fetch(`${API_URL}/api/reports/student/${student.uid}/assignments?teacher_id=${teacher_id}&subject_id=${subjectId}`),
-        fetch(`${API_URL}/api/reports/student/${student.uid}/attendance?teacher_id=${teacher_id}&subject_id=${subjectId}`),
-      ]);
-      const [q, a, at] = await Promise.all([qRes.json(), aRes.json(), atRes.json()]);
-      if (q.success) setQuizData(q);
-      if (a.success) setAssignData(a);
-      if (at.success) setAttendanceData(at);
-    } catch (e) {
-      console.log("EXPORT FETCH:", e);
-    } finally {
-      setLoadingData(false);
-    }
-  };
-
-  const toggleSection = (section: ReportSection) => {
-    setSelectedSections((prev) =>
-      prev.includes(section) ? prev.filter((s) => s !== section) : [...prev, section]
-    );
-  };
-
-  const generatePDF = async () => {
-    if (selectedSections.length === 0) {
-      Alert.alert("Select Sections", "Please select at least one section to export.");
+  const fetchAll = useCallback(async () => {
+    if (!student?.uid || !teacher_id || !subjectId) {
+      setLoading(false);
       return;
     }
+    setLoading(true);
+    const results = await Promise.allSettled(SECTIONS.map((s) => loadSection(student.uid, teacher_id, subjectId, s.path)));
+    const next: Partial<Record<Section, any>> = {};
+    const bad: Section[] = [];
+    results.forEach((r, i) => (r.status === "fulfilled" ? (next[SECTIONS[i].key] = r.value) : bad.push(SECTIONS[i].key)));
+    setData(next);
+    setFailed(bad);
+    setSelected((cur) => cur.filter((k) => !bad.includes(k)));
+    setLoading(false);
+  }, [student?.uid, teacher_id, subjectId]);
+
+  useEffect(() => {
+    fetchAll();
+  }, [fetchAll]);
+
+  const toggle = (k: Section) => setSelected((cur) => (cur.includes(k) ? cur.filter((x) => x !== k) : [...cur, k]));
+
+  const generate = async () => {
+    if (generating) return;
+    if (selected.length === 0) return Alert.alert("Choose a section", "Select at least one section to export.");
+    setGenerating(true);
     try {
-      setGenerating(true);
-      const html = buildHTML();
-      const { uri } = await Print.printToFileAsync({ html, base64: false });
-      await Sharing.shareAsync(uri, {
-        mimeType: "application/pdf",
-        dialogTitle: `${student.name} - Report`,
-        UTI: "com.adobe.pdf",
-      });
-    } catch (e) {
-      Alert.alert("Error", "Failed to generate PDF. Please try again.");
-      console.log("PDF ERROR:", e);
+      if (!(await Sharing.isAvailableAsync())) {
+        Alert.alert("Sharing unavailable", "This device cannot share files.");
+        return;
+      }
+      const { uri } = await Print.printToFileAsync({ html: buildHTML(), base64: false });
+      await Sharing.shareAsync(uri, { mimeType: "application/pdf", dialogTitle: `${student?.name ?? "Student"} - report`, UTI: "com.adobe.pdf" });
+    } catch {
+      Alert.alert("Could not create the PDF", "Please try again.");
     } finally {
       setGenerating(false);
     }
   };
 
+  /* ───────────── PDF ───────────── */
+  const buildQuiz = (): string => {
+    const { summary = {}, quizzes = [] } = data.quiz ?? {};
+    const rows = quizzes
+      .map((q: any) => {
+        const cls = q.status === "attempted" ? "green" : q.status === "missed" ? "red" : "amber";
+        const lbl = q.status === "attempted" ? "Attempted" : q.status === "missed" ? "Missed" : "Upcoming";
+        return `<tr><td>${esc(q.title)}</td><td>${esc(fmtDate(q.scheduled_start))}</td><td>${esc(q.question_count ?? "-")}</td><td>${esc(q.total_marks ?? "-")}</td><td>${q.submission ? esc(q.submission.marks_obtained) : "-"}</td><td>${q.submission && q.submission.percentage != null ? esc(q.submission.percentage) + "%" : "-"}</td><td><span class="badge ${cls}">${lbl}</span></td></tr>`;
+      })
+      .join("");
+    return `<div class="section"><div class="stitle">Quiz performance</div>
+      <div class="chips">${chip(`${num(summary.attempted)}/${num(summary.total_quizzes)}`, "Attempted", "primary")}${chip(num(summary.skipped), "Missed", "amber")}${chip(summary.avg_percentage != null ? summary.avg_percentage + "%" : "-", "Avg score", "green")}</div>
+      <table><thead><tr><th>Quiz</th><th>Date</th><th>Questions</th><th>Total</th><th>Scored</th><th>Score</th><th>Status</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No quizzes yet.</td></tr>`}</tbody></table></div>`;
+  };
+
+  const buildAssignments = (): string => {
+    const { summary = {}, assignments = [] } = data.assignments ?? {};
+    const rows = assignments
+      .map((a: any) => {
+        const st = a.display_status;
+        const cls = st === "graded" ? "green" : st === "submitted" ? "blue" : st === "late" ? "amber" : st === "missed" ? "red" : "grey";
+        return `<tr><td>${esc(a.title)}</td><td>${esc(fmtDate(a.due_date))}</td><td>${esc(a.marks ?? "-")}</td><td>${a.submission?.marks_obtained != null ? esc(a.submission.marks_obtained) : "-"}</td><td>${a.submission?.submitted_at ? esc(fmtDate(a.submission.submitted_at)) : "-"}</td><td><span class="badge ${cls}">${esc(st)}</span></td><td>${esc(a.submission?.feedback || "-")}</td></tr>`;
+      })
+      .join("");
+    return `<div class="section"><div class="stitle">Assignments</div>
+      <div class="chips">${chip(`${num(summary.submitted)}/${num(summary.total)}`, "Submitted", "primary")}${chip(num(summary.skipped), "Skipped", "red")}${chip(num(summary.late), "Late", "amber")}${chip(summary.avg_marks != null ? summary.avg_marks : "-", "Avg marks", "green")}</div>
+      <table><thead><tr><th>Assignment</th><th>Due</th><th>Total</th><th>Scored</th><th>Submitted</th><th>Status</th><th>Feedback</th></tr></thead><tbody>${rows || `<tr><td colspan="7">No assignments yet.</td></tr>`}</tbody></table></div>`;
+  };
+
+  const buildAttendance = (): string => {
+    const { summary = {}, records = [] } = data.attendance ?? {};
+    const p = summary.percentage ?? 0;
+    const note = summary.percentage == null ? "No attendance recorded yet." : p >= 75 ? "Attendance is satisfactory (75% or above)." : p >= 60 ? "Attendance is below 75%. Improvement needed." : "Critical attendance. Immediate action required.";
+    const rows = records
+      .map((r: any) => {
+        const cls = r.status === "present" ? "green" : r.status === "od" ? "blue" : r.status === "late" ? "amber" : "red";
+        const lbl = r.status === "od" ? "On duty" : r.status;
+        return `<tr><td>${esc(fmtDate(r.date, true))}</td><td><span class="badge ${cls}">${esc(lbl)}</span></td><td>${r.marked_by === "manual" ? "Manual" : "Automatic"}</td><td>${esc(r.note || "")}</td></tr>`;
+      })
+      .join("");
+    return `<div class="section"><div class="stitle">Attendance</div>
+      <div class="chips"><div class="chip"><div class="num" style="color:${pctColor(p)}">${summary.percentage != null ? esc(p) + "%" : "-"}</div><div class="lbl">Attendance</div></div>${chip(num(summary.present), "Present", "green")}${chip(num(summary.absent), "Absent", "red")}${num(summary.late) > 0 ? chip(num(summary.late), "Late", "amber") : ""}${num(summary.od) > 0 ? chip(num(summary.od), "On duty", "blue") : ""}${chip(num(summary.total_lectures), "Classes", "primary")}</div>
+      <div class="note" style="color:${pctColor(p)}">${note}</div>
+      <table><thead><tr><th>Date</th><th>Status</th><th>Entered</th><th>Note</th></tr></thead><tbody>${rows || `<tr><td colspan="4">No records.</td></tr>`}</tbody></table></div>`;
+  };
+
+  const chip = (v: any, l: string, c: string) => `<div class="chip ${c}"><div class="num">${esc(v)}</div><div class="lbl">${esc(l)}</div></div>`;
+
   const buildHTML = (): string => {
-    const today = new Date().toLocaleDateString("en-IN", {
-      day: "numeric", month: "long", year: "numeric",
-    });
-
-    const quizHTML = selectedSections.includes("quiz") && quizData ? buildQuizSection() : "";
-    const assignHTML = selectedSections.includes("assignments") && assignData ? buildAssignSection() : "";
-    const attHTML = selectedSections.includes("attendance") && attendanceData ? buildAttendanceSection() : "";
-
-    return `
-<!DOCTYPE html>
-<html>
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Student Report — ${student.name}</title>
-  <style>
-    * { margin: 0; padding: 0; box-sizing: border-box; }
-    body { font-family: 'Helvetica Neue', Helvetica, Arial, sans-serif; color: #111827; background: #fff; font-size: 13px; }
-    
-    /* Header */
-    .report-header { background: linear-gradient(135deg, #4834D4 0%, #7C3AED 100%); color: white; padding: 36px 40px; }
-    .report-title { font-size: 26px; font-weight: 800; margin-bottom: 6px; letter-spacing: -0.5px; }
-    .report-subtitle { font-size: 13px; opacity: 0.85; }
-    .report-meta { margin-top: 20px; display: flex; gap: 28px; }
-    .meta-item { }
-    .meta-label { font-size: 10px; font-weight: 700; opacity: 0.7; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 3px; }
-    .meta-value { font-size: 14px; font-weight: 700; }
-    
-    /* Body */
-    .body { padding: 32px 40px; }
-    
-    /* Section */
-    .section { margin-bottom: 36px; }
-    .section-title { font-size: 16px; font-weight: 800; color: #111827; margin-bottom: 16px; padding-bottom: 8px; border-bottom: 2px solid #4834D4; display: flex; align-items: center; gap: 8px; }
-    .section-title-dot { width: 8px; height: 8px; background: #4834D4; border-radius: 50%; display: inline-block; }
-    
-    /* Summary Chips */
-    .summary-grid { display: flex; gap: 12px; margin-bottom: 20px; flex-wrap: wrap; }
-    .summary-chip { flex: 1; min-width: 80px; background: #F3F4F6; border-radius: 12px; padding: 14px 16px; text-align: center; }
-    .chip-num { font-size: 22px; font-weight: 800; }
-    .chip-label { font-size: 10px; font-weight: 700; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
-    .chip-primary { background: #EEF2FF; color: #4834D4; }
-    .chip-green { background: #F0FDF4; color: #10B981; }
-    .chip-amber { background: #FEF3C7; color: #F59E0B; }
-    .chip-red { background: #FEF2F2; color: #EF4444; }
-    
-    /* Table */
-    table { width: 100%; border-collapse: collapse; margin-top: 8px; }
-    thead { background: #F9FAFB; }
-    th { padding: 10px 14px; text-align: left; font-size: 11px; font-weight: 700; color: #6B7280; text-transform: uppercase; letter-spacing: 0.5px; border-bottom: 1px solid #E5E7EB; }
-    td { padding: 11px 14px; font-size: 13px; color: #374151; border-bottom: 1px solid #F3F4F6; }
-    tr:last-child td { border-bottom: none; }
-    tr:nth-child(even) { background: #FAFAFA; }
-    
-    /* Status Badges */
-    .badge { display: inline-block; padding: 3px 10px; border-radius: 20px; font-size: 10px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.5px; }
-    .badge-green { background: #D1FAE5; color: #065F46; }
-    .badge-amber { background: #FEF3C7; color: #92400E; }
-    .badge-red { background: #FEE2E2; color: #991B1B; }
-    .badge-blue { background: #EEF2FF; color: #4834D4; }
-    .badge-grey { background: #F3F4F6; color: #4B5563; }
-    
-    /* Attendance Bar */
-    .att-bar-wrap { width: 200px; background: #E5E7EB; border-radius: 4px; height: 8px; overflow: hidden; display: inline-block; vertical-align: middle; margin-left: 10px; }
-    .att-bar-fill { height: 100%; border-radius: 4px; }
-    
-    /* Footer */
-    .footer { margin-top: 48px; padding-top: 20px; border-top: 1px solid #E5E7EB; display: flex; justify-content: space-between; color: #9CA3AF; font-size: 11px; }
-    
-    @media print {
-      body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
-    }
-  </style>
-</head>
-<body>
-  <!-- HEADER -->
-  <div class="report-header">
-    <div class="report-title">📋 Student Academic Report</div>
-    <div class="report-subtitle">Generated on ${today}</div>
-    <div class="report-meta">
-      <div class="meta-item">
-        <div class="meta-label">Student Name</div>
-        <div class="meta-value">${student.name}</div>
-      </div>
-      ${student.roll_no ? `<div class="meta-item"><div class="meta-label">Roll No</div><div class="meta-value">${student.roll_no}</div></div>` : ""}
-      <div class="meta-item">
-        <div class="meta-label">Subject</div>
-        <div class="meta-value">${subject?.subject_name || "—"}</div>
-      </div>
-      ${student.course_name ? `<div class="meta-item"><div class="meta-label">Course</div><div class="meta-value">${student.course_name}</div></div>` : ""}
-      ${student.semester ? `<div class="meta-item"><div class="meta-label">Semester</div><div class="meta-value">${student.semester}</div></div>` : ""}
-    </div>
-  </div>
-
-  <div class="body">
-    ${quizHTML}
-    ${assignHTML}
-    ${attHTML}
-
-    <!-- FOOTER -->
-    <div class="footer">
-      <span>PresencePro Academic Report System</span>
-      <span>Confidential — For Institutional Use Only</span>
-    </div>
-  </div>
-</body>
-</html>`;
+    const today = new Date().toLocaleDateString("en-IN", { day: "numeric", month: "long", year: "numeric" });
+    const meta = (l: string, v: any) => (v ? `<div class="meta"><div class="ml">${esc(l)}</div><div class="mv">${esc(v)}</div></div>` : "");
+    return `<!DOCTYPE html><html><head><meta charset="UTF-8"><title>Student report</title><style>
+      *{margin:0;padding:0;box-sizing:border-box}
+      body{font-family:Helvetica,Arial,sans-serif;color:#0F172A;font-size:13px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .head{background:#4834D4;color:#fff;padding:34px 40px}
+      .title{font-size:26px;font-weight:800;margin-bottom:6px}
+      .sub{font-size:13px;opacity:.85}
+      .metas{margin-top:20px;display:flex;gap:28px;flex-wrap:wrap}
+      .ml{font-size:10px;font-weight:700;opacity:.75;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px}
+      .mv{font-size:14px;font-weight:700}
+      .body{padding:30px 40px}
+      .section{margin-bottom:34px}
+      .stitle{font-size:16px;font-weight:800;margin-bottom:14px;padding-bottom:8px;border-bottom:2px solid #4834D4}
+      .chips{display:flex;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+      .chip{flex:1;min-width:80px;background:#F1F5F9;border-radius:12px;padding:12px 14px;text-align:center}
+      .chip .num{font-size:21px;font-weight:800}.chip .lbl{font-size:10px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;margin-top:4px}
+      .chip.primary{background:#EEF0FF;color:#4834D4}.chip.green{background:#DCF5EA;color:#0E9F6E}.chip.amber{background:#FFF3D6;color:#C77700}.chip.red{background:#FDE8E8;color:#DC2626}.chip.blue{background:#E3EDFF;color:#2563EB}
+      .note{padding:12px 14px;background:#F8FAFC;border-radius:10px;font-weight:700;margin-bottom:14px}
+      table{width:100%;border-collapse:collapse}
+      th{padding:9px 12px;text-align:left;font-size:11px;font-weight:700;color:#64748B;text-transform:uppercase;letter-spacing:.5px;border-bottom:1px solid #E5E8F0;background:#F8FAFC}
+      td{padding:10px 12px;border-bottom:1px solid #F0F2F7;color:#334155}
+      tr:nth-child(even) td{background:#FAFBFD}
+      .badge{display:inline-block;padding:3px 10px;border-radius:20px;font-size:10px;font-weight:700;text-transform:uppercase}
+      .badge.green{background:#DCF5EA;color:#065F46}.badge.amber{background:#FFF3D6;color:#92400E}.badge.red{background:#FDE8E8;color:#991B1B}.badge.blue{background:#E3EDFF;color:#1E40AF}.badge.grey{background:#F0F2F7;color:#475569}
+      .foot{margin-top:44px;padding-top:18px;border-top:1px solid #E5E8F0;display:flex;justify-content:space-between;color:#94A3B8;font-size:11px}
+    </style></head><body>
+      <div class="head"><div class="title">Student academic report</div><div class="sub">Generated on ${esc(today)}</div>
+        <div class="metas">${meta("Student", student?.name)}${meta("Roll no", student?.roll_no)}${meta("Subject", subject?.subject_name)}${meta("Course", student?.course_name)}${meta("Semester", student?.semester)}</div></div>
+      <div class="body">
+        ${selected.includes("quiz") && data.quiz ? buildQuiz() : ""}
+        ${selected.includes("assignments") && data.assignments ? buildAssignments() : ""}
+        ${selected.includes("attendance") && data.attendance ? buildAttendance() : ""}
+        <div class="foot"><span>PresencePro</span><span>Confidential. For institutional use only.</span></div>
+      </div></body></html>`;
   };
 
-  const buildQuizSection = (): string => {
-    const { summary, quizzes } = quizData;
-    const rows = quizzes.map((q: any) => `
-      <tr>
-        <td>${q.title}</td>
-        <td>${new Date(q.scheduled_start).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</td>
-        <td>${q.question_count}</td>
-        <td>${q.total_marks}</td>
-        <td>${q.submission ? q.submission.marks_obtained : "—"}</td>
-        <td>${q.submission ? `${q.submission.percentage}%` : "—"}</td>
-        <td><span class="badge ${q.status === "attempted" ? "badge-green" : q.status === "missed" ? "badge-red" : "badge-amber"}">${q.status === "attempted" ? "Attempted" : q.status === "missed" ? "Missed" : "Upcoming"}</span></td>
-      </tr>
-    `).join("");
-
-    return `
-    <div class="section">
-      <div class="section-title"><span class="section-title-dot"></span> Quiz Performance</div>
-      <div class="summary-grid">
-        <div class="summary-chip chip-primary"><div class="chip-num">${summary.attempted}/${summary.total_quizzes}</div><div class="chip-label">Attempted</div></div>
-        <div class="summary-chip chip-amber"><div class="chip-num">${summary.skipped}</div><div class="chip-label">Missed</div></div>
-        <div class="summary-chip chip-green"><div class="chip-num">${summary.avg_percentage != null ? summary.avg_percentage + "%" : "—"}</div><div class="chip-label">Avg Score</div></div>
-      </div>
-      <table>
-        <thead>
-          <tr><th>Quiz Title</th><th>Date</th><th>Questions</th><th>Total Marks</th><th>Scored</th><th>Percentage</th><th>Status</th></tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
-  };
-
-  const buildAssignSection = (): string => {
-    const { summary, assignments } = assignData;
-    const rows = assignments.map((a: any) => `
-      <tr>
-        <td>${a.title}</td>
-        <td>${new Date(a.due_date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" })}</td>
-        <td>${a.marks}</td>
-        <td>${a.submission?.marks_obtained != null ? a.submission.marks_obtained : "—"}</td>
-        <td>${a.submission?.submitted_at ? new Date(a.submission.submitted_at).toLocaleDateString("en-IN") : "—"}</td>
-        <td><span class="badge ${
-          a.display_status === "graded" ? "badge-green" :
-          a.display_status === "submitted" ? "badge-blue" :
-          a.display_status === "late" ? "badge-amber" :
-          a.display_status === "missed" ? "badge-red" : "badge-grey"
-        }">${a.display_status}</span></td>
-        <td>${a.submission?.feedback || "—"}</td>
-      </tr>
-    `).join("");
-
-    return `
-    <div class="section">
-      <div class="section-title"><span class="section-title-dot"></span> Assignment Report</div>
-      <div class="summary-grid">
-        <div class="summary-chip chip-primary"><div class="chip-num">${summary.submitted}/${summary.total}</div><div class="chip-label">Submitted</div></div>
-        <div class="summary-chip chip-amber"><div class="chip-num">${summary.skipped}</div><div class="chip-label">Skipped</div></div>
-        <div class="summary-chip chip-amber"><div class="chip-num">${summary.late}</div><div class="chip-label">Late</div></div>
-        <div class="summary-chip chip-green"><div class="chip-num">${summary.avg_marks != null ? summary.avg_marks : "—"}</div><div class="chip-label">Avg Marks</div></div>
-      </div>
-      <table>
-        <thead>
-          <tr><th>Assignment Title</th><th>Due Date</th><th>Total Marks</th><th>Scored</th><th>Submitted On</th><th>Status</th><th>Feedback</th></tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
-  };
-
-  const buildAttendanceSection = (): string => {
-    const { summary, records } = attendanceData;
-    const pct = summary.percentage ?? 0;
-    const pctColor = pct >= 75 ? "#10B981" : pct >= 50 ? "#F59E0B" : "#EF4444";
-
-    const rows = records.map((r: any) => `
-      <tr>
-        <td>${new Date(r.date).toLocaleDateString("en-IN", { weekday: "short", day: "numeric", month: "short", year: "numeric" })}</td>
-        <td><span class="badge ${r.status === "present" ? "badge-green" : r.status === "late" ? "badge-amber" : "badge-red"}">${r.status}</span></td>
-        <td>${r.marked_by === "manual" ? "✏️ Manual" : "Auto"}</td>
-      </tr>
-    `).join("");
-
-    return `
-    <div class="section">
-      <div class="section-title"><span class="section-title-dot"></span> Attendance Report</div>
-      <div class="summary-grid">
-        <div class="summary-chip" style="background:#F3F4F6">
-          <div class="chip-num" style="color:${pctColor}">${pct}%</div>
-          <div class="chip-label">Attendance</div>
-        </div>
-        <div class="summary-chip chip-green"><div class="chip-num">${summary.present}</div><div class="chip-label">Present</div></div>
-        <div class="summary-chip chip-red"><div class="chip-num">${summary.absent}</div><div class="chip-label">Absent</div></div>
-        <div class="summary-chip chip-amber"><div class="chip-num">${summary.late ?? 0}</div><div class="chip-label">Late</div></div>
-        <div class="summary-chip chip-primary"><div class="chip-num">${summary.total_lectures}</div><div class="chip-label">Total Lectures</div></div>
-      </div>
-      <div style="margin-bottom:16px; padding:14px; background:#F9FAFB; border-radius:10px; font-size:13px; color:${pctColor}; font-weight:700;">
-        ${pct >= 75 ? "✓ Attendance is satisfactory (≥75%)" : pct >= 50 ? "⚠ Attendance is below 75% — improvement needed" : "✗ Critical attendance — immediate action required"}
-      </div>
-      <table>
-        <thead>
-          <tr><th>Date</th><th>Status</th><th>Marked By</th></tr>
-        </thead>
-        <tbody>${rows}</tbody>
-      </table>
-    </div>`;
-  };
-
-  const SECTIONS = [
-    { key: "quiz" as ReportSection, label: "Quiz Report", icon: "help-circle-outline", desc: "Quiz scores, attempts, averages" },
-    { key: "assignments" as ReportSection, label: "Assignment Report", icon: "document-text-outline", desc: "Submissions, grades, feedback" },
-    { key: "attendance" as ReportSection, label: "Attendance Report", icon: "calendar-outline", desc: "Full attendance history & stats" },
-  ];
+  if (!student?.uid || !teacher_id || !subjectId) {
+    return (
+      <Screen>
+        <Header title="Export report" onBack={() => navigation.goBack()} />
+        <EmptyState icon="alert-circle-outline" title="Student not selected" text="Go back and choose a student again." />
+      </Screen>
+    );
+  }
 
   return (
-    <SafeAreaView style={S.safe} edges={["top"]}>
-      <View style={S.header}>
-        <TouchableOpacity style={S.backBtn} onPress={() => navigation.goBack()}>
-          <Ionicons name="arrow-back" size={20} color={DARK} />
-        </TouchableOpacity>
-        <Text style={S.headerTitle}>Export PDF Report</Text>
-        <View style={{ width: 36 }} />
-      </View>
-
-      <ScrollView contentContainerStyle={S.scroll} showsVerticalScrollIndicator={false}>
-        {/* Student Info */}
-        <View style={S.studentCard}>
-          <View style={S.avatar}>
-            <Text style={S.avatarText}>{student.name?.charAt(0)}</Text>
-          </View>
-          <View>
-            <Text style={S.studentName}>{student.name}</Text>
-            <Text style={S.studentMeta}>
-              {subject?.subject_name}
-              {student.roll_no ? ` · Roll: ${student.roll_no}` : ""}
-            </Text>
-          </View>
-        </View>
-
-        <Text style={S.sectionTitle}>Select Sections to Export</Text>
-
-        {SECTIONS.map((sec) => (
-          <TouchableOpacity
-            key={sec.key}
-            style={[S.sectionCard, selectedSections.includes(sec.key) && S.sectionCardActive]}
-            onPress={() => toggleSection(sec.key)}
-            activeOpacity={0.8}
-          >
-            <View style={[S.sectionIcon, selectedSections.includes(sec.key) && { backgroundColor: PRIMARY_SOFT }]}>
-              <Ionicons name={sec.icon as any} size={22} color={selectedSections.includes(sec.key) ? PRIMARY : GREY} />
-            </View>
-            <View style={S.sectionInfo}>
-              <Text style={[S.sectionLabel, selectedSections.includes(sec.key) && { color: PRIMARY }]}>
-                {sec.label}
+    <Screen>
+      <Header title="Export PDF report" onBack={() => navigation.goBack()} />
+      <ScrollView contentContainerStyle={{ padding: SP.lg, paddingBottom: 50, gap: SP.md }} showsVerticalScrollIndicator={false}>
+        <Card>
+          <View style={{ flexDirection: "row", alignItems: "center", gap: SP.md }}>
+            <Avatar name={student.name} tone="primary" size={48} />
+            <View style={{ flex: 1 }}>
+              <Text style={font.h2} numberOfLines={1}>
+                {student.name}
               </Text>
-              <Text style={S.sectionDesc}>{sec.desc}</Text>
+              <Text style={[font.small, { marginTop: 2 }]} numberOfLines={1}>
+                {subject?.subject_name}
+                {student.roll_no ? ` - Roll ${student.roll_no}` : ""}
+              </Text>
             </View>
-            <View style={[S.checkbox, selectedSections.includes(sec.key) && S.checkboxActive]}>
-              {selectedSections.includes(sec.key) && (
-                <Ionicons name="checkmark" size={14} color={WHITE} />
-              )}
-            </View>
-          </TouchableOpacity>
-        ))}
+          </View>
+        </Card>
 
-        <TouchableOpacity
-          style={[S.exportBtn, (generating || loadingData || selectedSections.length === 0) && { opacity: 0.6 }]}
-          onPress={generatePDF}
-          disabled={generating || loadingData || selectedSections.length === 0}
-        >
-          {generating || loadingData ? (
-            <ActivityIndicator size="small" color={WHITE} />
-          ) : (
-            <>
-              <Ionicons name="document-outline" size={20} color={WHITE} />
-              <Text style={S.exportBtnText}>Generate & Share PDF</Text>
-            </>
-          )}
-        </TouchableOpacity>
+        {failed.length > 0 && (
+          <Banner tone="warning" title="Some sections could not be loaded">
+            {failed.map((k) => SECTIONS.find((s) => s.key === k)?.label).join(", ")}. Check your connection and retry.
+            <Text onPress={fetchAll} style={{ fontWeight: "800", color: T.warning }}>
+              {"  "}Retry
+            </Text>
+          </Banner>
+        )}
 
-        <View style={{ height: 40 }} />
+        <SectionLabel style={{ marginTop: SP.sm, marginBottom: 0 }}>Sections to include</SectionLabel>
+
+        {SECTIONS.map((s) => {
+          const on = selected.includes(s.key);
+          const bad = failed.includes(s.key);
+          return (
+            <Pressable key={s.key} disabled={bad || loading} onPress={() => toggle(s.key)} accessibilityRole="checkbox" accessibilityState={{ checked: on, disabled: bad }} style={({ pressed }) => [pressed && { opacity: 0.8 }, bad && { opacity: 0.45 }]}>
+              <Card style={on ? { borderWidth: 1.5, borderColor: T.primary } : undefined}>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: SP.md }}>
+                  <View style={{ width: 44, height: 44, borderRadius: 13, backgroundColor: on ? T.primarySoft : T.lineSoft, alignItems: "center", justifyContent: "center" }}>
+                    <Ionicons name={s.icon} size={22} color={on ? T.primary : T.sub} />
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={[font.h3, on && { color: T.primary }]}>{s.label}</Text>
+                    <Text style={[font.small, { marginTop: 2 }]}>{bad ? "Could not load" : s.desc}</Text>
+                  </View>
+                  <View pointerEvents="none">
+                    <Checkbox checked={on} />
+                  </View>
+                </View>
+              </Card>
+            </Pressable>
+          );
+        })}
+
+        <Button label={loading ? "Loading data" : "Create and share PDF"} icon="document-outline" onPress={generate} loading={generating || loading} disabled={selected.length === 0} style={{ marginTop: SP.sm }} />
       </ScrollView>
-    </SafeAreaView>
+    </Screen>
   );
 }
-
-const S = StyleSheet.create({
-  safe: { flex: 1, backgroundColor: BG },
-  scroll: { padding: 20 },
-
-  header: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    backgroundColor: WHITE,
-    borderBottomWidth: 1,
-    borderBottomColor: BORDER,
-  },
-  backBtn: {
-    width: 36,
-    height: 36,
-    borderRadius: 10,
-    backgroundColor: BG,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  headerTitle: { fontSize: 17, fontWeight: "800", color: DARK },
-
-  studentCard: {
-    backgroundColor: WHITE,
-    borderRadius: 16,
-    padding: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    borderWidth: 1,
-    borderColor: BORDER,
-    marginBottom: 24,
-    elevation: 1,
-  },
-  avatar: {
-    width: 48,
-    height: 48,
-    borderRadius: 14,
-    backgroundColor: PRIMARY_SOFT,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  avatarText: { fontSize: 20, fontWeight: "800", color: PRIMARY },
-  studentName: { fontSize: 16, fontWeight: "800", color: DARK },
-  studentMeta: { fontSize: 12, color: GREY, marginTop: 2 },
-
-  sectionTitle: {
-    fontSize: 13,
-    fontWeight: "800",
-    color: GREY,
-    textTransform: "uppercase",
-    letterSpacing: 1,
-    marginBottom: 12,
-  },
-
-  sectionCard: {
-    backgroundColor: WHITE,
-    borderRadius: 16,
-    padding: 16,
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 14,
-    borderWidth: 1.5,
-    borderColor: BORDER,
-    marginBottom: 10,
-    elevation: 1,
-  },
-  sectionCardActive: { borderColor: PRIMARY, backgroundColor: "#FAFBFF" },
-  sectionIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 12,
-    backgroundColor: BG,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  sectionInfo: { flex: 1 },
-  sectionLabel: { fontSize: 14, fontWeight: "700", color: DARK },
-  sectionDesc: { fontSize: 12, color: GREY, marginTop: 2 },
-  checkbox: {
-    width: 22,
-    height: 22,
-    borderRadius: 6,
-    borderWidth: 2,
-    borderColor: BORDER,
-    justifyContent: "center",
-    alignItems: "center",
-  },
-  checkboxActive: { backgroundColor: PRIMARY, borderColor: PRIMARY },
-
-  exportBtn: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    backgroundColor: PRIMARY,
-    borderRadius: 50,
-    paddingVertical: 18,
-    marginTop: 16,
-    elevation: 3,
-  },
-  exportBtnText: { color: WHITE, fontWeight: "800", fontSize: 16 },
-});

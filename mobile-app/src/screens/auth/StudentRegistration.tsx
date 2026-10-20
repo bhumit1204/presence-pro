@@ -1,601 +1,423 @@
-import React, { useState } from "react";
-import {
-  View,
-  Text,
-  TextInput,
-  TouchableOpacity,
-  StyleSheet,
-  ScrollView,
-  Alert,
-} from "react-native";
+// src/screens/auth/StudentRegistration.tsx
+// 3 steps: college -> personal -> academic. Endpoint and payload are unchanged.
+// The server must still enforce every rule (role, college, e-mail uniqueness, college_name from the AISHE code).
+
+import React, { useEffect, useRef, useState } from "react";
+import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Ionicons } from "@expo/vector-icons";
 import { useNavigation } from "@react-navigation/native";
-
-const PRIMARY = "#4834D4";
-const BG = "#F5F6FA";
-const CARD = "#FFFFFF";
-const TEXT = "#111827";
-const SUBTEXT = "#6B7280";
-const BORDER = "#E5E7EB";
-
-// const API_URL = "http://10.132.90.56:5000";
-const API_URL = "http://10.132.90.56:5000";
-
+import { API_BASE } from "../../services/api";
+import {
+  cleanAishe,
+  cleanPhone,
+  cleanRoll,
+  cleanText,
+  fetchJson,
+  isAlreadyRegistered,
+  isValidName,
+  validatePassword,
+} from "../../utils/validation";
+import { Banner, Button, Card, Header, ResultView, Screen, SelectField, SP, Steps, T, TextField, font } from "../../components/ui";
 
 const YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year"];
-const SEM_MAP: any = {
+const SEM_MAP: Record<string, string[]> = {
   "1st Year": ["Sem 1", "Sem 2"],
   "2nd Year": ["Sem 3", "Sem 4"],
   "3rd Year": ["Sem 5", "Sem 6"],
   "4th Year": ["Sem 7", "Sem 8"],
 };
 
+const STEPS = [
+  { label: "College", icon: "business" as const },
+  { label: "You", icon: "person" as const },
+  { label: "Academic", icon: "school" as const },
+];
+
+type Errs = Partial<Record<"aishe" | "first" | "last" | "roll" | "phone" | "course" | "year" | "sem", string>>;
+
 export default function StudentRegistration({ route }: any) {
   const navigation = useNavigation<any>();
-  const { email, password, role } = route.params;
+  const { email, password, otp_token } = route?.params || {};
 
-  const [step, setStep] = useState(1);
+  const [step, setStep] = useState(0);
   const [verifying, setVerifying] = useState(false);
-  const [searchCourse, setSearchCourse] = useState("");
-  const [showCourseList, setShowCourseList] = useState(false);
-  const [availableSemesters, setAvailableSemesters] = useState<string[]>([]);
+  const [submitting, setSubmitting] = useState(false);
   const [aisheCode, setAisheCode] = useState("");
-  const [verifiedCollege, setVerifiedCollege] = useState<any>(null);
+  const [college, setCollege] = useState<any>(null);
   const [courses, setCourses] = useState<any[]>([]);
   const [firstName, setFirstName] = useState("");
   const [lastName, setLastName] = useState("");
   const [rollNo, setRollNo] = useState("");
   const [phone, setPhone] = useState("");
-  const [selectedCourse, setSelectedCourse] = useState("");
-  const [semester, setSemester] = useState("");
+  const [course, setCourse] = useState("");
   const [year, setYear] = useState("");
-  const [showYear, setShowYear] = useState(false);
-  const [showSem, setShowSem] = useState(false);
+  const [semester, setSemester] = useState("");
+  const [divisions, setDivisions] = useState<{ division_id: string; name: string }[]>([]);
+  const [divisionId, setDivisionId] = useState(""); // optional; "" = decide later in Profile
+  const [errs, setErrs] = useState<Errs>({});
+  const submitLock = useRef(false);
+  const lastRef = useRef<any>(null);
+  const rollRef = useRef<any>(null);
+  const phoneRef = useRef<any>(null);
 
-  // ====================================================
-  // 🔎 VERIFY COLLEGE (STEP 1)
-  // ====================================================
+  if (!email || !password || !otp_token) {
+    return (
+      <Screen>
+        <ResultView
+          icon="alert-circle"
+          tone="warning"
+          title="Start again"
+          message="Your registration session expired. Please begin from the sign-up screen."
+          actions={<Button label="Back to login" onPress={() => navigation.reset({ index: 0, routes: [{ name: "Auth" }] })} />}
+        />
+      </Screen>
+    );
+  }
 
-    const validatePassword = (password: string) => {
-    const regex =
-      /^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)(?=.*[@$!%*?&])[A-Za-z\d@$!%*?&]{8,}$/;
+  // Divisions are created by the head teacher; load the ones of the chosen course + semester (optional field).
+  const courseObj = courses.find((c) => c.course_name === course);
+  const courseKey = courseObj ? String(courseObj.id ?? courseObj.course_id ?? "") : "";
+  const semNo = Number(String(semester).replace(/\D/g, "")) || 0;
+  useEffect(() => {
+    setDivisionId("");
+    setDivisions([]);
+    if (!college || !courseKey || !semNo) return;
+    let live = true;
+    fetchJson(`${API_BASE}/api/colleges/${encodeURIComponent(college.aishe_code)}/courses/${encodeURIComponent(courseKey)}/divisions?semester=${semNo}`)
+      .then((r) => live && r.ok && setDivisions(Array.isArray(r.data?.divisions) ? r.data.divisions : []))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [college, courseKey, semNo]);
 
-    if (!regex.test(password)) {
-      return "Password must be 8+ chars with uppercase, lowercase, number & special character";
-    }
+  const clear = (k: keyof Errs) => errs[k] && setErrs((e) => ({ ...e, [k]: undefined }));
 
-    return null;
+  const resetCollege = () => {
+    setCollege(null);
+    setCourses([]);
+    setCourse("");
   };
 
-  const handleVerifyCollege = async () => {
-    const code = aisheCode.trim().toUpperCase();
-
+  const verify = async () => {
+    if (verifying) return;
+    const code = cleanAishe(aisheCode);
     if (!code) {
-      Alert.alert("Error", "Enter AISHE code");
+      setErrs((e) => ({ ...e, aishe: "Enter a valid AISHE code, for example C-12345" }));
       return;
     }
-
-    if (verifying) return;
-
+    setErrs((e) => ({ ...e, aishe: undefined }));
+    setVerifying(true);
+    resetCollege();
     try {
-      setVerifying(true);
-      setVerifiedCollege(null);
-      setCourses([]);
-
-      const verifyRes = await fetch(
-        `${API_URL}/api/colleges/verify/${code}`
-      );
-
-      const verifyData = await verifyRes.json();
-      if (!verifyRes.ok) throw new Error(verifyData.error);
-
-      setVerifiedCollege(verifyData.college);
-
-      const courseRes = await fetch(
-        `${API_URL}/api/colleges/${code}/courses`
-      );
-
-      const courseData = await courseRes.json();
-      setCourses(courseData.courses || []);
-    } catch (err: any) {
-      setVerifiedCollege(null);
-      Alert.alert("Error", err.message);
+      const v = await fetchJson(`${API_BASE}/api/colleges/verify/${encodeURIComponent(code)}`);
+      if (!v.ok || !v.data?.college) throw new Error(v.data?.error || "College not found");
+      const c = await fetchJson(`${API_BASE}/api/colleges/${encodeURIComponent(code)}/courses`);
+      if (!c.ok) throw new Error(c.data?.error || "Could not load courses");
+      if (!Array.isArray(c.data?.courses) || c.data.courses.length === 0) {
+        throw new Error("No courses are set up for this college yet. Contact your institute.");
+      }
+      setCollege(v.data.college);
+      setCourses(c.data.courses);
+    } catch (e: any) {
+      setErrs((x) => ({ ...x, aishe: e.message || "Verification failed" }));
     } finally {
       setVerifying(false);
     }
   };
 
-  // ====================================================
-  // 🚀 FINAL SUBMIT (STEP 3)
-  // ====================================================
-  const handleFinish = async () => {
+  const validateStep = (): boolean => {
+    const next: Errs = {};
+    if (step === 0) {
+      if (!college) next.aishe = "Verify your college to continue";
+    } else if (step === 1) {
+      if (!isValidName(cleanText(firstName, 50))) next.first = "Enter your first name (letters only)";
+      if (!isValidName(cleanText(lastName, 50))) next.last = "Enter your last name (letters only)";
+      if (cleanRoll(rollNo).length < 2) next.roll = "Enter your roll number / PRN";
+      if (!cleanPhone(phone)) next.phone = "Enter a valid mobile number (10 to 13 digits)";
+    } else {
+      if (!course) next.course = "Select your course";
+      if (!year) next.year = "Select your year";
+      if (!semester) next.sem = "Select your semester";
+    }
+    setErrs(next);
+    return Object.keys(next).length === 0;
+  };
+
+  const onNext = () => {
+    if (validateStep()) setStep((s) => s + 1);
+  };
+
+  const onBack = () => {
+    if (step > 0) setStep((s) => s - 1);
+    else navigation.goBack();
+  };
+
+  const finish = async () => {
+    if (submitLock.current || !validateStep()) return;
+
+    const pwErr = validatePassword(password);
+    if (pwErr) {
+      Alert.alert("Weak password", pwErr, [{ text: "Change password", onPress: () => navigation.goBack() }]);
+      return;
+    }
+    const ph = cleanPhone(phone);
+    if (!college || !ph) return;
+
+    submitLock.current = true;
+    setSubmitting(true);
     try {
-      const passwordError = validatePassword(password);
-      if (passwordError) {
-        Alert.alert("Weak Password", passwordError);
-        return;
-      }
-
-      if (!verifiedCollege) {
-        Alert.alert("Error", "Please verify college first");
-        return;
-      }
-
-      if (!selectedCourse || !semester || !year) {
-        Alert.alert("Error", "Please complete academic details");
-        return;
-      }
-
-      const payload = {
-        email,
-        password,
-        role: "student",
-        student: {
-          first_name: firstName,
-          last_name: lastName,
-          roll_no: rollNo,
-          phone,
-          aishe_code: verifiedCollege.aishe_code,
-          college_name: verifiedCollege.college_name,
-          course_name: selectedCourse,
-          semester,
-          year,
-        },
-      };
-
-      const res = await fetch(`${API_URL}/auth/register`, {
+      const res = await fetchJson(`${API_BASE}/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({
+          email,
+          password,
+          otp_token,
+          role: "student",
+          student: {
+            first_name: cleanText(firstName, 50),
+            last_name: cleanText(lastName, 50),
+            roll_no: cleanRoll(rollNo),
+            phone: ph,
+            aishe_code: college.aishe_code,
+            college_name: college.college_name,
+            course_name: course,
+            degree: courses.find((c) => c.course_name === course)?.abbr, // server looks the course up by abbr
+            semester,
+            year,
+            division_id: divisionId || undefined,
+          },
+        }),
       });
 
-      //  SAFE PARSE
-      const text = await res.text();
-
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch {
-        console.log("NON JSON RESPONSE:", text);
-        throw new Error("Server returned invalid response");
-      }
-
       if (!res.ok) {
-        throw new Error(data?.error || "Registration failed");
+        if (isAlreadyRegistered(res)) {
+          Alert.alert("Already registered", "An account with this email already exists. Please log in instead.", [
+            { text: "Go to login", onPress: () => navigation.reset({ index: 0, routes: [{ name: "Auth" }] }) },
+          ]);
+          return;
+        }
+        if (res.status === 403 && /verif/i.test(String(res.data?.error))) {
+          Alert.alert("Verify your email again", res.data?.error, [{ text: "OK", onPress: () => navigation.goBack() }]);
+          return;
+        }
+        throw new Error(res.data?.error || "Registration failed. Please try again.");
       }
 
-      console.log("REGISTER SUCCESS:", data);
-
-      Alert.alert("Success", "Registration completed", [
-        {
-          text: "OK",
-          onPress: () =>
-            navigation.reset({
-              index: 0,
-              routes: [{ name: "Auth" }],
-            }),
-        },
+      Alert.alert("Registration complete", "Your account is pending approval by your institute. You can log in once it is approved.", [
+        { text: "OK", onPress: () => navigation.reset({ index: 0, routes: [{ name: "Auth" }] }) },
       ]);
-    } catch (err: any) {
-      console.log("REGISTER ERROR:", err);
-      Alert.alert("Error", err.message || "Something went wrong");
+    } catch (e: any) {
+      Alert.alert("Could not register", e.message || "Something went wrong");
+    } finally {
+      submitLock.current = false;
+      setSubmitting(false);
     }
   };
 
-  // ====================================================
-  // 🧩 STEP UI RENDER
-  // ====================================================
+  const titles = ["Find your college", "Personal details", "Academic info"];
 
-  const renderStep = () => {
-    if (step === 1) {
-      return (
-        <>
-          <Text style={styles.title}>Find your College</Text>
-
-          <View style={styles.aisheRow}>
-            <TextInput
-              style={styles.aisheInput}
-              placeholder="Enter AISHE Code"
-              value={aisheCode}
-              onChangeText={setAisheCode}
-            />
-
-            <TouchableOpacity
-              style={styles.verifyBtn}
-              onPress={handleVerifyCollege}
-              disabled={verifying}
-            >
-              <Text style={{ color: "#fff" }}>
-                {verifying ? "Verifying..." : "Verify"}
-              </Text>
-            </TouchableOpacity>
-          </View>
-
-          {verifiedCollege && (
-            <View style={styles.collegeCard}>
-              <Text style={styles.collegeTitle}>Verified College</Text>
-              <Text style={styles.collegeName}>
-                {verifiedCollege.college_name}
-              </Text>
-            </View>
-          )}
-        </>
-      );
-    }
-
-    if (step === 2) {
-      return (
-        <>
-          <Text style={styles.title}>Personal Details</Text>
-
-          <TextInput style={styles.input} placeholder="First Name" value={firstName} onChangeText={setFirstName} />
-          <TextInput style={styles.input} placeholder="Last Name" value={lastName} onChangeText={setLastName} />
-          <TextInput style={styles.input} placeholder="Roll Number / PRN" value={rollNo} onChangeText={setRollNo} />
-          <TextInput style={styles.input} placeholder="Phone Number" value={phone} onChangeText={setPhone} />
-        </>
-      );
-    }
-
-    return (
-      <>
-        <Text style={styles.title}>Academic Info</Text>
-
-        {/* ================= COURSE DROPDOWN ================= */}
-        <TouchableOpacity
-          style={styles.input}
-          activeOpacity={0.8}
-          onPress={() => {
-            setShowCourseList((v) => !v);
-            setShowYear(false);
-            setShowSem(false);
-          }}
-        >
-          <Text style={{ color: selectedCourse ? "#111" : "#9CA3AF" }}>
-            {selectedCourse || "Select Course"}
-          </Text>
-        </TouchableOpacity>
-
-        {showCourseList && (
-          <View style={styles.dropdownBox}>
-            <ScrollView nestedScrollEnabled>
-              {courses.map((c) => (
-                <TouchableOpacity
-                  key={c.id}
-                  style={styles.dropdownItem}
-                  onPress={() => {
-                    setSelectedCourse(c.course_name);
-                    setShowCourseList(false);
-                  }}
-                >
-                  <Text>{c.course_name}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-          </View>
-        )}
-
-        {/* ================= YEAR DROPDOWN ================= */}
-        <TouchableOpacity
-          style={styles.input}
-          onPress={() => {
-            setShowYear((v) => !v);
-            setShowCourseList(false);
-            setShowSem(false);
-          }}
-        >
-          <Text>{year}</Text>
-        </TouchableOpacity>
-
-        {showYear && (
-          <View style={styles.dropdownBox}>
-            {YEARS.map((y) => (
-              <TouchableOpacity
-                key={y}
-                style={styles.dropdownItem}
-                onPress={() => {
-                  setYear(y);
-                  setSemester(SEM_MAP[y][0]); // auto reset semester
-                  setShowYear(false);
-                }}
-              >
-                <Text>{y}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-
-        {/* ================= SEMESTER DROPDOWN ================= */}
-        <TouchableOpacity
-          style={styles.input}
-          onPress={() => {
-            setShowSem((v) => !v);
-            setShowYear(false);
-            setShowCourseList(false);
-          }}
-        >
-          <Text>{semester}</Text>
-        </TouchableOpacity>
-
-        {showSem && (
-          <View style={styles.dropdownBox}>
-            {SEM_MAP[year]?.map((s: string) => (
-              <TouchableOpacity
-                key={s}
-                style={styles.dropdownItem}
-                onPress={() => {
-                  setSemester(s);
-                  setShowSem(false);
-                }}
-              >
-                <Text>{s}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-        )}
-      </>
-    );
-  };
-
-  // ====================================================
-  // 🔥 MAIN RENDER
-  // ====================================================
   return (
-    <ScrollView style={styles.container} contentContainerStyle={{ flexGrow: 1 }}>
-      <Text style={styles.header}>Student Profile</Text>
+    <Screen>
+      <Header title="Student registration" subtitle={email} onBack={onBack} />
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+        <ScrollView contentContainerStyle={st.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
+          <Steps steps={STEPS} current={step} />
 
-      {/* STEP INDICATOR */}
-      <View style={styles.stepRow}>
-        {[1, 2, 3].map((n) => (
-          <View key={n} style={[styles.stepCircle, step >= n && styles.activeStep]}>
-            <Text style={{ color: "#fff" }}>{n}</Text>
+          <Card>
+            <Text style={[font.h2, { marginBottom: SP.lg }]}>{titles[step]}</Text>
+
+            {step === 0 && (
+              <View style={{ gap: SP.md }}>
+                <View style={st.aisheRow}>
+                  <View style={{ flex: 1 }}>
+                    <TextField
+                      value={aisheCode}
+                      onChangeText={(t) => {
+                        setAisheCode(t);
+                        clear("aishe");
+                        if (college) resetCollege(); // editing the code invalidates the earlier verification
+                      }}
+                      placeholder="AISHE code, e.g. C-12345"
+                      icon="business-outline"
+                      autoCapitalize="characters"
+                      returnKeyType="go"
+                      onSubmitEditing={verify}
+                      error={errs.aishe}
+                      maxLength={20}
+                    />
+                  </View>
+                  <Button label="Verify" size="md" onPress={verify} loading={verifying} style={{ height: 52 }} />
+                </View>
+                {college && (
+                  <View style={st.verified}>
+                    <Ionicons name="checkmark-circle" size={22} color={T.success} />
+                    <View style={{ flex: 1 }}>
+                      <Text style={font.small}>Verified college</Text>
+                      <Text style={font.h3}>{college.college_name}</Text>
+                    </View>
+                  </View>
+                )}
+              </View>
+            )}
+
+            {step === 1 && (
+              <View style={{ gap: SP.lg }}>
+                <TextField
+                  label="First name"
+                  icon="person-outline"
+                  value={firstName}
+                  onChangeText={(t) => {
+                    setFirstName(t);
+                    clear("first");
+                  }}
+                  placeholder="First name"
+                  autoCapitalize="words"
+                  autoComplete="given-name"
+                  textContentType="givenName"
+                  returnKeyType="next"
+                  onSubmitEditing={() => lastRef.current?.focus()}
+                  error={errs.first}
+                  maxLength={50}
+                />
+                <TextField
+                  label="Last name"
+                  icon="person-outline"
+                  value={lastName}
+                  onChangeText={(t) => {
+                    setLastName(t);
+                    clear("last");
+                  }}
+                  placeholder="Last name"
+                  autoCapitalize="words"
+                  autoComplete="family-name"
+                  textContentType="familyName"
+                  returnKeyType="next"
+                  onSubmitEditing={() => rollRef.current?.focus()}
+                  inputRef={lastRef}
+                  error={errs.last}
+                  maxLength={50}
+                />
+                <TextField
+                  label="Roll number / PRN"
+                  icon="id-card-outline"
+                  value={rollNo}
+                  onChangeText={(t) => {
+                    setRollNo(t);
+                    clear("roll");
+                  }}
+                  placeholder="Roll number"
+                  autoCapitalize="characters"
+                  returnKeyType="next"
+                  onSubmitEditing={() => phoneRef.current?.focus()}
+                  inputRef={rollRef}
+                  error={errs.roll}
+                  maxLength={30}
+                />
+                <TextField
+                  label="Mobile number"
+                  icon="call-outline"
+                  value={phone}
+                  onChangeText={(t) => {
+                    setPhone(t);
+                    clear("phone");
+                  }}
+                  placeholder="10 digit mobile number"
+                  keyboardType="phone-pad"
+                  autoComplete="tel"
+                  textContentType="telephoneNumber"
+                  inputRef={phoneRef}
+                  error={errs.phone}
+                  maxLength={16}
+                />
+              </View>
+            )}
+
+            {step === 2 && (
+              <View style={{ gap: SP.lg }}>
+                <SelectField
+                  label="Course"
+                  icon="book-outline"
+                  title="Select course"
+                  value={course}
+                  placeholder="Select course"
+                  options={courses.map((c) => ({ value: c.course_name, label: c.course_name, sub: c.abbr }))}
+                  onChange={(v) => {
+                    setCourse(v);
+                    clear("course");
+                  }}
+                  error={errs.course}
+                />
+                <SelectField
+                  label="Year"
+                  icon="calendar-outline"
+                  title="Select year"
+                  value={year}
+                  placeholder="Select year"
+                  options={YEARS.map((y) => ({ value: y, label: y }))}
+                  onChange={(v) => {
+                    setYear(v);
+                    setSemester(""); // semester depends on the year
+                    clear("year");
+                  }}
+                  error={errs.year}
+                />
+                <SelectField
+                  label="Semester"
+                  icon="layers-outline"
+                  title="Select semester"
+                  value={semester}
+                  placeholder={year ? "Select semester" : "Select year first"}
+                  disabled={!year}
+                  options={(SEM_MAP[year] || []).map((x) => ({ value: x, label: x }))}
+                  onChange={(v) => {
+                    setSemester(v);
+                    clear("sem");
+                  }}
+                  error={errs.sem}
+                />
+                {divisions.length > 0 && (
+                  <SelectField
+                    label="Division (optional)"
+                    icon="people-outline"
+                    title="Select division"
+                    value={divisionId}
+                    placeholder="Select your division"
+                    options={divisions.map((d) => ({ value: d.division_id, label: `Division ${d.name}` }))}
+                    onChange={(v) => setDivisionId(v)}
+                  />
+                )}
+                <Banner tone="info" icon="shield-checkmark">
+                  Your attendance is verified against your college network and location, so enter details exactly as your institute has them.
+                </Banner>
+              </View>
+            )}
+          </Card>
+
+          <View style={st.nav}>
+            {step < 2 ? (
+              <Button label="Next" icon="arrow-forward" onPress={onNext} />
+            ) : (
+              <Button label="Finish registration" icon="checkmark-circle-outline" onPress={finish} loading={submitting} />
+            )}
           </View>
-        ))}
-      </View>
-
-      {renderStep()}
-
-      <View style={styles.bottomRow}>
-        {step > 1 && (
-          <TouchableOpacity onPress={() => setStep(step - 1)}>
-            <Text style={styles.backBtnText}>Back</Text>
-          </TouchableOpacity>
-        )}
-
-        {step < 3 && (
-          <TouchableOpacity
-            style={styles.primaryBtn}
-            onPress={() => {
-
-              // 🔥 STEP 1 VALIDATION
-              if (step === 1 && !verifiedCollege) {
-                Alert.alert("Error", "Please verify your college first");
-                return;
-              }
-
-              // 🔥 STEP 2 VALIDATION
-              if (step === 2 && (!firstName || !lastName || !rollNo || !phone)) {
-                Alert.alert("Error", "Please fill all personal details");
-                return;
-              }
-
-              setStep(step + 1);
-            }}
-          >
-            <Text style={{ color: "#fff" }}>Next Step</Text>
-          </TouchableOpacity>
-        )}
-
-        {step === 3 && (
-          <TouchableOpacity style={styles.primaryBtn} onPress={handleFinish}>
-            <Text style={{ color: "#fff" }}>Finish Registration</Text>
-          </TouchableOpacity>
-        )}
-
-      </View>
-
-    </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </Screen>
   );
 }
 
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: BG,
-    paddingHorizontal: 24,
-    paddingTop: 50,
-  },
-
-  header: {
-    fontSize: 24,
-    fontWeight: "700",
-    color: TEXT,
-    marginTop: 12,
-    marginBottom: 24,
-  },
-
-  title: {
-    fontSize: 20,
-    fontWeight: "700",
-    color: PRIMARY,
-    marginBottom: 18,
-  },
-
-  /* STEP INDICATOR */
-  stepRow: {
+const st = StyleSheet.create({
+  scroll: { padding: SP.lg, gap: SP.lg, paddingBottom: 40 },
+  aisheRow: { flexDirection: "row", gap: SP.sm, alignItems: "flex-start" },
+  verified: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 14,
-    marginBottom: 30,
+    gap: SP.md,
+    padding: SP.md,
+    borderRadius: 14,
+    backgroundColor: T.successSoft,
   },
-
-  stepCircle: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: "#E5E7EB",
-    justifyContent: "center",
-    alignItems: "center",
-  },
-
-  activeStep: {
-    backgroundColor: PRIMARY,
-    shadowColor: PRIMARY,
-    shadowOpacity: 0.3,
-    shadowRadius: 8,
-    elevation: 5,
-  },
-
-  /* INPUTS */
-  input: {
-    height: 56,
-    borderRadius: 28,
-    borderWidth: 1,
-    borderColor: BORDER,
-    paddingHorizontal: 20,
-    fontSize: 15,
-    backgroundColor: CARD,
-    color: TEXT,
-    marginBottom: 14,
-    shadowColor: "#000",
-    shadowOpacity: 0.03,
-    shadowRadius: 6,
-    justifyContent: "center",
-  },
-
-  aisheRow: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-
-  aisheInput: {
-    flex: 1,
-    height: 56,
-    borderRadius: 28,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-    paddingHorizontal: 18,
-    backgroundColor: "#FFF",
-  },
-
-  verifyBtn: {
-    height: 56,
-    paddingHorizontal: 22,
-    borderRadius: 28,
-    marginLeft: 12,          // spacing from input
-    backgroundColor: PRIMARY,
-    justifyContent: "center",
-    alignItems: "center",
-    shadowColor: PRIMARY,
-    shadowOpacity: 0.35,
-    shadowRadius: 10,
-    elevation: 6,
-  },
-
-  collegeCard: {
-    marginTop: 16,
-    backgroundColor: "#FFF",
-    padding: 16,
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-  },
-
-  collegeTitle: {
-    fontSize: 13,
-    color: "#6B7280",
-  },
-
-  collegeName: {
-    fontSize: 15,
-    fontWeight: "600",
-    marginTop: 4,
-  },
-
-  collegeText: {
-    fontSize: 15,
-    color: TEXT,
-    fontWeight: "600",
-  },
-
-  /* COURSE DROPDOWN ITEM */
-  courseItem: {
-    backgroundColor: CARD,
-    borderRadius: 16,
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    marginBottom: 8,
-    borderWidth: 1,
-    borderColor: BORDER,
-  },
-
-  courseText: {
-    fontSize: 15,
-    color: TEXT,
-  },
-
-  courseSelected: {
-    backgroundColor: PRIMARY,
-  },
-
-  courseTextActive: {
-    color: "#FFF",
-    fontWeight: "600",
-  },
-
-  /* BOTTOM NAV */
-  bottomRow: {
-    marginTop: "auto",
-    marginBottom: 40,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "center",
-  },
-
-  primaryBtn: {
-    flex: 1,
-    backgroundColor: PRIMARY,
-    height: 56,
-    paddingHorizontal: 34,
-    borderRadius: 28,
-    justifyContent: "center",
-    alignItems: "center",
-
-    shadowColor: PRIMARY,
-    shadowOpacity: 0.35,
-    shadowRadius: 12,
-    elevation: 8,
-  },
-
-  primaryBtnText: {
-    color: "#FFF",
-    fontSize: 16,
-    fontWeight: "700",
-  },
-
-  backText: {
-    fontSize: 16,
-    color: SUBTEXT,
-    fontWeight: "600",
-  },
-  dropdownBox: {
-    backgroundColor: "#FFF",
-    borderRadius: 18,
-    borderWidth: 1,
-    borderColor: "#E5E7EB",
-    overflow: "hidden",
-    zIndex: 999,
-    elevation: 1,
-    marginBottom: 14,
-  },
-
-  dropdownItem: {
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-  },
-  backBtnText: {
-    fontSize: 16,
-    color: SUBTEXT,
-    fontWeight: "600",
-    marginHorizontal: 10,
-    marginRight: 30,
-  },
+  nav: { marginTop: SP.sm },
 });

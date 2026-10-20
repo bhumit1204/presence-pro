@@ -1,0 +1,52 @@
+/* Head-only "Manage" collapsible group in AppSidebar */
+
+.app-sidebar-group {
+  display: flex;
+  flex-direction: column;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid #F0F2FA;
+}
+
+/* The toggle is a <button> but must look exactly like the other nav items.
+   (font: inherit made it 16px, bigger than the 14px items - that was the
+   cramped, uneven look.) */
+.app-sidebar-group-toggle {
+  width: 100%;
+  background: none;
+  border: none;
+  font-family: inherit;
+  font-size: 14px;
+  font-weight: 500;
+  color: #5A6479;
+  text-align: left;
+  cursor: pointer;
+}
+.app-sidebar-group-toggle:hover {
+  background: #F5F6FB;
+}
+
+.app-sidebar-chevron {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  transition: transform 0.2s;
+}
+.app-sidebar-chevron--open {
+  transform: rotate(180deg);
+}
+
+.app-sidebar-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  margin: 2px 0 2px 20px;
+  padding-left: 8px;
+  border-left: 1px solid #E5E7EB;
+}
+
+.app-sidebar-sub-item {
+  font-size: 13px;
+  padding: 7px 10px;
+  border-radius: 8px;
+}

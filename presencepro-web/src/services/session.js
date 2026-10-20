@@ -8,10 +8,16 @@
  *
  * is_head is stored separately so any component can read it without
  * parsing the full profile. It is true when:
- *   - role === "hod"
- *   - role === "teacher" AND profile.designation === "head"
+ *   - role === "hod" or "head_teacher"
+ *   - role === "teacher" AND profile.head_of is set (e.g. "MCA")
  *   - backend explicitly returns is_head: true on the user object
+ * (designation is never used — it's free text from the institute app)
  */
+
+/** True when a teacher profile carries a head_of department. */
+function hasHeadOf(profile) {
+  return !!String(profile?.head_of || "").trim();
+}
 
 const USER_KEY    = "pp_user";
 const TOKEN_KEY   = "pp_token";
@@ -32,14 +38,13 @@ export function saveUserSession(user, token, profile = null) {
     return;
   }
 
-  // Determine is_head:
-  // ONLY trust role field — "oHOD" / "head_teacher" set by the backend login.
-  // Never infer from designation: institute dashboard uses designation="head"
-  // for department heads which is a completely different concept.
+  // Determine is_head: role set by the backend login ("hod" / "head_teacher"),
+  // or a teacher whose profile has head_of set. Never infer from designation.
   const isHead =
     !!user.is_head ||
     user.role === "hod" ||
-    user.role === "head_teacher";
+    user.role === "head_teacher" ||
+    (user.role === "teacher" && hasHeadOf(profile));
 
   const sessionUser = {
     uid:       user.uid       || user.user_id || null,
@@ -66,19 +71,48 @@ export function saveUserProfile(profile) {
   if (!profile) return;
   localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
 
-  // Re-evaluate is_head — role field only, never designation
-  // (designation="head" is an institute-dashboard concept, not an app role)
+  // Re-evaluate is_head — role field or head_of, never designation
   const user = getSessionUser();
   if (user) {
     const isHead =
-      user.is_head ||
+      !!user.is_head ||
       user.role === "hod" ||
-      user.role === "head_teacher";
+      user.role === "head_teacher" ||
+      (user.role === "teacher" && hasHeadOf(profile));
 
     if (isHead !== user.is_head) {
       localStorage.setItem(USER_KEY, JSON.stringify({ ...user, is_head: isHead }));
     }
   }
+}
+
+/** Fired on window whenever the stored session actually changes. */
+export const SESSION_EVENT = "pp:session";
+
+/**
+ * Applies fresh data from GET /auth/me to the stored session (role, is_head,
+ * is_active, profile, token). The server's answer wins — e.g. a head who was
+ * removed in the institute app becomes a plain teacher here without logging
+ * out. Notifies listeners only if something really changed.
+ */
+export function updateSession({ user, profile, token } = {}) {
+  const current = getSessionUser();
+  if (!current) return;
+
+  const before = localStorage.getItem(USER_KEY) + localStorage.getItem(PROFILE_KEY);
+
+  const next = { ...current };
+  if (user) {
+    if (user.role !== undefined)      next.role      = user.role;
+    if (user.is_active !== undefined) next.is_active = user.is_active !== false;
+    if (user.is_head !== undefined)   next.is_head   = !!user.is_head;
+  }
+  localStorage.setItem(USER_KEY, JSON.stringify(next));
+  if (profile) localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));
+  if (token)   localStorage.setItem(TOKEN_KEY, token);
+
+  const after = localStorage.getItem(USER_KEY) + localStorage.getItem(PROFILE_KEY);
+  if (before !== after) window.dispatchEvent(new Event(SESSION_EVENT));
 }
 
 // ── Read ──────────────────────────────────────────────────────────────
@@ -155,11 +189,13 @@ export function getRole() {
  * Used by both LoginScreen and RoleRouter.
  */
 export function dashboardPathForRole(user) {
-  const role   = user?.role    || getSessionUser()?.role;
-  const isHead = user?.is_head ?? getSessionUser()?.is_head;
+  const role = user?.role || getSessionUser()?.role;
 
-  if (role === "hod" || (role === "teacher" && isHead)) return "/dashboard/head";
-  if (role === "teacher")  return "/dashboard/teacher";
+  // Heads (hod / head_teacher / teacher with is_head) use the teacher pages;
+  // the sidebar adds a "Manage" section for them.
+  if (role === "hod" || role === "head_teacher" || role === "teacher") {
+    return "/dashboard/teacher";
+  }
   if (role === "student")  return "/dashboard/student";
   return "/";   // fallback — will be caught by ProtectedRoute
 }

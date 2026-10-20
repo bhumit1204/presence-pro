@@ -6,6 +6,7 @@ import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import Constants from "expo-constants";
 import { Platform } from "react-native";
+import { savePushToken } from "./session";
 
 // Controls how notifications appear when the app is OPEN (foreground)
 Notifications.setNotificationHandler({
@@ -74,7 +75,9 @@ export async function registerForPushNotifications(): Promise<string | null> {
   // FIX: Constants.easConfig is not a real Expo SDK property.
   // The correct location is Constants.expoConfig.extra.eas.projectId.
   const projectId: string | undefined =
-    Constants.expoConfig?.extra?.eas?.projectId;
+    Constants.expoConfig?.extra?.eas?.projectId ??
+    (Constants as any).easConfig?.projectId ??
+    (Constants as any).manifest2?.extra?.eas?.projectId;
 
   if (!projectId) {
     console.warn(
@@ -95,4 +98,26 @@ export async function registerForPushNotifications(): Promise<string | null> {
     console.error("[push] Failed to get push token:", err);
     return null;
   }
+}
+/**
+ * Registers this device for push and saves the token on the backend.
+ * Safe to call repeatedly (login, app start); concurrent calls are merged.
+ * role: "student" for students, anything else is stored as "teacher".
+ */
+let _inflight: Promise<void> | null = null;
+export function registerAndSavePushToken(uid: string, role: string): Promise<void> {
+  if (_inflight) return _inflight;
+  _inflight = (async () => {
+    try {
+      const token = await registerForPushNotifications();
+      if (token) {
+        await savePushToken(uid, role === "student" ? "student" : "teacher", token);
+      }
+    } catch (err) {
+      console.warn("[push] register failed:", err);
+    } finally {
+      _inflight = null;
+    }
+  })();
+  return _inflight;
 }
