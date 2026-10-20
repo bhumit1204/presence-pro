@@ -9,11 +9,28 @@ import { ActivityIndicator, View } from "react-native";
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { doc, getDoc, collection, query, where, getDocs, limit } from "firebase/firestore";
 import { useNavigation } from "@react-navigation/native";
+import { onAuthStateChanged, User } from "firebase/auth";
 import { auth, db } from "../../services/firebase";
 import { saveUserSession, savePushToken, signOutAndClear } from "../../services/session";
 import { registerForPushNotifications } from "../../services/notifications";
 import Logo from "../../components/Logo";
 import { Button, ResultView, Screen, T } from "../../components/ui";
+
+// On a cold start auth.currentUser is null until Firebase has restored the saved login from storage.
+// Wait for that first answer, otherwise a signed-in user is sent to the login screen on every app start.
+const waitForAuth = (): Promise<User | null> =>
+  new Promise((resolve) => {
+    let done = false;
+    const finish = (u: User | null) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      unsub();
+      resolve(u);
+    };
+    const unsub = onAuthStateChanged(auth, (u) => finish(u), () => finish(null));
+    const timer = setTimeout(() => finish(auth.currentUser), 8000);
+  });
 
 type Phase =
   | { kind: "loading" }
@@ -32,7 +49,8 @@ export default function RoleGate() {
   const init = useCallback(async () => {
     setPhase({ kind: "loading" });
     try {
-      const user = auth.currentUser;
+      const user = auth.currentUser || (await waitForAuth());
+      if (!alive.current) return;
       if (!user) return toAuth();
 
       const snap = await getDoc(doc(db, "users", user.uid));

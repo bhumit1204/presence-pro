@@ -116,7 +116,7 @@ export default function TeacherRegistration({ route }: any) {
     submitLock.current = true;
     setSubmitting(true);
     try {
-      const res = await fetchJson(`${API_BASE}/api/auth/register`, {
+      const res = await fetchJson(`${API_BASE}/auth/register`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
