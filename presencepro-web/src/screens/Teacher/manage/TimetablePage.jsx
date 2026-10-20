@@ -177,13 +177,36 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
   const [division, setDivision] = useState(initialDivision);
   const [replace, setReplace] = useState([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [picks, setPicks] = useState({}); // elective group: subject_id -> { teacher, room }
   const sub = useSubmit();
+
+  // elective groups of this semester: one slot, a room (and teacher) for each subject
+  const groups = useMemo(() => {
+    const m = new Map();
+    data.subjects.filter((s) => s.compulsary === false && s.elective_group).forEach((s) => {
+      if (!m.has(s.elective_group)) m.set(s.elective_group, []);
+      m.get(s.elective_group).push(s);
+    });
+    return [...m.entries()].map(([name, subjects]) => ({ name, subjects }));
+  }, [data.subjects]);
+  const group = !editing && String(subjectId).startsWith("g:") ? groups.find((g) => g.name === String(subjectId).slice(2)) : null;
+  const pick = (id) => picks[id] || { teacher: "", room: "" };
+  const setPick = (id, patch) => { setPicks((p) => ({ ...p, [id]: { ...(p[id] || { teacher: "", room: "" }), ...patch } })); sub.setConflicts([]); };
+  const groupReady = !group || group.subjects.every((s) => pick(s.subject_id).teacher || s.teacher_assigned);
 
   const subject = data.subjects.find((s) => s.subject_id === subjectId);
   const custom = editing && !lecture.subject_id;
-  const valid = (subjectId || custom) && toMin(end) > toMin(start);
-  const clashing = !editing && valid
-    ? data.lectures.filter((l) => l.day === day && sharesStudents(l.division_id || "", division) && overlaps(toMin(start), toMin(end), toMin(l.start_time), toMin(l.end_time)))
+  const valid = (subjectId || custom) && toMin(end) > toMin(start) && groupReady;
+  // the other options of the same elective group may run at the same time, so they are not a clash
+  const clashing = !editing && !group && valid
+    ? data.lectures.filter((l) => l.day === day && sharesStudents(l.division_id || "", division)
+        && !(subject?.elective_group && l.elective_group === subject.elective_group)
+        && overlaps(toMin(start), toMin(end), toMin(l.start_time), toMin(l.end_time)))
+    : [];
+  // editing one option of an elective slot: show the others that run with it
+  const withIt = editing && lecture.elective_group
+    ? data.lectures.filter((l) => l.lecture_id !== lecture.lecture_id && l.elective_group === lecture.elective_group && l.day === lecture.day
+        && l.start_time === lecture.start_time && l.end_time === lecture.end_time && (l.division_id || "") === (lecture.division_id || ""))
     : [];
   useEffect(() => { setReplace((r) => r.filter((id) => clashing.some((l) => l.lecture_id === id))); }, [day, start, end, division]); // eslint-disable-line
 
@@ -194,6 +217,13 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
       if (division !== initialDivision) body.division_id = division || null;
       await headApi.put(`/timetable/${lecture.lecture_id}`, body);
       onSaved("Lecture updated for every week.");
+    } else if (group) {
+      const res = await headApi.post("/timetable/group", {
+        course_id: course.course_id, semester, group: group.name, day, start_time: start, end_time: end,
+        division_id: division || undefined, force: force || undefined,
+        options: group.subjects.map((s) => ({ subject_id: s.subject_id, room: pick(s.subject_id).room, teacher_id: pick(s.subject_id).teacher || undefined })),
+      });
+      onSaved(`${group.name} added to ${day}: ${plural(res.created, "subject")}, each in its own room.`);
     } else {
       const res = await headApi.post("/timetable", {
         course_id: course.course_id, subject_id: subjectId, day, start_time: start, end_time: end, room,
@@ -227,7 +257,7 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
             <button type="button" className="mg-btn mg-btn--danger" onClick={() => save(true)} disabled={sub.busy}>Save anyway</button>
           ) : (
             <button type="button" className="mg-btn mg-btn--primary" onClick={() => save(false)} disabled={!valid || sub.busy}>
-              {sub.busy ? "Saving…" : editing ? "Save changes" : "Add lecture"}
+              {sub.busy ? "Saving…" : editing ? "Save changes" : group ? `Add ${plural(group.subjects.length, "lecture")}` : "Add lecture"}
             </button>
           )}
         </>
@@ -237,7 +267,14 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
         <label className="mg-label" htmlFor="tt-subject">Subject</label>
         <select id="tt-subject" className="mg-input" value={subjectId} disabled={sub.busy || editing} onChange={(e) => setSubjectId(e.target.value)}>
           {custom && <option value="">{lecture.subject_name} (special session)</option>}
-          {data.subjects.map((s) => <option key={s.subject_id} value={s.subject_id}>{s.subject_code} · {s.subject_name}</option>)}
+          {!editing && groups.length > 0 && (
+            <optgroup label="Elective groups: one slot, a room for each subject">
+              {groups.map((g) => <option key={g.name} value={`g:${g.name}`}>{g.name} · {plural(g.subjects.length, "subject")}</option>)}
+            </optgroup>
+          )}
+          <optgroup label="Subjects">
+            {data.subjects.map((s) => <option key={s.subject_id} value={s.subject_id}>{s.subject_code} · {s.subject_name}{s.elective_group ? ` (${s.elective_group})` : ""}</option>)}
+          </optgroup>
         </select>
       </div>
       <ApplyTo id="tt-div" divisions={data.divisions || []} value={division} disabled={sub.busy}
@@ -249,10 +286,12 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
             {DAYS.map((d) => <option key={d}>{d}</option>)}
           </select>
         </div>
-        <div className="mg-field">
-          <label className="mg-label" htmlFor="tt-room">Room</label>
-          <input id="tt-room" className="mg-input" value={room} maxLength={30} disabled={sub.busy} placeholder="e.g. Lab-1" onChange={(e) => setRoom(e.target.value)} />
-        </div>
+        {!group && (
+          <div className="mg-field">
+            <label className="mg-label" htmlFor="tt-room">Room</label>
+            <input id="tt-room" className="mg-input" value={room} maxLength={30} disabled={sub.busy} placeholder="e.g. Lab-1" onChange={(e) => setRoom(e.target.value)} />
+          </div>
+        )}
       </div>
       <div className="tt-two">
         <div className="mg-field">
@@ -268,12 +307,44 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
         ? <span className="mg-help">Length: {dur(start, end)} — any length works, for example 2 hours for a double lecture.</span>
         : <span className="tt-invalid">End time must be after the start time.</span>}
 
-      <div className="mg-field">
-        <label className="mg-label" htmlFor="tt-teacher">Teacher</label>
-        <TeacherSelect id="tt-teacher" teachers={teachers} value={teacher} disabled={sub.busy} onChange={(v) => { setTeacher(v); sub.setConflicts([]); }}
-                       defaultLabel={subject?.teacher_name ? `Subject's teacher — ${subject.teacher_name}` : "Subject's teacher (none assigned yet)"} />
-        <span className="mg-help">Pick someone else to give this slot its own teacher, without changing the subject's teacher.</span>
-      </div>
+      {group ? (
+        <fieldset className="tt-group">
+          <legend>{group.name}: room and teacher for each subject</legend>
+          {group.subjects.map((s) => {
+            const p = pick(s.subject_id);
+            return (
+              <div className="tt-group-row" key={s.subject_id}>
+                <div className="tt-group-name"><strong>{s.subject_code}</strong><span>{s.subject_name}</span></div>
+                <input className="mg-input" value={p.room} maxLength={30} disabled={sub.busy} placeholder="Room" aria-label={`Room for ${s.subject_name}`}
+                       onChange={(e) => setPick(s.subject_id, { room: e.target.value })} />
+                <TeacherSelect id={`tt-t-${s.subject_id}`} teachers={teachers} value={p.teacher} disabled={sub.busy} onChange={(v) => setPick(s.subject_id, { teacher: v })}
+                               defaultLabel={s.teacher_name ? s.teacher_name : "Pick a teacher"} />
+              </div>
+            );
+          })}
+          <span className="mg-help">
+            {groupReady
+              ? "Every student sees only the subject they chose, with its own room. Each subject needs its own room and teacher."
+              : "Pick a teacher for every subject (some have none assigned yet)."}
+          </span>
+        </fieldset>
+      ) : (
+        <div className="mg-field">
+          <label className="mg-label" htmlFor="tt-teacher">Teacher</label>
+          <TeacherSelect id="tt-teacher" teachers={teachers} value={teacher} disabled={sub.busy} onChange={(v) => { setTeacher(v); sub.setConflicts([]); }}
+                         defaultLabel={subject?.teacher_name ? `Subject's teacher — ${subject.teacher_name}` : "Subject's teacher (none assigned yet)"} />
+          <span className="mg-help">Pick someone else to give this slot its own teacher, without changing the subject's teacher.</span>
+        </div>
+      )}
+
+      {withIt.length > 0 && (
+        <div className="tt-with">
+          <strong>{lecture.elective_group}</strong> also runs at this time:
+          <ul>
+            {withIt.map((l) => <li key={l.lecture_id}>{l.subject_code || l.subject_name}{l.room ? ` · Room ${l.room}` : " · no room"}{l.teacher_name ? ` · ${l.teacher_name}` : ""}</li>)}
+          </ul>
+        </div>
+      )}
 
       <OverlapPicker items={clashing} picked={replace} disabled={sub.busy}
                      onToggle={(id) => { setReplace((r) => (r.includes(id) ? r.filter((x) => x !== id) : [...r, id])); sub.setConflicts([]); }}
@@ -607,7 +678,7 @@ function Grid({ lectures, colorOf, onSlot, onEmpty }) {
                       title={`${l.subject_name} · ${l.start_time}–${l.end_time}${l.teacher_name ? ` · ${l.teacher_name}` : ""}${l.room ? ` · ${l.room}` : ""}`}
                       aria-label={`${l.subject_code || l.subject_name} ${day} ${l.start_time} to ${l.end_time}`}
                     >
-                      <span className="tt-slot-code">{l.subject_code || l.subject_name}{l.division_name ? ` · ${l.division_name}` : ""}</span>
+                      <span className="tt-slot-code">{l.subject_code || l.subject_name}{l.elective_group ? ` · ${l.elective_group}` : ""}{l.division_name ? ` · ${l.division_name}` : ""}</span>
                       <span className="tt-slot-name">{l.subject_name}</span>
                       <span className="tt-slot-meta">
                         {l.teacher_name || "No teacher"}{l.teacher_pinned ? " *" : ""}{l.room ? ` · ${l.room}` : ""}

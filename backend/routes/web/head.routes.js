@@ -1468,6 +1468,8 @@ function lectureView(l, names = {}, subjectsById = {}) {
     teacher_pinned: l.teacher_pinned === true,
     division_id: l.division_id || null,
     division_name: l.division_name || "",
+    elective_group: l.elective_group || (subj.compulsary === false ? subj.elective_group || null : null),
+    slot_id: l.slot_id || null,
     day: l.day,
     start_time: l.start_time,
     end_time: l.end_time,
@@ -1875,6 +1877,104 @@ router.post("/timetable", wrap(async (req, res) => {
 
   await audit(req, "timetable.create", "lectures", ref.id, { subject: subject ? subject.subject_code : title, replaced: replaced.length, ...slot });
   return res.status(201).json({ success: true, lecture_id: ref.id, replaced: replaced.length });
+}));
+
+// One slot for a whole elective group: every subject of the group gets its own lecture at the same time,
+// each with its own room (and, optionally, its own teacher). Students only ever see the one they chose.
+//   { course_id, semester, group, day, start_time, end_time, division_id?, options: [{ subject_id, room?, teacher_id? }], force? }
+router.post("/timetable/group", wrap(async (req, res) => {
+  const body = req.body || {};
+  const course = courseOrFail(req, body.course_id);
+  const sem = parseSem(body.semester);
+  if (sem === null) fail(400, "semester is required");
+  const group = cleanGroup(body.group);
+  if (!group) fail(400, "Pick an elective group");
+
+  const subs = (await subjectsOfCourse(course.course_id))
+    .filter((x) => x.compulsary === false && parseSem(x.semester) === sem && groupKey(x) === group);
+  if (!subs.length) fail(404, "That elective group has no subjects in this semester");
+  const byId = Object.fromEntries(subs.map((x) => [x.subject_id, x]));
+
+  const options = Array.isArray(body.options) ? body.options : [];
+  if (!options.length) fail(400, "Add at least one subject of the group");
+  if (options.length > 20) fail(400, "At most 20 subjects in one slot");
+  const seen = new Set();
+  options.forEach((o) => {
+    if (!o || !byId[o.subject_id]) fail(400, "A subject in the list does not belong to this elective group");
+    if (seen.has(o.subject_id)) fail(400, "A subject is listed twice");
+    seen.add(o.subject_id);
+  });
+
+  const slot = readSlotFields(body);
+  const division = await divisionOrFail(req, course, sem, body.division_id);
+
+  // resolve each option's teacher + room
+  const rows = [];
+  for (const o of options) {
+    const subject = byId[o.subject_id];
+    const teacherId = o.teacher_id || subject.teacher_assigned;
+    if (!teacherId) fail(400, `${subject.subject_name}: allocate a teacher to this subject before scheduling it`);
+    const teacher = await activeTeacherOrFail(req, teacherId);
+    const room = String(o.room || "").trim().slice(0, 30);
+    rows.push({ subject, teacher, room });
+  }
+
+  // the options run at the same time, so they can't share a teacher or a room
+  const tSeen = new Map(), rSeen = new Map();
+  rows.forEach((r) => {
+    if (tSeen.has(r.teacher.id)) fail(400, `${r.teacher.name} can't take both ${tSeen.get(r.teacher.id)} and ${r.subject.subject_name} at the same time`);
+    tSeen.set(r.teacher.id, r.subject.subject_name);
+    if (r.room) {
+      const k = up(r.room);
+      if (rSeen.has(k)) fail(400, `Room ${r.room} is given to both ${rSeen.get(k)} and ${r.subject.subject_name}. Each subject needs its own room.`);
+      rSeen.set(k, r.subject.subject_name);
+    }
+  });
+
+  // clashes with what is already in the timetable
+  const conflicts = [];
+  for (const r of rows) {
+    const found = await findConflicts(req, {
+      ...slot, room: r.room, course_id: course.course_id, semester: sem, teacher_id: r.teacher.id,
+      division_id: division ? division.division_id : undefined, egroup: egroupOfSubject(r.subject),
+    });
+    found.forEach((c) => conflicts.push({ ...c, message: `${r.subject.subject_name}: ${c.message}` }));
+  }
+  if (conflicts.length && body.force !== true) fail(409, "This slot clashes with an existing lecture", { conflicts });
+
+  const slot_id = db.collection("lectures").doc().id;
+  const ids = [];
+  const ops = rows.map((r) => {
+    const ref = db.collection("lectures").doc();
+    ids.push(ref.id);
+    return (b) => b.set(ref, clean({
+      lecture_id: ref.id,
+      aishe_code: req.head.aishe_code,
+      course_id: course.course_id,
+      semester: r.subject.semester || semLabel(sem),
+      subject_id: r.subject.subject_id,
+      subject_name: r.subject.subject_name || "",
+      subject_code: r.subject.subject_code || "",
+      teacher_id: r.teacher.id,
+      teacher_name: r.teacher.name,
+      teacher_pinned: r.teacher.id !== r.subject.teacher_assigned ? true : undefined,
+      division_id: division ? division.division_id : undefined,
+      division_name: division ? division.name : undefined,
+      elective_group: group,
+      slot_id,
+      day: slot.day,
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      room: r.room,
+      department: req.head.department,
+      created_by: req.head.teacher_id,
+      created_at: ts(),
+    }));
+  });
+  await commitInBatches(ops);
+
+  await audit(req, "timetable.create_group", "lectures", slot_id, { group, subjects: rows.map((r) => r.subject.subject_code), ...slot });
+  return res.status(201).json({ success: true, slot_id, lecture_ids: ids, created: ids.length });
 }));
 
 router.put("/timetable/:id", wrap(async (req, res) => {

@@ -1411,13 +1411,14 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
     }
 
     // Resolve course_id from the lecture document for per-course filtering
-    let course_id = null, division_id = null, division_name = null;
+    let course_id = null, division_id = null, division_name = null, subject_id = null;
     if (lecture_id) {
       const lectureData = await getLecture(lecture_id);
       if (lectureData) {
         course_id = lectureData.course_id || null;
         division_id = lectureData.division_id || null;
         division_name = lectureData.division_name || null;
+        subject_id = lectureData.subject_id || null;
         if (req.auth) {
           const istDate = istDateString(new Date(Date.now() + IST_OFFSET));
           if (!allow(req, res, await teacherCoversLecture(teacher_id, lecture_id, lectureData, istDate), "start-own-lecture")) return;
@@ -1432,6 +1433,7 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
       course_id,
       division_id,
       division_name,
+      subject_id,
       subject_name: String(subject_name).slice(0, 200),
       room: room ? String(room).slice(0, 100) : null,
       is_live: true,
@@ -1514,6 +1516,34 @@ async function liveSessionsFor(aishe_code) {
   });
 }
 
+/* ── elective subjects: a student only sees / marks / is counted for the option they chose ── */
+async function electiveSubjectIds(course_id) {
+  if (!course_id) return new Set();
+  const ids = await timetableCache.memo(`elec:${course_id}`, 60_000, async () => {
+    const snap = await db.collection("subjects").where("course_id", "==", course_id).where("compulsary", "==", false).select().get();
+    return snap.docs.map((d) => d.id);
+  });
+  return new Set(ids);
+}
+
+/** compulsory subject, or an elective this student chose */
+const takesSubject = (student, elective, subject_id) =>
+  !subject_id || !elective.has(subject_id) || (Array.isArray(student?.enrolled_subjects) && student.enrolled_subjects.includes(subject_id));
+
+/** subject of a lecture session (new sessions store it; older ones are read from the lecture) */
+async function sessionSubjectId(ls) {
+  if (!ls) return null;
+  if (ls.subject_id !== undefined) return ls.subject_id || null;
+  if (!ls.lecture_id) return null;
+  return (await getLecture(ls.lecture_id))?.subject_id || null;
+}
+
+/** is this student part of the class the session is for? (division + elective choice) */
+function inSessionClass(ls, elective, subject_id, student) {
+  if (ls?.division_id && student?.division_id !== ls.division_id) return false;
+  return takesSubject(student, elective, subject_id);
+}
+
 router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req, res) => {
   try {
     const uid = req.query.uid || req.auth?.uid;
@@ -1549,11 +1579,16 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
     ]);
 
     const myDivision = student.division_id || null;
-    const matching = liveSessions.filter(({ data }) => {
+    const elective = await electiveSubjectIds(course_id || student.course_id);
+    const sameClass = liveSessions.filter(({ data }) => {
       if (data.division_id && data.division_id !== myDivision) return false;   // another division's class
       if (!data.course_id || !course_id) return true;
       return data.course_id === course_id;
     });
+    // an elective running for other students is not this student's class
+    const matching = elective.size
+      ? (await Promise.all(sameClass.map(async (x) => (takesSubject(student, elective, await sessionSubjectId(x.data)) ? x : null)))).filter(Boolean)
+      : sameClass;
 
     if (matching.length > 0) {
       const { id: sessionId, data: session } = matching[0];
@@ -1607,7 +1642,7 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
     });
 
     let nextLecture = null;
-    const sorted = lectures.filter((l) => !l.division_id || l.division_id === myDivision).sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
+    const sorted = lectures.filter((l) => (!l.division_id || l.division_id === myDivision) && takesSubject(student, elective, l.subject_id)).sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
     for (const lecture of sorted) {
       if (!nextLecture && toMinutes(lecture.start_time) > currentMinutes) nextLecture = lecture;
     }
@@ -2042,6 +2077,11 @@ async function studentBelongsToSession(student, att) {
   if (aishe && student.aishe_code && aishe !== student.aishe_code) return false;
   // a class held for one division is for that division's students only
   if (ls?.division_id && student.division_id !== ls.division_id) return false;
+  // an elective is for the students who chose it
+  if (ls?.course_id) {
+    const elective = await electiveSubjectIds(ls.course_id);
+    if (elective.size && !takesSubject(student, elective, await sessionSubjectId(ls))) return false;
+  }
   return true;
 }
 
@@ -2232,7 +2272,7 @@ const rosterQuery = (course_name, aishe_code) =>
 /** students of the class: [{uid,name,roll_number}] (30 s cache; the doc order of the query is kept) */
 const getRoster = (course_name, aishe_code) =>
   rosterCache.memo(`r:${aishe_code}|${course_name}`, 30_000, async () => {
-    const snap = await rosterQuery(course_name, aishe_code).select("uid", "name", "roll_number", "division_id").get();
+    const snap = await rosterQuery(course_name, aishe_code).select("uid", "name", "roll_number", "division_id", "enrolled_subjects").get();
     return snap.docs.map((d) => d.data());
   });
 
@@ -2253,7 +2293,7 @@ async function classOfLectureSession(lecture_session_id) {
   }
   const course = await getCourse(course_id);
   if (!course) return { error: { code: 404, body: { success: false, error: "Course not found" } } };
-  return { ls, aishe_code, course_name: course.course_name };
+  return { ls, aishe_code, course_id, course_name: course.course_name };
 }
 
 router.get("/attendance/verify-students", readLimit, guard.teacherOnly, async (req, res) => {
@@ -2269,7 +2309,9 @@ router.get("/attendance/verify-students", readLimit, guard.teacherOnly, async (r
     if (!allow(req, res, await callerOwnsLectureSession(req, c.ls), "verify-students-own-session")) return;
 
     const fullRoster = await getRoster(c.course_name, c.aishe_code);
-    const roster = c.ls.division_id ? fullRoster.filter((x) => x.division_id === c.ls.division_id) : fullRoster;
+    const elective = await electiveSubjectIds(c.course_id);
+    const subjectId = elective.size ? await sessionSubjectId(c.ls) : null;
+    const roster = fullRoster.filter((x) => inSessionClass(c.ls, elective, subjectId, x));
     if (roster.length === 0) return res.json({ success: true, students: [] });
 
     const records = await getSessionRecords(attendance_session_id);
@@ -2320,7 +2362,7 @@ router.post("/attendance/verify-attendance", guard.teacherOnly, async (req, res)
 
     // fresh reads here (this is a write decision)
     const [studentsSnap, existingRecordsSnap] = await Promise.all([
-      rosterQuery(c.course_name, c.aishe_code).select("uid", "name", "roll_number").get(),
+      rosterQuery(c.course_name, c.aishe_code).select("uid", "name", "roll_number", "division_id", "enrolled_subjects").get(),
       db.collection("attendance_records").where("attendance_session_id", "==", attendance_session_id).select("student_uid", "status", "verification").get(),
     ]);
 
@@ -2337,10 +2379,15 @@ router.post("/attendance/verify-attendance", guard.teacherOnly, async (req, res)
     let skipped_count = 0;
     const pendingResolved = [];
 
+    // only the students this class is for (its division, and for an elective the students who chose it)
+    const elective = await electiveSubjectIds(c.course_id);
+    const subjectId = elective.size ? await sessionSubjectId(c.ls) : null;
+
     for (const doc of studentsSnap.docs) {
       const data = doc.data();
       const uid = data.uid;
       if (!isId(uid)) continue;
+      if (!inSessionClass(c.ls, elective, subjectId, data)) continue;
       const recordRef = db.collection("attendance_records").doc(markedKey(attendance_session_id, uid));
       const existing = existingByUid[uid];
       const teacherSaysPresent = verifiedSet.has(uid);
