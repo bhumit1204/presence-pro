@@ -3,7 +3,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useNavigate }                      from "react-router-dom";
 import { getInstituteToken, getInstituteProfile, clearInstituteSession } from "./protected_route";
 import Sidebar from "../../../components/Inst_SideBar";
-import "./Teachers.css";
+import "./teachers.css";
 
 const INSTITUTE_API  = import.meta.env.VITE_INSTITUTE_API_URL || "http://localhost:5001";
 const PER_PAGE_OPTS  = [10, 25, 50];
