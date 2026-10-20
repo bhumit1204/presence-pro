@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/logo.png" alt="PresencePro" width="500" />
+<img src="docs/logo.png" alt="PresencePro" width="320" />
 
 ### Smart Attendance & Curriculum Management, in one app.
 
@@ -12,6 +12,8 @@
 ![Firebase](https://img.shields.io/badge/Backend-Firebase-FFCA28?logo=firebase&logoColor=black)
 ![IoT](https://img.shields.io/badge/IoT-BLE%20%2B%20ESP32-0082FC?logo=bluetooth&logoColor=white)
 ![Node Version](https://img.shields.io/badge/Node-%E2%89%A5%2018-brightgreen)
+
+**[Open the web dashboard](https://presence-pro-xw49.vercel.app)** | **[Download the Android app](../../releases/latest)**
 
 </div>
 
@@ -187,6 +189,14 @@ flowchart LR
     D <-. MQTT .-> B
 ```
 
+### Live deployment
+
+| Part | Where it runs |
+| --- | --- |
+| Web dashboard | https://presence-pro-xw49.vercel.app (Vercel) |
+| Main API | https://presencepro.duckdns.org (AWS EC2, PM2 behind Caddy) |
+| Android app | APK on the [Releases](../../releases/latest) page |
+
 ### Repository layout
 
 ```text
@@ -334,7 +344,8 @@ On Windows use `.\gradlew assembleRelease`. If the build fails while packaging, 
 
 - Configure Firebase, JWT, storage, AI, email, and notification credentials through the deployment environment.
 - Run the APIs under a process manager such as **PM2** and restart them after each deploy.
-- **Restrict CORS origins** before production deployment; the development setup allows broad CORS access.
+- **Restrict CORS origins** before production deployment; the development setup allows broad CORS access. For the institute API, set `INSTITUTE_CORS_ORIGINS` to the portal's address.
+- Set `VITE_API_URL` (and `VITE_INSTITUTE_API_URL`) in the Vercel project settings, then redeploy, so the web app talks to your hosted APIs.
 - Never commit `.env` files, Firebase service-account files, signing keys, build output, or dependency directories.
 - Rotate any credential that was ever shared or committed.
 
