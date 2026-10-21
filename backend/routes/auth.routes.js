@@ -500,6 +500,18 @@ router.get("/me", async (req, res) => {
       profile = { ...snap.docs[0].data(), teacher_id: snap.docs[0].id };
       user.teacher_id = snap.docs[0].id;
       user.is_head = isHeadProfile(profile);
+
+      // Manage areas a head delegated to this teacher (web sidebar + route guards read this)
+      user.delegations = [];
+      try {
+        const dSnap = await db.collection("delegations").where("teacher_id", "==", snap.docs[0].id).get();
+        user.delegations = dSnap.docs
+          .map((d) => d.data())
+          .filter((r) => r.aishe_code === profile.aishe_code)
+          .map((r) => ({ course_id: r.course_id, area: r.area }));
+      } catch (e) {
+        console.error("ME delegations:", e.message); // never fail the session refresh over this
+      }
     }
 
     return res.json({ success: true, user, profile });

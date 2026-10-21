@@ -1411,7 +1411,7 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
     }
 
     // Resolve course_id from the lecture document for per-course filtering
-    let course_id = null, division_id = null, division_name = null, subject_id = null;
+    let course_id = null, division_id = null, division_name = null, subject_id = null, kind = null;
     if (lecture_id) {
       const lectureData = await getLecture(lecture_id);
       if (lectureData) {
@@ -1419,6 +1419,7 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
         division_id = lectureData.division_id || null;
         division_name = lectureData.division_name || null;
         subject_id = lectureData.subject_id || null;
+        kind = lectureData.kind || null;           // "tutorial" | "lab" | null (plain lecture)
         if (req.auth) {
           const istDate = istDateString(new Date(Date.now() + IST_OFFSET));
           if (!allow(req, res, await teacherCoversLecture(teacher_id, lecture_id, lectureData, istDate), "start-own-lecture")) return;
@@ -1434,6 +1435,7 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
       division_id,
       division_name,
       subject_id,
+      kind,
       subject_name: String(subject_name).slice(0, 200),
       room: room ? String(room).slice(0, 100) : null,
       is_live: true,

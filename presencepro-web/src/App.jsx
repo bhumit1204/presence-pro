@@ -17,6 +17,7 @@ import DivisionsPage from "./screens/Teacher/manage/DivisionsPage";
 import TimetablePage from "./screens/Teacher/manage/TimetablePage";
 import CalendarPage from "./screens/Teacher/manage/CalendarPage";
 import StudentReportsPage from "./screens/Teacher/manage/StudentReportsPage";
+import DelegationPage from "./screens/Teacher/manage/DelegationPage";
 import StudentHome from "./screens/Student/StudentHome";
 import ClassesPage from "./screens/Student/ClassesPage";
 import ClassroomPage from "./screens/Student/ClassroomPage";
@@ -60,24 +61,27 @@ export default function App() {
       <Route path="/dashboard/teacher/reports"
         element={<ProtectedRoute role="teacher"><ReportsPage /></ProtectedRoute>} />
 
-      {/* ── Head ▸ Manage (heads only; the sidebar shows these under "Manage") ── */}
+      {/* ── Head ▸ Manage (heads, plus teachers a head delegated an area to; the sidebar shows these under "Manage") ── */}
       <Route path="/dashboard/teacher/manage/semesters"
-        element={<ProtectedRoute role="head"><SemestersPage /></ProtectedRoute>} />
+        element={<ProtectedRoute role="area:semesters"><SemestersPage /></ProtectedRoute>} />
 
       <Route path="/dashboard/teacher/manage/subjects"
-        element={<ProtectedRoute role="head"><SubjectsPage /></ProtectedRoute>} />
+        element={<ProtectedRoute role="area:subjects"><SubjectsPage /></ProtectedRoute>} />
 
       <Route path="/dashboard/teacher/manage/divisions"
-        element={<ProtectedRoute role="head"><DivisionsPage /></ProtectedRoute>} />
+        element={<ProtectedRoute role="area:divisions"><DivisionsPage /></ProtectedRoute>} />
 
       <Route path="/dashboard/teacher/manage/timetable"
-        element={<ProtectedRoute role="head"><TimetablePage /></ProtectedRoute>} />
+        element={<ProtectedRoute role="area:timetable"><TimetablePage /></ProtectedRoute>} />
 
       <Route path="/dashboard/teacher/manage/calendar"
-        element={<ProtectedRoute role="head"><CalendarPage /></ProtectedRoute>} />
+        element={<ProtectedRoute role="area:calendar"><CalendarPage /></ProtectedRoute>} />
 
       <Route path="/dashboard/teacher/manage/reports"
-        element={<ProtectedRoute role="head"><StudentReportsPage /></ProtectedRoute>} />
+        element={<ProtectedRoute role="area:reports"><StudentReportsPage /></ProtectedRoute>} />
+
+      <Route path="/dashboard/teacher/manage/delegation"
+        element={<ProtectedRoute role="head"><DelegationPage /></ProtectedRoute>} />
 
       {/* ── Old head URLs → the teacher pages ───────────────────── */}
       <Route path="/dashboard/head/*" element={<Navigate to="/dashboard/teacher" replace />} />

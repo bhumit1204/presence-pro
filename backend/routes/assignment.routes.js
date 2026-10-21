@@ -583,6 +583,10 @@ router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
       marks, due_date, allow_late = false,
       attachments, links,
     } = req.body;
+    const kind = req.body.kind === undefined || req.body.kind === null || req.body.kind === "" ? "assignment" : req.body.kind;
+    if (kind !== "assignment" && kind !== "lab_work") {
+      return res.status(400).json({ success: false, error: "kind must be assignment or lab_work" });
+    }
 
     if (!teacher_id || !course_id || !subject_id || !title || !marks || !due_date) {
       return res.status(400).json({
@@ -610,6 +614,14 @@ router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
     }
 
     if (!allow(req, res, await teacherOwnsSubject(teacher_id, subject_id), "assignment-subject")) return;
+    if (kind === "lab_work") {
+      // lab work lives in a lab's classroom: a lab subject, or a subject that has a lab
+      const sd = await db.collection("subjects").doc(subject_id).get();
+      const sj = sd.exists ? sd.data() : {};
+      if (sj.kind !== "lab" && sj.has_lab !== true) {
+        return res.status(400).json({ success: false, error: "This subject has no lab, so it can't have lab work" });
+      }
+    }
 
     const parsedAttachments = parseAttachmentsLoose(attachments) || [];
     const parsedLinks = parseLinks(links);
@@ -622,6 +634,7 @@ router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
       teacher_id,
       course_id,
       subject_id,
+      kind,
       title:            title.trim(),
       instructions:     instructions?.trim() || null,
       questions:        questions?.trim()    || null,
@@ -646,8 +659,8 @@ router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
       const ids = await getStudentUidsForSubject(subject_id);
       notify({
         userIds: ids,
-        title: "📝 New Assignment",
-        body: `${title.trim()} — Due ${new Date(due_date).toLocaleDateString()}`,
+        title: kind === "lab_work" ? "🧪 New Lab Work" : "📝 New Assignment",
+        body: `${title.trim()} — Due ${new Date(due_date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" })}`,
         data: { screen: "StudentWork", params: { subject_id, course_id } },
       });
     } catch (e) {
@@ -712,16 +725,6 @@ router.get("/", async (req, res) => {
   }
 });
 
-// A grade the teacher has not returned yet must stay hidden from the student:
-// the marks and feedback are removed from what the student's app receives.
-// (Older submissions without a `returned` field count as returned.)
-function hideUnreturnedGrade(d) {
-  if (d.status === "graded" && d.returned === false) {
-    return { ...d, marks_obtained: null, feedback: null, grade_hidden: true };
-  }
-  return d;
-}
-
 // Shared by GET /my-submissions and GET /student/:student_uid (identical in the original).
 async function studentSubmissions(student_uid, subject_id) {
   let subDocs;
@@ -755,7 +758,7 @@ async function studentSubmissions(student_uid, subject_id) {
   }
 
   let submissions = subDocs.map((doc) => {
-    const d = hideUnreturnedGrade(doc.data());
+    const d = doc.data();
     return {
       ...d,
       submitted_at:       tsISO(d.submitted_at),
@@ -904,6 +907,17 @@ router.put("/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
     }
 
     const updates = { updated_at: admin.firestore.FieldValue.serverTimestamp() };
+    if (req.body.kind !== undefined) {
+      if (req.body.kind !== "assignment" && req.body.kind !== "lab_work") {
+        return res.status(400).json({ success: false, error: "kind must be assignment or lab_work" });
+      }
+      if (req.body.kind === "lab_work" && (existing.kind || "assignment") !== "lab_work") {
+        const sd = await db.collection("subjects").doc(existing.subject_id).get();
+        const sj = sd.exists ? sd.data() : {};
+        if (sj.kind !== "lab" && sj.has_lab !== true) return res.status(400).json({ success: false, error: "This subject has no lab, so it can't have lab work" });
+      }
+      updates.kind = req.body.kind;
+    }
 
     const textOk = (v, max) => v === null || (typeof v === "string" && v.length <= max);
     if (title !== undefined) {
@@ -1385,7 +1399,7 @@ router.get("/:id/my-submission", guard.student(fromQuery("student_uid")), async 
       return res.json({ success: true, submission: null });
     }
 
-    const d = hideUnreturnedGrade(doc.data());
+    const d = doc.data();
     return res.json({
       success: true,
       submission: {
@@ -1462,7 +1476,6 @@ async function gradeSubmission(req, res, { isUpdate }) {
 
   // ── 3. Write grade ───────────────────────────────────────────
   const isReturned = returned === true || returned === "true";
-  const wasReturned = sub.returned === true;
   await subRef.update({
     marks_obtained: marksNum,
     feedback:       feedback?.trim() || null,
@@ -1472,20 +1485,16 @@ async function gradeSubmission(req, res, { isUpdate }) {
   });
   summaryCache.del(sub.assignment_id);
 
-  // Tell the student only when the grade becomes visible to them, so a hidden
-  // grade is not leaked through the push notification.
-  if (isReturned && !wasReturned) {
-    notify({
-      userIds: [sub.student_uid],
-      title: "Assignment Graded",
-      body: `You scored ${marksNum}/${assignment.marks} on "${assignment.title}"`,
-      data: { screen: "StudentWork" },
-    });
+  if (isUpdate) {
+    return res.json({ success: true, submission_id, marks_obtained: marksNum, message: "Grade updated" });
   }
 
-  if (isUpdate) {
-    return res.json({ success: true, submission_id, marks_obtained: marksNum, returned: isReturned, message: "Grade updated" });
-  }
+  notify({
+    userIds: [sub.student_uid],
+    title: "Assignment Graded",
+    body: `You scored ${marksNum}/${assignment.marks} on "${assignment.title}"`,
+    data: { screen: "StudentWork" },
+  });
 
   return res.json({
     success:        true,

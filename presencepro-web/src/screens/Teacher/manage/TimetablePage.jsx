@@ -15,6 +15,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ManageShell from "../../../components/ManageShell";
 import { headApi } from "../../../services/headApi";
+import { CommentPin } from "../../../components/SuggestionsProvider";
+import { RoomSelect, RoomsDialog, useRoomRequests, useRooms } from "./RoomsUI";
 import "./TimetablePage.css";
 
 // ── helpers ──────────────────────────────────────────────────────────────────
@@ -66,14 +68,14 @@ function TeacherSelect({ id, teachers, value, onChange, disabled, defaultLabel }
   );
 }
 
-function ConflictBox({ conflicts }) {
+function ConflictBox({ conflicts, blocked }) {
   if (!conflicts.length) return null;
   return (
     <div className="mg-banner mg-banner--warn" role="alert">
       <div className="tt-conflicts">
-        <strong>This clashes with another session</strong>
+        <strong>{blocked ? "That room is already in use" : "This clashes with another session"}</strong>
         <ul>{conflicts.map((c, i) => <li key={i}>{c.message}</li>)}</ul>
-        <span>You can still save it — for example when you are sure the clash is intended.</span>
+        <span>{blocked ? "A room holds one lecture at a time. Pick another room or another time." : "You can still save it — for example when you are sure the clash is intended."}</span>
       </div>
     </div>
   );
@@ -149,18 +151,20 @@ function Modal({ title, sub, onClose, busy, children, footer, wide }) {
 function useSubmit() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [conflicts, setConflicts] = useState([]);
+  const [conflicts, setConflictList] = useState([]);
+  const [blocked, setBlocked] = useState(false); // a room clash: "Save anyway" is not offered
+  const setConflicts = (list) => { setConflictList(list); if (!list.length) setBlocked(false); };
   const run = async (fn) => {
     setBusy(true); setError("");
     try { await fn(); return true; }
     catch (err) {
-      if (err.status === 409 && err.data?.conflicts?.length) setConflicts(err.data.conflicts);
-      else { setConflicts([]); setError(err.message); }
+      if (err.status === 409 && err.data?.conflicts?.length) { setConflictList(err.data.conflicts); setBlocked(err.data.blocked === true); }
+      else { setConflictList([]); setBlocked(false); setError(err.message); }
       setBusy(false);
       return false;
     }
   };
-  return { busy, error, conflicts, run, setConflicts, setError, setBusy };
+  return { busy, error, conflicts, blocked, run, setConflicts, setError, setBusy };
 }
 
 // ── Add / edit a weekly slot (permanent) ─────────────────────────────────────
@@ -178,7 +182,9 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
   const [replace, setReplace] = useState([]);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [picks, setPicks] = useState({}); // elective group: subject_id -> { teacher, room }
+  const [kind, setKind] = useState(lecture?.kind || "");   // "" (lecture) | tutorial | lab
   const sub = useSubmit();
+  const roomList = useRooms(day, start, end, editing ? lecture.lecture_id : "");
 
   // elective groups of this semester: one slot, a room (and teacher) for each subject
   const groups = useMemo(() => {
@@ -196,6 +202,9 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
 
   const subject = data.subjects.find((s) => s.subject_id === subjectId);
   const custom = editing && !lecture.subject_id;
+  const kinds = subject ? [["", "Lecture"], ...(subject.has_tutorial ? [["tutorial", "Tutorial"]] : []), ...(subject.has_lab ? [["lab", "Lab"]] : [])] : [["", "Lecture"]];
+  const effKind = subject && subject.kind === "lab" ? "lab" : kind;
+  useEffect(() => { if (!editing && !kinds.some(([k]) => k === kind)) setKind(""); }, [subjectId]); // eslint-disable-line
   const valid = (subjectId || custom) && toMin(end) > toMin(start) && groupReady;
   // the other options of the same elective group may run at the same time, so they are not a clash
   const clashing = !editing && !group && valid
@@ -213,10 +222,10 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
   const save = (force) => sub.run(async () => {
     if (editing) {
       const body = { day, start_time: start, end_time: end, room, force: force || undefined };
-      if (teacher !== initialTeacher) body.teacher_id = teacher || subject?.teacher_assigned || lecture.teacher_id;
+      if (lecture.kind !== "tutorial" && teacher !== initialTeacher) body.teacher_id = teacher || subject?.teacher_assigned || lecture.teacher_id;
       if (division !== initialDivision) body.division_id = division || null;
-      await headApi.put(`/timetable/${lecture.lecture_id}`, body);
-      onSaved("Lecture updated for every week.");
+      const res = await headApi.put(`/timetable/${lecture.lecture_id}`, body);
+      onSaved(res.room_requested ? `Lecture updated. ${res.room_requested} belongs to another course, so a request was sent. The lecture keeps its current room until it is approved.` : "Lecture updated for every week.");
     } else if (group) {
       const res = await headApi.post("/timetable/group", {
         course_id: course.course_id, semester, group: group.name, day, start_time: start, end_time: end,
@@ -227,9 +236,12 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
     } else {
       const res = await headApi.post("/timetable", {
         course_id: course.course_id, subject_id: subjectId, day, start_time: start, end_time: end, room,
-        teacher_id: teacher || undefined, division_id: division || undefined, replaces: replace.length ? replace : undefined, force: force || undefined,
+        kind: effKind || undefined,
+        teacher_id: effKind === "tutorial" ? undefined : teacher || undefined, division_id: division || undefined, replaces: replace.length ? replace : undefined, force: force || undefined,
       });
-      onSaved(`Lecture added to ${day}${res.replaced ? ` (replaced ${plural(res.replaced, "lecture")})` : ""}.`);
+      onSaved(res.room_requested
+        ? `Lecture added to ${day}. ${res.room_requested} belongs to another course, so a request was sent. The lecture has no room until it is approved.`
+        : `Lecture added to ${day}${res.replaced ? ` (replaced ${plural(res.replaced, "lecture")})` : ""}.`);
     }
   });
 
@@ -253,7 +265,7 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
             )
           )}
           <button type="button" className="mg-btn" onClick={onClose} disabled={sub.busy}>Cancel</button>
-          {sub.conflicts.length > 0 ? (
+          {sub.conflicts.length > 0 && !sub.blocked ? (
             <button type="button" className="mg-btn mg-btn--danger" onClick={() => save(true)} disabled={sub.busy}>Save anyway</button>
           ) : (
             <button type="button" className="mg-btn mg-btn--primary" onClick={() => save(false)} disabled={!valid || sub.busy}>
@@ -277,6 +289,23 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
           </optgroup>
         </select>
       </div>
+      {!editing && !group && subject && (kinds.length > 1 || subject.kind === "lab") && (
+        <div className="mg-field">
+          <span className="mg-label" id="tt-kind-label">Session type</span>
+          {subject.kind === "lab" ? (
+            <span className="mg-help">Lab sessions: this subject is a lab, so every slot uses a lab room.</span>
+          ) : (
+            <div className="tt-seg" role="radiogroup" aria-labelledby="tt-kind-label">
+              {kinds.map(([k, l]) => (
+                <button key={k || "lecture"} type="button" role="radio" aria-checked={kind === k} disabled={sub.busy}
+                        className={`tt-seg-btn${kind === k ? " tt-seg-btn--on" : ""}`} onClick={() => { setKind(k); setRoom(""); sub.setConflicts([]); }}>{l}</button>
+              ))}
+            </div>
+          )}
+          {kind === "tutorial" && <span className="mg-help">A tutorial uses the subject's classroom and is taught by the subject's teacher. Attendance counts for the subject.</span>}
+        </div>
+      )}
+      {editing && lecture.kind && <span className="mg-help"><strong>{lecture.kind === "lab" ? "Lab" : "Tutorial"}</strong> session of {lecture.subject_name}.</span>}
       <ApplyTo id="tt-div" divisions={data.divisions || []} value={division} disabled={sub.busy}
                onChange={(v) => { setDivision(v); sub.setConflicts([]); }} />
       <div className="tt-two">
@@ -289,7 +318,7 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
         {!group && (
           <div className="mg-field">
             <label className="mg-label" htmlFor="tt-room">Room</label>
-            <input id="tt-room" className="mg-input" value={room} maxLength={30} disabled={sub.busy} placeholder="e.g. Lab-1" onChange={(e) => setRoom(e.target.value)} />
+            <RoomSelect id="tt-room" rooms={roomList.rooms} value={room} disabled={sub.busy} onlyType={effKind === "lab" || (editing && lecture.kind === "lab") ? "lab" : "classroom"} onChange={(v) => { setRoom(v); sub.setConflicts([]); }} />
           </div>
         )}
       </div>
@@ -315,8 +344,9 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
             return (
               <div className="tt-group-row" key={s.subject_id}>
                 <div className="tt-group-name"><strong>{s.subject_code}</strong><span>{s.subject_name}</span></div>
-                <input className="mg-input" value={p.room} maxLength={30} disabled={sub.busy} placeholder="Room" aria-label={`Room for ${s.subject_name}`}
-                       onChange={(e) => setPick(s.subject_id, { room: e.target.value })} />
+                <RoomSelect rooms={roomList.rooms} value={p.room} disabled={sub.busy} ownOnly onlyType="classroom" ariaLabel={`Room for ${s.subject_name}`}
+                            taken={group.subjects.filter((x) => x.subject_id !== s.subject_id).map((x) => pick(x.subject_id).room).filter(Boolean)}
+                            onChange={(v) => setPick(s.subject_id, { room: v })} />
                 <TeacherSelect id={`tt-t-${s.subject_id}`} teachers={teachers} value={p.teacher} disabled={sub.busy} onChange={(v) => setPick(s.subject_id, { teacher: v })}
                                defaultLabel={s.teacher_name ? s.teacher_name : "Pick a teacher"} />
               </div>
@@ -331,9 +361,15 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
       ) : (
         <div className="mg-field">
           <label className="mg-label" htmlFor="tt-teacher">Teacher</label>
-          <TeacherSelect id="tt-teacher" teachers={teachers} value={teacher} disabled={sub.busy} onChange={(v) => { setTeacher(v); sub.setConflicts([]); }}
-                         defaultLabel={subject?.teacher_name ? `Subject's teacher — ${subject.teacher_name}` : "Subject's teacher (none assigned yet)"} />
-          <span className="mg-help">Pick someone else to give this slot its own teacher, without changing the subject's teacher.</span>
+          {effKind === "tutorial" || (editing && lecture.kind === "tutorial") ? (
+            <span className="mg-help">{subject?.teacher_name ? `${subject.teacher_name} (the subject's teacher)` : "The subject's teacher. Assign one in Subjects & Faculty first."}</span>
+          ) : (
+            <>
+              <TeacherSelect id="tt-teacher" teachers={teachers} value={teacher} disabled={sub.busy} onChange={(v) => { setTeacher(v); sub.setConflicts([]); }}
+                             defaultLabel={subject?.teacher_name ? `Subject's teacher — ${subject.teacher_name}` : "Subject's teacher (none assigned yet)"} />
+              <span className="mg-help">Pick someone else to give this slot its own teacher, without changing the subject's teacher.</span>
+            </>
+          )}
         </div>
       )}
 
@@ -355,7 +391,7 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
           Need a change for one day only? <span>Change for one day →</span>
         </button>
       )}
-      <ConflictBox conflicts={sub.conflicts} />
+      <ConflictBox conflicts={sub.conflicts} blocked={sub.blocked} />
       {sub.error && <div className="mg-banner mg-banner--error" role="alert"><span className="mg-banner-text">⚠ {sub.error}</span></div>}
     </Modal>
   );
@@ -372,6 +408,7 @@ function OneDayDialog({ lecture, data, teachers, course, semester, onClose, onSa
   const [room, setRoom] = useState(lecture.room || "");
   const [note, setNote] = useState("");
   const sub = useSubmit();
+  const roomList = useRooms(date ? weekdayOf(date) : lecture.day, start, end, lecture.lecture_id);
 
   const changed = teacher || start !== lecture.start_time || end !== lecture.end_time || room !== (lecture.room || "");
   const valid = date && (what === "cancel" || (changed && toMin(end) > toMin(start)));
@@ -398,7 +435,7 @@ function OneDayDialog({ lecture, data, teachers, course, semester, onClose, onSa
       footer={
         <>
           <button type="button" className="mg-btn" onClick={onClose} disabled={sub.busy}>Cancel</button>
-          {sub.conflicts.length > 0 ? (
+          {sub.conflicts.length > 0 && !sub.blocked ? (
             <button type="button" className="mg-btn mg-btn--danger" onClick={() => save(true)} disabled={sub.busy}>Save anyway</button>
           ) : (
             <button type="button" className="mg-btn mg-btn--primary" onClick={() => save(false)} disabled={!valid || sub.busy}>
@@ -445,7 +482,7 @@ function OneDayDialog({ lecture, data, teachers, course, semester, onClose, onSa
           </div>
           <div className="mg-field">
             <label className="mg-label" htmlFor="od-room">Room</label>
-            <input id="od-room" className="mg-input" value={room} maxLength={30} disabled={sub.busy} onChange={(e) => { setRoom(e.target.value); sub.setConflicts([]); }} />
+            <RoomSelect id="od-room" rooms={roomList.rooms} value={room} ownOnly disabled={sub.busy} onChange={(v) => { setRoom(v); sub.setConflicts([]); }} />
           </div>
           {!changed && <span className="mg-help">Change at least one of teacher, time or room.</span>}
         </>
@@ -456,7 +493,7 @@ function OneDayDialog({ lecture, data, teachers, course, semester, onClose, onSa
         <input id="od-note" className="mg-input" value={note} maxLength={120} disabled={sub.busy} placeholder="e.g. Teacher on leave" onChange={(e) => setNote(e.target.value)} />
       </div>
 
-      <ConflictBox conflicts={sub.conflicts} />
+      <ConflictBox conflicts={sub.conflicts} blocked={sub.blocked} />
       {sub.error && <div className="mg-banner mg-banner--error" role="alert"><span className="mg-banner-text">⚠ {sub.error}</span></div>}
     </Modal>
   );
@@ -484,6 +521,7 @@ function SpecialDialog({ data, teachers, course, semester, defaultDivision, onCl
   const valid = (subjectId || title.trim()) && toMin(end) > toMin(start) && (scope === "weekly" || date >= data.today);
   const clashing = valid ? data.lectures.filter((l) => l.day === day && sharesStudents(l.division_id || "", division) && overlaps(toMin(start), toMin(end), toMin(l.start_time), toMin(l.end_time))) : [];
   const picked = replace === null ? clashing.map((l) => l.lecture_id) : replace.filter((id) => clashing.some((l) => l.lecture_id === id));
+  const roomList = useRooms(day, start, end, "");
 
   const save = (force) => sub.run(async () => {
     if (scope === "date") {
@@ -514,7 +552,7 @@ function SpecialDialog({ data, teachers, course, semester, defaultDivision, onCl
       footer={
         <>
           <button type="button" className="mg-btn" onClick={onClose} disabled={sub.busy}>Cancel</button>
-          {sub.conflicts.length > 0 ? (
+          {sub.conflicts.length > 0 && !sub.blocked ? (
             <button type="button" className="mg-btn mg-btn--danger" onClick={() => save(true)} disabled={sub.busy}>Save anyway</button>
           ) : (
             <button type="button" className="mg-btn mg-btn--primary" onClick={() => save(false)} disabled={!valid || sub.busy}>
@@ -550,7 +588,7 @@ function SpecialDialog({ data, teachers, course, semester, defaultDivision, onCl
         )}
         <div className="mg-field">
           <label className="mg-label" htmlFor="sp-room">Room</label>
-          <input id="sp-room" className="mg-input" value={room} maxLength={30} disabled={sub.busy} onChange={(e) => setRoom(e.target.value)} />
+          <RoomSelect id="sp-room" rooms={roomList.rooms} value={room} ownOnly={scope === "date"} disabled={sub.busy} onChange={(v) => { setRoom(v); sub.setConflicts([]); }} />
         </div>
       </div>
       {scope === "date" && <span className="mg-help">{weekdayOf(date)}</span>}
@@ -601,7 +639,7 @@ function SpecialDialog({ data, teachers, course, semester, defaultDivision, onCl
           <input id="sp-note" className="mg-input" value={note} maxLength={120} disabled={sub.busy} placeholder="e.g. Guest lecture" onChange={(e) => setNote(e.target.value)} />
         </div>
       )}
-      <ConflictBox conflicts={sub.conflicts} />
+      <ConflictBox conflicts={sub.conflicts} blocked={sub.blocked} />
       {sub.error && <div className="mg-banner mg-banner--error" role="alert"><span className="mg-banner-text">⚠ {sub.error}</span></div>}
     </Modal>
   );
@@ -620,7 +658,7 @@ function lanesOf(list) {
   return { placed, count: Math.max(1, ends.length) };
 }
 
-function Grid({ lectures, colorOf, onSlot, onEmpty }) {
+function Grid({ lectures, colorOf, onSlot, onEmpty, courseId }) {
   const days = useMemo(() => DAYS.filter((d, i) => i < 6 || lectures.some((l) => l.day === d)), [lectures]);
   const { from, to } = useMemo(() => {
     if (!lectures.length) return { from: 9 * 60, to: 16 * 60 };
@@ -666,26 +704,38 @@ function Grid({ lectures, colorOf, onSlot, onEmpty }) {
                 {placed.map(({ l, lane }) => {
                   const [bg, fg] = colorOf(l.subject_id);
                   return (
-                    <button
-                      type="button"
+                    <div
                       key={l.lecture_id}
-                      className="tt-slot"
+                      className="tt-slotwrap cm-hover"
                       style={{
                         left: pct(toMin(l.start_time)), width: `calc(${((toMin(l.end_time) - toMin(l.start_time)) / total) * 100}% - 4px)`,
-                        top: `calc(${lane} * var(--lane-h) + 4px)`, height: "calc(var(--lane-h) - 4px)", background: bg, color: fg, borderColor: fg,
+                        top: `calc(${lane} * var(--lane-h) + 4px)`, height: "calc(var(--lane-h) - 4px)",
                       }}
+                    >
+                    <button
+                      type="button"
+                      className="tt-slot"
+                      style={{ background: bg, color: fg, borderColor: fg }}
                       onClick={() => onSlot(l)}
                       title={`${l.subject_name} · ${l.start_time}–${l.end_time}${l.teacher_name ? ` · ${l.teacher_name}` : ""}${l.room ? ` · ${l.room}` : ""}`}
                       aria-label={`${l.subject_code || l.subject_name} ${day} ${l.start_time} to ${l.end_time}`}
                     >
-                      <span className="tt-slot-code">{l.subject_code || l.subject_name}{l.elective_group ? ` · ${l.elective_group}` : ""}{l.division_name ? ` · ${l.division_name}` : ""}</span>
+                      <span className="tt-slot-code">{l.subject_code || l.subject_name}{l.kind === "tutorial" ? " · Tutorial" : l.kind === "lab" ? " · Lab" : ""}{l.elective_group ? ` · ${l.elective_group}` : ""}{l.division_name ? ` · ${l.division_name}` : ""}</span>
                       <span className="tt-slot-name">{l.subject_name}</span>
                       <span className="tt-slot-meta">
                         {l.teacher_name || "No teacher"}{l.teacher_pinned ? " *" : ""}{l.room ? ` · ${l.room}` : ""}
+                        {l.room_pending ? <span className="tt-slot-pending"> · {l.room_pending}?</span> : null}
                       </span>
                       <span className="tt-slot-time">{l.start_time}–{l.end_time}</span>
                       {l.pending_changes > 0 && <span className="tt-slot-flag tt-noprint" title="A one-day change is scheduled">{l.pending_changes}</span>}
                     </button>
+                    {courseId && (
+                      <CommentPin
+                        courseId={courseId}
+                        about={`${l.subject_code || l.subject_name}${l.kind === "tutorial" ? " Tutorial" : l.kind === "lab" ? " Lab" : ""} · ${day} ${l.start_time}-${l.end_time}${l.division_name ? ` · Div ${l.division_name}` : ""}`}
+                      />
+                    )}
+                    </div>
                   );
                 })}
               </div>
@@ -803,6 +853,9 @@ export default function TimetablePage() {
   const [modal, setModal] = useState(null);
   const [view, setView] = useState("all"); // all | common | <division_id>
   const seq = useRef(0);
+  const reloadRef = useRef(null);
+  // answers to my room requests change the timetable: refresh it when one arrives
+  const requests = useRoomRequests(() => { if (reloadRef.current) reloadRef.current(); });
 
   const loadContext = useCallback(async () => {
     setLoading(true); setCtxError("");
@@ -842,6 +895,7 @@ export default function TimetablePage() {
   }, [notice]);
 
   const course = ctx?.courses.find((c) => c.course_id === courseId) || null;
+  reloadRef.current = () => { if (courseId) load(courseId, semester); };
   const closeModal = useCallback(() => setModal(null), []);
   const saved = (text) => { setModal(null); setNotice({ type: "success", text }); load(courseId, semester); loadTeachers(); };
 
@@ -876,6 +930,9 @@ export default function TimetablePage() {
       actions={course && data && (
         <>
           <button className="mg-btn" onClick={() => window.print()}>Print</button>
+          <button className="mg-btn" onClick={() => setModal({ type: "rooms" })}>
+            Rooms{requests.incoming.length > 0 ? ` (${requests.incoming.length})` : ""}
+          </button>
           <button className="mg-btn" onClick={() => setModal({ type: "special" })} disabled={!data.subjects.length}>Special session</button>
           <button className="mg-btn mg-btn--primary" onClick={() => setModal({ type: "add" })} disabled={!data.subjects.length}>+ Add lecture</button>
         </>
@@ -891,6 +948,17 @@ export default function TimetablePage() {
         <div className={`mg-banner mg-banner--${notice.type} tt-noprint`} role="status">
           <span className="mg-banner-text">{notice.type === "success" ? "✓ " : ""}{notice.text}</span>
           <button className="mg-banner-action" onClick={() => setNotice(null)}>Dismiss</button>
+        </div>
+      )}
+
+      {requests.incoming.length > 0 && modal?.type !== "rooms" && (
+        <div className="mg-banner mg-banner--warn tt-noprint" role="status">
+          <span className="mg-banner-text">
+            {requests.incoming.length === 1
+              ? `${requests.incoming[0].course_abbr} is asking for room ${requests.incoming[0].room_name} on ${requests.incoming[0].day} ${requests.incoming[0].start_time}-${requests.incoming[0].end_time}.`
+              : `${requests.incoming.length} room requests are waiting for your answer.`}
+          </span>
+          <button className="mg-banner-action" onClick={() => setModal({ type: "rooms" })}>Review</button>
         </div>
       )}
 
@@ -966,6 +1034,7 @@ export default function TimetablePage() {
               </div>
             )}
             <Grid
+              courseId={courseId}
               lectures={shown}
               colorOf={colorOf}
               onSlot={(l) => setModal({ type: "edit", lecture: l })}
@@ -1019,6 +1088,10 @@ export default function TimetablePage() {
       )}
       {data && course && modal?.type === "special" && (
         <SpecialDialog data={data} teachers={teachers} course={course} semester={semester} defaultDivision={viewDivision ? viewDivision.division_id : ""} onClose={closeModal} onSaved={saved} />
+      )}
+      {modal?.type === "rooms" && ctx && (
+        <RoomsDialog courses={ctx.courses} courseId={courseId} requests={requests} onClose={closeModal}
+                     onChanged={() => { if (courseId) load(courseId, semester); }} />
       )}
       {modal?.type === "undo" && (
         <UndoDialog override={modal.override} onClose={closeModal}

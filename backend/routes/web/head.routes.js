@@ -61,6 +61,18 @@
  *   GET    /students/:id/report?threshold=75
  *   GET    /reports?scope=student|class|department&student_id=&course_id=&semester=&from=&to=&threshold=75   full report: attendance per subject, quizzes, assignments, OD
  *   GET    /audit?limit=
+ *
+ * DELEGATION  The head can hand a Manage area (semesters, subjects, divisions, timetable, calendar, reports) of a course
+ *        to other teachers. A delegate calls the SAME routes above, limited to the courses + areas delegated to them;
+ *        the head keeps full access. Only the head can delegate, read the audit log or run the rollover preview.
+ *   GET    /delegations                              (head) every delegation of the department + open suggestion counts
+ *   POST   /delegations                              (head) { course_id, area, teacher_id }
+ *   DELETE /delegations/:id                          (head) take an area back
+ *   GET    /notes?course_id=&area=                   suggestion notes of one delegated area (head + its delegates)
+ *   POST   /notes                                    { course_id, area, text, about? }
+ *   POST   /notes/:id/reply                          { text }
+ *   POST   /notes/:id/status                         { status: "open" | "done" }
+ *   DELETE /notes/:id                                its author, or the head
  */
 
 const express = require("express");
@@ -250,19 +262,42 @@ async function loadHeadContext(uid) {
   if (teacher.approval_status !== "approved" || teacher.is_active === false) deny(403, "Your account is not active");
 
   const department = String(teacher.head_of || "").trim();
-  if (!department) deny(403, "You are not the head of any department");
-
   const aishe_code = teacher.aishe_code;
   if (!aishe_code) deny(403, "No institute linked to your account");
 
-  const courses = (await collegeCoursesOf(aishe_code)).filter((c) => courseInDepartment(c, department));
+  if (department) {
+    const courses = (await collegeCoursesOf(aishe_code)).filter((c) => courseInDepartment(c, department));
+    return {
+      uid,
+      teacher_id: teacherDoc.id,
+      teacher,
+      aishe_code,
+      department,
+      is_head: true,
+      courses,
+      allCourses: courses,
+      courseMap: Object.fromEntries(courses.map((c) => [c.course_id, c])),
+    };
+  }
+
+  // not a head: allowed only through areas a head delegated to this teacher
+  const dSnap = await db.collection("delegations").where("teacher_id", "==", teacherDoc.id).get();
+  const rows = dSnap.docs.map((d) => d.data()).filter((r) => r.aishe_code === aishe_code);
+  if (!rows.length) deny(403, "You are not the head of any department");
+  const delegated = {};   // course_id -> Set(area)
+  rows.forEach((r) => { (delegated[r.course_id] = delegated[r.course_id] || new Set()).add(r.area); });
+  const courses = (await collegeCoursesOf(aishe_code)).filter((c) => delegated[c.course_id]);
+  if (!courses.length) deny(403, "The courses delegated to you no longer exist");
   return {
     uid,
     teacher_id: teacherDoc.id,
     teacher,
     aishe_code,
-    department,
+    department: String(courses[0].department || courses[0].abbr || "").trim(),
+    is_head: false,
+    delegated,
     courses,
+    allCourses: courses,
     courseMap: Object.fromEntries(courses.map((c) => [c.course_id, c])),
   };
 }
@@ -297,6 +332,48 @@ async function requireHead(req, res, next) {
 
 router.use(requireHead);
 router.use(headLimit);
+
+// ─── Delegation: which Manage areas a delegate may use ───────────────────────
+const AREAS = [
+  { key: "semesters", label: "Semesters" },
+  { key: "subjects",  label: "Subjects & Faculty" },
+  { key: "divisions", label: "Divisions" },
+  { key: "timetable", label: "Timetable" },
+  { key: "calendar",  label: "Academic Calendar" },
+  { key: "reports",   label: "Student Reports" },
+];
+const SUBJECT_TYPES = ["compulsory", "elective", "lab", "tutorial"];
+const AREA_KEYS = new Set(AREAS.map((a) => a.key));
+const areaLabel = (k) => (AREAS.find((a) => a.key === k) || {}).label || k;
+const MAX_DELEGATES = 5;   // per course + area
+
+const AREA_ROUTES = [
+  [/^\/semesters(\/|$)/, "semesters"],
+  [/^\/(subjects|elective-groups)(\/|$)/, "subjects"],
+  [/^\/divisions(\/|$)/, "divisions"],
+  [/^\/(timetable|rooms|room-requests)(\/|$)/, "timetable"],
+  [/^\/calendar(\/|$)/, "calendar"],
+  [/^\/(students|reports)(\/|$)/, "reports"],
+];
+const SHARED_ROUTES = [/^\/context$/, /^\/teachers$/, /^\/notes(\/|$)/];   // checked inside, per course + area
+
+// A head passes untouched. A delegate gets a copy of the context limited to the courses delegated for THIS area,
+// so every existing course check (courseOrFail, courseMap, courses) enforces the delegation without further changes.
+function areaGate(req, res, next) {
+  const ctx = req.head;
+  if (ctx.is_head) return next();
+  if (SHARED_ROUTES.some((re) => re.test(req.path))) return next();
+  const hit = AREA_ROUTES.find(([re]) => re.test(req.path));
+  if (!hit) return res.status(403).json({ success: false, error: "Only the head can do this" });
+  // the division list is a filter on the timetable and report pages too: reading it is allowed for those areas
+  const allowed = req.method === "GET" && req.path === "/divisions" ? ["divisions", "timetable", "reports"] : [hit[1]];
+  const courses = ctx.allCourses.filter((c) => ctx.delegated[c.course_id] && allowed.some((a) => ctx.delegated[c.course_id].has(a)));
+  if (!courses.length) return res.status(403).json({ success: false, error: `${areaLabel(hit[1])} has not been delegated to you` });
+  req.head = { ...ctx, courses, courseMap: Object.fromEntries(courses.map((c) => [c.course_id, c])) };
+  return next();
+}
+router.use(areaGate);
+const headOnly = (req) => { if (!req.head.is_head) fail(403, "Only the head can do this"); };
 
 function courseOrFail(req, course_id) {
   if (!course_id || typeof course_id !== "string") fail(400, "course_id is required");
@@ -574,9 +651,13 @@ async function findConflicts(req, cand) {
 // GET /context
 // ─────────────────────────────────────────────────────────────────────────────
 router.get("/context", wrap(async (req, res) => {
-  const { teacher, teacher_id, department, aishe_code, courses } = req.head;
+  const { teacher, teacher_id, department, aishe_code, courses, is_head, delegated } = req.head;
+  const areas = {};
+  courses.forEach((c) => { areas[c.course_id] = is_head ? AREAS.map((a) => a.key) : [...(delegated[c.course_id] || [])]; });
   return res.json({
     success: true,
+    is_head: !!is_head,
+    areas,
     head: {
       teacher_id,
       name: personName(teacher),
@@ -865,6 +946,11 @@ router.get("/subjects", wrap(async (req, res) => {
         teacher_assigned: s.teacher_assigned || null,
         teacher_name: s.teacher_assigned ? (names[s.teacher_assigned] || "Unknown") : null,
         created_by_role: s.created_by_role || "institute",
+        kind: s.kind || null,
+        has_tutorial: s.has_tutorial === true,
+        has_lab: s.has_lab === true,
+        tutorial_slots: lecs.filter((l) => l.kind === "tutorial").length,
+        lab_slots: lecs.filter((l) => l.kind === "lab").length,
         lecture_count: lecs.length,
         timetable_teacher_name: stale ? (names[stale.teacher_id] || "Unknown") : null,
       };
@@ -875,6 +961,25 @@ router.get("/subjects", wrap(async (req, res) => {
 router.post("/subjects", wrap(async (req, res) => {
   const body = req.body || {};
   const course = courseOrFail(req, body.course_id);
+
+  // Subject types: compulsory | elective | lab | tutorial.
+  //   tutorial                 always belongs to an existing subject (same classroom, same teacher, same attendance)
+  //   lab + parent_subject_id  a lab of an existing subject (uses its classroom)
+  //   lab without a parent     a new lab subject with its own classroom
+  const type = String(body.type || (body.compulsary === false ? "elective" : "compulsory"));
+  if (!SUBJECT_TYPES.includes(type)) fail(400, `type must be one of ${SUBJECT_TYPES.join(", ")}`);
+  if (type === "tutorial" || (type === "lab" && body.parent_subject_id)) {
+    if (!body.parent_subject_id) fail(400, "Pick the subject this tutorial belongs to");
+    const { ref: pref, subject: parent } = await loadHeadSubject(req, body.parent_subject_id);
+    if (parent.course_id !== course.course_id) fail(400, "That subject belongs to another course");
+    if (parent.kind === "lab") fail(400, "A lab subject can't have its own tutorial or lab. Pick the theory subject.");
+    const field = type === "tutorial" ? "has_tutorial" : "has_lab";
+    if (parent[field] === true) fail(409, `${parent.subject_name} already has a ${type}`);
+    await pref.update({ [field]: true, updated_at: ts() });
+    dropProfileCaches();
+    await audit(req, "subject.add_" + type, "subjects", parent.subject_id, { subject_code: parent.subject_code });
+    return res.status(201).json({ success: true, subject_id: parent.subject_id, linked: true });
+  }
 
   const subject_name = String(body.subject_name || "").trim();
   const subject_code = String(body.subject_code || "").trim().toUpperCase();
@@ -887,7 +992,7 @@ router.post("/subjects", wrap(async (req, res) => {
     fail(409, `A subject with code ${subject_code} already exists in ${course.abbr}`);
   }
 
-  const compulsary = body.compulsary !== false;
+  const compulsary = type === "elective" ? false : true;
   const elective_group = compulsary ? null : cleanGroup(body.elective_group);
   const elective_code = compulsary ? null : (String(body.elective_code || "").trim().toUpperCase().slice(0, 20) || null);
   const ref = db.collection("subjects").doc();
@@ -901,6 +1006,7 @@ router.post("/subjects", wrap(async (req, res) => {
     compulsary,
     elective_group,
     elective_code,
+    kind: type === "lab" ? "lab" : undefined,
     teacher_assigned: null,
     department: req.head.department,
     created_by: req.head.teacher_id,
@@ -962,6 +1068,19 @@ router.put("/subjects/:id", wrap(async (req, res) => {
   if (body.elective_code !== undefined) {
     const willBeCompulsory = update.compulsary !== undefined ? update.compulsary : subject.compulsary !== false;
     update.elective_code = willBeCompulsory ? FieldDelete() : (String(body.elective_code || "").trim().toUpperCase().slice(0, 20) || FieldDelete());
+  }
+
+  // tutorial / lab attached to this subject: switch on or off (off only when no slot uses it)
+  for (const [field, kindName] of [["has_tutorial", "tutorial"], ["has_lab", "lab"]]) {
+    if (body[field] === undefined) continue;
+    const want = body[field] === true;
+    if (want === (subject[field] === true)) continue;
+    if (subject.kind === "lab") fail(400, "A lab subject can't have its own tutorial or lab");
+    if (!want) {
+      const used = (await db.collection("lectures").where("subject_id", "==", subject.subject_id).get()).docs.filter((d) => d.data().kind === kindName).length;
+      if (used) fail(409, `${used} timetable slot${used === 1 ? " is" : "s are"} using this ${kindName}. Remove ${used === 1 ? "it" : "them"} from the timetable first.`);
+    }
+    update[field] = want;
   }
 
   if (!Object.keys(update).length) fail(400, "Nothing to update");
@@ -1470,10 +1589,12 @@ function lectureView(l, names = {}, subjectsById = {}) {
     division_name: l.division_name || "",
     elective_group: l.elective_group || (subj.compulsary === false ? subj.elective_group || null : null),
     slot_id: l.slot_id || null,
+    kind: l.kind || (subj.kind === "lab" ? "lab" : ""),
     day: l.day,
     start_time: l.start_time,
     end_time: l.end_time,
     room: l.room || "",
+    room_pending: l.room_pending ? l.room_pending.name || "" : "",
   };
 }
 
@@ -1774,6 +1895,9 @@ router.get("/timetable", wrap(async (req, res) => {
         subject_id: s.subject_id, subject_name: s.subject_name, subject_code: s.subject_code,
         compulsary: s.compulsary !== false,
         elective_group: s.compulsary !== false ? null : (s.elective_group || null),
+        kind: s.kind || null,
+        has_tutorial: s.has_tutorial === true,
+        has_lab: s.has_lab === true,
         teacher_assigned: s.teacher_assigned || null,
         teacher_name: s.teacher_assigned ? (names[s.teacher_assigned] || "") : "",
       })),
@@ -1783,6 +1907,19 @@ router.get("/timetable", wrap(async (req, res) => {
       .map((d) => ({ division_id: d.division_id, name: d.name })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
   });
 }));
+
+// "lecture" (default) | "tutorial" | "lab" for a slot of this subject. A lab subject's slots are always labs.
+function slotKind(subject, raw) {
+  const want = String(raw || "").trim();
+  if (want && !["lecture", "tutorial", "lab"].includes(want)) fail(400, "kind must be lecture, tutorial or lab");
+  if (subject.kind === "lab") {
+    if (want === "tutorial") fail(400, "A lab subject has no tutorial");
+    return "lab";
+  }
+  if (want === "tutorial" && subject.has_tutorial !== true) fail(400, `${subject.subject_name} has no tutorial yet. Add one from Subjects & Faculty first.`);
+  if (want === "lab" && subject.has_lab !== true) fail(400, `${subject.subject_name} has no lab yet. Add one from Subjects & Faculty first.`);
+  return want === "tutorial" || want === "lab" ? want : "";
+}
 
 function readSlotFields(body, current = {}) {
   const day = body.day !== undefined ? body.day : current.day;
@@ -1813,17 +1950,20 @@ router.post("/timetable", wrap(async (req, res) => {
   const body = req.body || {};
   const course = courseOrFail(req, body.course_id);
   // subject-less (custom) slot: guest lecture, seminar, ... identified by a title
-  let subject = null, teacher = null, sem, title = "";
+  let subject = null, teacher = null, sem, title = "", kind = "";
   const guest = String(body.guest || "").trim();
   if (body.subject_id) {
     subject = (await loadHeadSubject(req, body.subject_id)).subject;
     if (subject.course_id !== course.course_id) fail(400, "Subject does not belong to this course");
+    kind = slotKind(subject, body.kind);
+    if (kind === "tutorial" && body.teacher_id && body.teacher_id !== subject.teacher_assigned) fail(400, "A tutorial is taught by the subject's own teacher");
     const teacherId = body.teacher_id || subject.teacher_assigned;
     if (!teacherId) fail(400, "Allocate a teacher to this subject before scheduling it");
     teacher = await activeTeacherOrFail(req, teacherId);
     sem = parseSem(subject.semester);
     if (sem === null) fail(400, "This subject has no valid semester — edit the subject first");
   } else {
+    if (body.kind && body.kind !== "lecture") fail(400, "Only a subject's own slots can be a tutorial or a lab");
     title = String(body.title || "").trim();
     if (!title) fail(400, "Pick a subject or give the session a title");
     if (title.length > 80 || guest.length > 80) fail(400, "Title and guest name can be at most 80 characters");
@@ -1833,6 +1973,8 @@ router.post("/timetable", wrap(async (req, res) => {
   }
 
   const slot = readSlotFields(body);
+  const rr = await resolveRoom(req, slot.room, roomTypeFor(kind));
+  slot.room = rr.name;
   const division = await divisionOrFail(req, course, sem, body.division_id);
 
   // lectures this slot replaces (e.g. one 2-hour lecture instead of two 1-hour ones)
@@ -1847,6 +1989,7 @@ router.post("/timetable", wrap(async (req, res) => {
     ...slot, course_id: course.course_id, semester: sem, teacher_id: teacher ? teacher.id : undefined, exclude_ids: replaced.map((l) => l.lecture_id),
     division_id: division ? division.division_id : undefined, egroup: egroupOfSubject(subject),
   });
+  blockOnRoomClash(rr, conflicts);
   if (conflicts.length && body.force !== true) fail(409, "This slot clashes with an existing lecture", { conflicts });
 
   const ref = db.collection("lectures").doc();
@@ -1859,6 +2002,7 @@ router.post("/timetable", wrap(async (req, res) => {
     subject_name: subject ? (subject.subject_name || "") : title,
     subject_code: subject ? (subject.subject_code || "") : "",
     custom: subject ? undefined : true,
+    kind: kind || undefined,
     teacher_id: teacher ? teacher.id : undefined,
     teacher_name: teacher ? teacher.name : guest,
     teacher_pinned: subject && teacher.id !== subject.teacher_assigned ? true : undefined,
@@ -1867,16 +2011,19 @@ router.post("/timetable", wrap(async (req, res) => {
     day: slot.day,
     start_time: slot.start_time,
     end_time: slot.end_time,
-    room: slot.room,
+    room: rr.foreign ? "" : slot.room,
     department: req.head.department,
     created_by: req.head.teacher_id,
     created_at: ts(),
   }))];
   replaced.forEach((l) => ops.push((b) => b.delete(db.collection("lectures").doc(l.lecture_id))));
   await commitInBatches(ops);
+  for (const l of replaced) await cancelRoomRequests(l.lecture_id, "The timetable slot was replaced");
+  // a room of another course is requested from its owner; the slot is saved without a room until they answer
+  if (rr.foreign) await createRoomRequest(req, rr, course, { lecture_id: ref.id, subject_name: subject ? subject.subject_name : title }, slot);
 
   await audit(req, "timetable.create", "lectures", ref.id, { subject: subject ? subject.subject_code : title, replaced: replaced.length, ...slot });
-  return res.status(201).json({ success: true, lecture_id: ref.id, replaced: replaced.length });
+  return res.status(201).json({ success: true, lecture_id: ref.id, replaced: replaced.length, room_requested: rr.foreign ? rr.name : undefined });
 }));
 
 // One slot for a whole elective group: every subject of the group gets its own lecture at the same time,
@@ -1915,8 +2062,9 @@ router.post("/timetable/group", wrap(async (req, res) => {
     const teacherId = o.teacher_id || subject.teacher_assigned;
     if (!teacherId) fail(400, `${subject.subject_name}: allocate a teacher to this subject before scheduling it`);
     const teacher = await activeTeacherOrFail(req, teacherId);
-    const room = String(o.room || "").trim().slice(0, 30);
-    rows.push({ subject, teacher, room });
+    const rr = await resolveRoom(req, o.room, "classroom");
+    if (rr.foreign) fail(400, `${rr.name} belongs to ${rr.owner.course_abbr || "another course"}. Pick one of your own rooms for an elective slot, or set that subject's room later.`);
+    rows.push({ subject, teacher, room: rr.name, rr });
   }
 
   // the options run at the same time, so they can't share a teacher or a room
@@ -1938,6 +2086,7 @@ router.post("/timetable/group", wrap(async (req, res) => {
       ...slot, room: r.room, course_id: course.course_id, semester: sem, teacher_id: r.teacher.id,
       division_id: division ? division.division_id : undefined, egroup: egroupOfSubject(r.subject),
     });
+    blockOnRoomClash(r.rr, found.map((c) => ({ ...c, message: `${r.subject.subject_name}: ${c.message}` })));
     found.forEach((c) => conflicts.push({ ...c, message: `${r.subject.subject_name}: ${c.message}` }));
   }
   if (conflicts.length && body.force !== true) fail(409, "This slot clashes with an existing lecture", { conflicts });
@@ -1995,6 +2144,7 @@ router.put("/timetable/:id", wrap(async (req, res) => {
   }
   if (body.teacher_id !== undefined) {
     // permanent teacher for this slot (may differ from the subject's teacher)
+    if (lecture.kind === "tutorial" && body.teacher_id && body.teacher_id !== subjectTeacher) fail(400, "A tutorial is taught by the subject's own teacher");
     const t = await activeTeacherOrFail(req, body.teacher_id);
     teacher_id = t.id; teacher_name = t.name;
     pinned = !!subjectTeacher && t.id !== subjectTeacher;
@@ -2004,7 +2154,9 @@ router.put("/timetable/:id", wrap(async (req, res) => {
     teacher_id = t.id; teacher_name = t.name;
   }
 
-  const slot = readSlotFields(body, lecture);
+  const roomChanged = body.room !== undefined && roomName(body.room) !== roomName(lecture.room);
+  const rr = roomChanged ? await resolveRoom(req, body.room, roomTypeFor(lecture.kind)) : await lookupSavedRoom(req, lecture.room);
+  const slot = readSlotFields(roomChanged ? { ...body, room: rr.name } : body, lecture);
   let division_id = lecture.division_id || null, division_name = lecture.division_name || "";
   if (body.division_id !== undefined) {
     const dv = await divisionOrFail(req, req.head.courseMap[lecture.course_id], sem, body.division_id || null);
@@ -2014,17 +2166,26 @@ router.put("/timetable/:id", wrap(async (req, res) => {
     ...slot, course_id: lecture.course_id, semester: sem, teacher_id, exclude_id: lecture.lecture_id,
     division_id: division_id || undefined, egroup: lecture.subject_id ? await egroupOfSubjectId(lecture.subject_id) : undefined,
   });
+  blockOnRoomClash(rr, conflicts);
   if (conflicts.length && body.force !== true) fail(409, "This slot clashes with an existing lecture", { conflicts });
 
+  // a room of another course is requested from its owner; until they answer the slot keeps its current room
+  const keepRoom = roomChanged && rr.foreign;
   await ref.update(clean({
-    ...slot, teacher_id, teacher_name,
+    ...slot, ...(keepRoom ? { room: lecture.room || "" } : {}),
+    ...(roomChanged ? { room_pending: FieldDelete() } : {}),
+    teacher_id, teacher_name,
     teacher_pinned: pinned ? true : admin.firestore.FieldValue.delete(),
     division_id: division_id || admin.firestore.FieldValue.delete(),
     division_name: division_id ? division_name : admin.firestore.FieldValue.delete(),
     updated_by: req.head.teacher_id, updated_at: ts(),
   }));
+  if (roomChanged) {
+    await cancelRoomRequests(lecture.lecture_id, "The room was changed");
+    if (keepRoom) await createRoomRequest(req, rr, req.head.courseMap[lecture.course_id], lecture, slot);
+  }
   await audit(req, "timetable.update", "lectures", lecture.lecture_id, { ...slot, teacher_id });
-  return res.json({ success: true });
+  return res.json({ success: true, room_requested: keepRoom ? rr.name : undefined });
 }));
 
 router.delete("/timetable/:id", wrap(async (req, res) => {
@@ -2040,6 +2201,7 @@ router.delete("/timetable/:id", wrap(async (req, res) => {
   const pending = (await db.collection("timetable_overrides").where("lecture_id", "==", lecture.lecture_id).get())
     .docs.filter((d) => d.data().status === "scheduled");
   await commitInBatches([(b) => b.delete(ref), ...pending.map((d) => (b) => b.delete(d.ref))]);
+  await cancelRoomRequests(lecture.lecture_id, "The timetable slot was deleted");
 
   await audit(req, "timetable.delete", "lectures", lecture.lecture_id, {
     subject: lecture.subject_code || lecture.subject_name, day: lecture.day, start_time: lecture.start_time,
@@ -2073,7 +2235,7 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
     created_at: ts(),
   };
   const sameDay = await overridesOfDate(req, date);
-  let sem, lecture = null, cand, only = null, exclude = [];
+  let sem, lecture = null, cand, only = null, exclude = [], ovRoom = null;
 
   if (kind === "modify" || kind === "cancel") {
     if (!body.lecture_id) fail(400, "lecture_id is required");
@@ -2105,7 +2267,11 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
     if ((c.start_time && !st) || (c.end_time && !en)) fail(400, "start_time and end_time must be HH:MM (24h)");
     if (st && st !== lecture.start_time) changes.start_time = st;
     if (en && en !== lecture.end_time)   changes.end_time = en;
-    if (c.room !== undefined && String(c.room).trim() !== String(lecture.room || "")) changes.room = String(c.room).trim();
+    if (c.room !== undefined && roomName(c.room) !== roomName(lecture.room)) {
+      ovRoom = await resolveRoom(req, c.room);
+      if (ovRoom.foreign) fail(400, `${ovRoom.name} belongs to ${ovRoom.owner.course_abbr || "another course"}. Request it with a permanent timetable change instead.`);
+      changes.room = ovRoom.name;
+    }
     if (!Object.keys(changes).length) fail(400, "Nothing changes — pick another teacher, time or room");
     const newStart = changes.start_time || lecture.start_time, newEnd = changes.end_time || lecture.end_time;
     if (toMin(newStart) >= toMin(newEnd)) fail(400, "end_time must be after start_time");
@@ -2150,6 +2316,9 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
       if (sp.teacher_id) teacher = await activeTeacherOrFail(req, sp.teacher_id);
     }
     const slot = readSlotFields({ day, start_time: sp.start_time, end_time: sp.end_time, room: sp.room });
+    ovRoom = await resolveRoom(req, slot.room);
+    if (ovRoom.foreign) fail(400, `${ovRoom.name} belongs to ${ovRoom.owner.course_abbr || "another course"}. Pick one of your own rooms for a special session.`);
+    slot.room = ovRoom.name;
     const replaced = Array.isArray(body.replaces) && body.replaces.length
       ? await loadReplaceable(req, body.replaces, course, sem, day) : [];
     if (replaced.some((l) => l.override_id || sameDay.some((o) => o.lecture_id === l.lecture_id || (o.replaces || []).includes(l.lecture_id)))) {
@@ -2181,6 +2350,7 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
     await annotateElectiveGroups(list, course.course_id);
     let conflicts = conflictsAgainst(list, cand);
     if (only) conflicts = conflicts.filter((c) => only.has(c.type));
+    blockOnRoomClash(ovRoom, conflicts);
     if (conflicts.length && !force) fail(409, "This clashes with another session on that day", { conflicts });
   }
 
@@ -3087,6 +3257,494 @@ router.get("/reports", reportLimit, reportGate, wrap(async (req, res) => {
     subjects: scope === "class" || scope === "student" ? subjects.map((x) => ({ subject_id: x.subject_id, subject_code: x.subject_code || "", subject_name: x.subject_name || "" })) : [],
     summary, students: rows,
   });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// DELEGATION — the head hands a Manage area of a course to other teachers
+// ─────────────────────────────────────────────────────────────────────────────
+const delegationView = (d) => ({
+  id: d.id, course_id: d.course_id, area: d.area, teacher_id: d.teacher_id, teacher_name: d.teacher_name || "",
+  delegated_at: toISO(d.created_at),
+});
+
+router.get("/delegations", wrap(async (req, res) => {
+  headOnly(req);
+  const ids = new Set(req.head.courses.map((c) => c.course_id));
+  const [dSnap, nSnap] = await Promise.all([
+    db.collection("delegations").where("aishe_code", "==", req.head.aishe_code).get(),
+    db.collection("delegation_notes").where("aishe_code", "==", req.head.aishe_code).where("status", "==", "open").get(),
+  ]);
+  const open = {};
+  nSnap.docs.forEach((d) => { const n = d.data(); if (ids.has(n.course_id)) open[`${n.course_id}|${n.area}`] = (open[`${n.course_id}|${n.area}`] || 0) + 1; });
+  return res.json({
+    success: true,
+    areas: AREAS,
+    max_delegates: MAX_DELEGATES,
+    courses: req.head.courses.map((c) => ({ course_id: c.course_id, abbr: c.abbr || "", course_name: c.course_name || "" })),
+    delegations: dSnap.docs.map((d) => ({ id: d.id, ...d.data() })).filter((d) => ids.has(d.course_id)).map(delegationView),
+    open_notes: open,
+  });
+}));
+
+router.post("/delegations", wrap(async (req, res) => {
+  headOnly(req);
+  const body = req.body || {};
+  const course = courseOrFail(req, body.course_id);
+  const area = String(body.area || "");
+  if (!AREA_KEYS.has(area)) fail(400, "Pick what to delegate");
+  const teacher = await activeTeacherOrFail(req, body.teacher_id);
+  if (teacher.id === req.head.teacher_id) fail(400, "You already have access to everything. Pick another teacher.");
+
+  const id = `${course.course_id}__${area}__${teacher.id}`;
+  const ref = db.collection("delegations").doc(id);
+  const [existing, same] = await Promise.all([
+    ref.get(),
+    db.collection("delegations").where("course_id", "==", course.course_id).where("area", "==", area).get(),
+  ]);
+  if (existing.exists) return res.json({ success: true, id, already: true });
+  if (same.size >= MAX_DELEGATES) fail(409, `At most ${MAX_DELEGATES} teachers can share one area`);
+
+  await ref.set({
+    aishe_code: req.head.aishe_code,
+    course_id: course.course_id,
+    area,
+    teacher_id: teacher.id,
+    teacher_uid: teacher.data.user_id || null,
+    teacher_name: teacher.name,
+    delegated_by: req.head.teacher_id,
+    created_at: ts(),
+  });
+  if (teacher.data.user_id) headCtxCache.del(teacher.data.user_id);
+  await audit(req, "delegation.add", "delegations", id, { course: course.abbr, area, teacher: teacher.name });
+  if (teacher.data.user_id) {
+    try {
+      notifyFn({
+        userIds: [teacher.data.user_id],
+        title: `${areaLabel(area)} is now yours to manage`,
+        body: `${personName(req.head.teacher)} delegated ${areaLabel(area)} for ${course.abbr || course.course_name} to you. Open Manage on the web dashboard.`,
+        data: { screen: "TeacherHome" },
+      });
+    } catch (e) { console.error("HEAD: push failed", e.message); }
+  }
+  return res.status(201).json({ success: true, id });
+}));
+
+router.delete("/delegations/:id", wrap(async (req, res) => {
+  headOnly(req);
+  const ref = db.collection("delegations").doc(String(req.params.id));
+  const doc = await ref.get();
+  if (!doc.exists) fail(404, "Delegation not found");
+  const d = doc.data();
+  if (d.aishe_code !== req.head.aishe_code || !req.head.courseMap[d.course_id]) fail(403, "This delegation is not in your department");
+  await ref.delete();
+  if (d.teacher_uid) headCtxCache.del(d.teacher_uid);
+  await audit(req, "delegation.remove", "delegations", doc.id, { area: d.area, teacher: d.teacher_name });
+  return res.json({ success: true });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// SUGGESTION NOTES — the head suggests changes on a delegated area, the delegate answers and marks them done
+// ─────────────────────────────────────────────────────────────────────────────
+function notesAccess(req, course_id, area) {
+  if (!AREA_KEYS.has(String(area))) fail(400, "Unknown area");
+  if (!course_id || typeof course_id !== "string") fail(400, "course_id is required");
+  if (req.head.is_head) {
+    if (!req.head.courseMap[course_id]) fail(403, "This course is not in your department");
+  } else if (!(req.head.delegated[course_id] && req.head.delegated[course_id].has(area))) {
+    fail(403, `${areaLabel(area)} has not been delegated to you`);
+  }
+}
+
+const NOTE_MAX = 1000;
+const noteText = (v) => {
+  const t = String(v == null ? "" : v).trim().replace(/\r\n/g, "\n");
+  if (!t) fail(400, "Write something first");
+  if (t.length > NOTE_MAX) fail(400, `Keep it under ${NOTE_MAX} characters`);
+  return t;
+};
+const roleOf = (req) => (req.head.is_head ? "head" : "delegate");
+const noteView = (req, d) => ({
+  id: d.id, course_id: d.course_id, area: d.area, text: d.text, about: d.about || "",
+  author_name: d.author_name || "", author_role: d.author_role, mine: d.author_uid === req.head.uid,
+  status: d.status, created_at: toISO(d.created_at), resolved_at: toISO(d.resolved_at), resolved_by: d.resolved_by || "",
+  replies: (d.replies || []).map((r) => ({ author_name: r.author_name, author_role: r.author_role, text: r.text, at: r.at, mine: r.author_uid === req.head.uid })),
+});
+
+async function loadNote(req, id) {
+  const ref = db.collection("delegation_notes").doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists) fail(404, "Suggestion not found");
+  const d = { id: doc.id, ...doc.data() };
+  if (d.aishe_code !== req.head.aishe_code) fail(403, "Not allowed");
+  notesAccess(req, d.course_id, d.area);
+  return { ref, note: d };
+}
+
+async function delegatesOf(course_id, area) {
+  const snap = await db.collection("delegations").where("course_id", "==", course_id).where("area", "==", area).get();
+  return snap.docs.map((d) => d.data());
+}
+
+router.get("/notes", wrap(async (req, res) => {
+  const course_id = String(req.query.course_id || ""), area = String(req.query.area || "");
+  notesAccess(req, course_id, area);
+  const [nSnap, dels] = await Promise.all([
+    db.collection("delegation_notes").where("aishe_code", "==", req.head.aishe_code).where("course_id", "==", course_id).where("area", "==", area).get(),
+    delegatesOf(course_id, area),
+  ]);
+  const notes = nSnap.docs.map((d) => ({ id: d.id, ...d.data() }))
+    .sort((a, b) => String(toISO(b.created_at) || "").localeCompare(String(toISO(a.created_at) || "")))
+    .slice(0, 200).map((d) => noteView(req, d));
+  return res.json({
+    success: true,
+    is_head: !!req.head.is_head,
+    area, area_label: areaLabel(area),
+    delegates: dels.map((d) => ({ teacher_id: d.teacher_id, name: d.teacher_name || "" })),
+    open: notes.filter((n) => n.status === "open").length,
+    notes,
+  });
+}));
+
+router.post("/notes", wrap(async (req, res) => {
+  const body = req.body || {};
+  const course_id = String(body.course_id || ""), area = String(body.area || "");
+  notesAccess(req, course_id, area);
+  const text = noteText(body.text);
+  const about = String(body.about || "").trim().slice(0, 120);
+  const dels = await delegatesOf(course_id, area);
+  if (!dels.length) fail(400, `Delegate ${areaLabel(area)} to a teacher first, then you can leave suggestions here`);
+
+  const ref = db.collection("delegation_notes").doc();
+  await ref.set(clean({
+    aishe_code: req.head.aishe_code, course_id, area, text, about: about || undefined,
+    author_uid: req.head.uid, author_id: req.head.teacher_id, author_name: personName(req.head.teacher), author_role: roleOf(req),
+    status: "open", replies: [], created_at: ts(),
+  }));
+  if (req.head.is_head) {
+    const uids = dels.map((d) => d.teacher_uid).filter(Boolean);
+    if (uids.length) {
+      try {
+        notifyFn({ userIds: uids, title: `Suggestion for ${areaLabel(area)}`, body: text.slice(0, 120), data: { screen: "TeacherHome" } });
+      } catch (e) { console.error("HEAD: push failed", e.message); }
+    }
+  }
+  return res.status(201).json({ success: true, id: ref.id });
+}));
+
+router.post("/notes/:id/reply", wrap(async (req, res) => {
+  const { ref, note } = await loadNote(req, req.params.id);
+  const text = noteText((req.body || {}).text);
+  if ((note.replies || []).length >= 50) fail(409, "This thread is full. Start a new suggestion.");
+  const reply = { author_uid: req.head.uid, author_name: personName(req.head.teacher), author_role: roleOf(req), text, at: new Date().toISOString() };
+  await ref.update({ replies: admin.firestore.FieldValue.arrayUnion(reply) });
+  if (note.author_uid && note.author_uid !== req.head.uid) {
+    try { notifyFn({ userIds: [note.author_uid], title: `Reply on ${areaLabel(note.area)}`, body: text.slice(0, 120), data: { screen: "TeacherHome" } }); }
+    catch (e) { console.error("HEAD: push failed", e.message); }
+  }
+  return res.json({ success: true });
+}));
+
+router.post("/notes/:id/status", wrap(async (req, res) => {
+  const { ref, note } = await loadNote(req, req.params.id);
+  const status = (req.body || {}).status;
+  if (status !== "open" && status !== "done") fail(400, "status must be open or done");
+  if (status === note.status) return res.json({ success: true, unchanged: true });
+  await ref.update(status === "done"
+    ? { status, resolved_at: ts(), resolved_by: personName(req.head.teacher) }
+    : { status, resolved_at: FieldDelete(), resolved_by: FieldDelete() });
+  if (status === "done" && note.author_uid && note.author_uid !== req.head.uid) {
+    try { notifyFn({ userIds: [note.author_uid], title: `Suggestion done: ${areaLabel(note.area)}`, body: String(note.text).slice(0, 120), data: { screen: "TeacherHome" } }); }
+    catch (e) { console.error("HEAD: push failed", e.message); }
+  }
+  return res.json({ success: true });
+}));
+
+router.delete("/notes/:id", wrap(async (req, res) => {
+  const { ref, note } = await loadNote(req, req.params.id);
+  if (!req.head.is_head && note.author_uid !== req.head.uid) fail(403, "You can only delete your own suggestions");
+  await ref.delete();
+  return res.json({ success: true });
+}));
+
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Rooms
+//   rooms/{id}          { aishe_code, course_id (owner), course_abbr, course_name, name, name_key, type, capacity?, created_by, created_at }
+//   room_requests/{id}  { aishe_code, room_id, room_name, owner_course_id, course_id, course_abbr, lecture_id, day, start_time, end_time,
+//                         subject_name, requested_by, requested_by_uid, status: pending|approved|declined|cancelled, note?, decided_by?, decided_at?, created_at }
+// A lecture keeps the room NAME in `room` (so every reader keeps working). Rooms are shared across the college: one room can
+// hold one lecture at a time. A room of another course is requested from its owner; the lecture carries `room_pending` until they answer.
+//   GET    /rooms?course_id&day&start_time&end_time&exclude_id   all college rooms (+ who is using each at that slot)
+//   POST   /rooms { course_id, name, type, capacity? }           PUT /rooms/:id     DELETE /rooms/:id
+//   POST   /rooms/import { course_id }                           save the rooms already typed into this course's timetable
+//   GET    /room-requests                                        { incoming, outgoing }
+//   POST   /room-requests/:id/decide { approve, note? }
+// ─────────────────────────────────────────────────────────────────────────────
+const ROOM_TYPES = ["classroom", "lab"];
+const roomKey = (n) => String(n || "").trim().toUpperCase();
+const roomName = (v) => String(v == null ? "" : v).trim().replace(/\s+/g, " ").slice(0, 30);
+
+async function loadRooms(req) {
+  const snap = await db.collection("rooms").where("aishe_code", "==", req.head.aishe_code).get();
+  return snap.docs.map((d) => ({ room_id: d.id, ...d.data() }));
+}
+
+// Turns what the head typed/picked into a saved room. Returns { name, saved, room_id?, type?, owner?, foreign }.
+//   - a saved room (any course): canonical name; foreign when its owner course isn't one the caller manages
+//   - not a saved room: allowed only while the college has no saved rooms yet (old free-text behaviour)
+async function resolveRoom(req, raw, wantType) {
+  const name = roomName(raw);
+  if (!name) return { name: "", saved: false, foreign: false };
+  const rooms = await loadRooms(req);
+  const hit = rooms.find((r) => r.name_key === roomKey(name));
+  if (!hit) {
+    if (rooms.length) fail(400, `"${name}" is not a saved room. Pick one from the list, or add it with the Rooms button.`);
+    return { name, saved: false, foreign: false };
+  }
+  if (wantType && hit.type !== wantType) {
+    fail(400, wantType === "lab" ? `${hit.name} is a classroom. Lab sessions need a lab room.` : `${hit.name} is a lab. Lectures and tutorials need a classroom.`);
+  }
+  return { name: hit.name, saved: true, room_id: hit.room_id, type: hit.type, owner: hit, foreign: !req.head.courseMap[hit.course_id] };
+}
+const roomTypeFor = (kind) => (kind === "lab" ? "lab" : "classroom");
+
+async function lookupSavedRoom(req, raw) {
+  const name = roomName(raw);
+  if (!name) return null;
+  const hit = (await loadRooms(req)).find((r) => r.name_key === roomKey(name));
+  return hit ? { name: hit.name, saved: true, room_id: hit.room_id, foreign: !req.head.courseMap[hit.course_id], owner: hit } : null;
+}
+
+// A saved room can never hold two lectures at once (this is not overridable with "save anyway").
+function blockOnRoomClash(rr, conflicts) {
+  if (rr && rr.saved && conflicts.some((c) => c.type === "room")) {
+    fail(409, "That room is already in use at this time", { conflicts, blocked: true });
+  }
+}
+
+async function cancelRoomRequests(lectureId, note) {
+  const snap = await db.collection("room_requests").where("lecture_id", "==", lectureId).get();
+  const open = snap.docs.filter((d) => d.data().status === "pending");
+  if (open.length) await commitInBatches(open.map((d) => (b) => b.update(d.ref, { status: "cancelled", note: note || "Withdrawn", decided_at: ts() })));
+}
+
+// Asks the room's owner for a slot. The lecture must already exist.
+async function createRoomRequest(req, rr, course, lecture, slot) {
+  const ref = db.collection("room_requests").doc();
+  await ref.set(clean({
+    aishe_code: req.head.aishe_code, room_id: rr.room_id, room_name: rr.name, owner_course_id: rr.owner.course_id,
+    owner_course_abbr: rr.owner.course_abbr || "", course_id: course.course_id, course_abbr: course.abbr || course.course_name || "",
+    lecture_id: lecture.lecture_id, day: slot.day, start_time: slot.start_time, end_time: slot.end_time,
+    subject_name: lecture.subject_name || "", requested_by: personName(req.head.teacher), requested_by_uid: req.head.uid,
+    status: "pending", created_at: ts(),
+  }));
+  await db.collection("lectures").doc(lecture.lecture_id).update({ room_pending: { room_id: rr.room_id, name: rr.name, request_id: ref.id } });
+  try {
+    const dels = await delegatesOf(rr.owner.course_id, "timetable");
+    const uids = dels.map((d) => d.teacher_uid).filter(Boolean);
+    if (uids.length) {
+      notifyFn({
+        userIds: uids, title: `Room request: ${rr.name}`,
+        body: `${course.abbr || course.course_name} wants ${rr.name} on ${slot.day} ${slot.start_time}-${slot.end_time}. Open Timetable to answer.`,
+        data: { screen: "TeacherHome" },
+      });
+    }
+  } catch (e) { console.error("HEAD: push failed", e.message); }
+  return ref.id;
+}
+
+const roomRequestView = (r) => ({
+  id: r.id, room_id: r.room_id, room_name: r.room_name, owner_course_id: r.owner_course_id, owner_course_abbr: r.owner_course_abbr || "",
+  course_id: r.course_id, course_abbr: r.course_abbr || "", lecture_id: r.lecture_id, subject_name: r.subject_name || "",
+  day: r.day, start_time: r.start_time, end_time: r.end_time, requested_by: r.requested_by || "", status: r.status,
+  note: r.note || "", decided_by: r.decided_by || "", created_at: toISO(r.created_at), decided_at: toISO(r.decided_at),
+});
+
+router.get("/rooms", wrap(async (req, res) => {
+  const q = req.query || {};
+  const rooms = await loadRooms(req);
+  const day = DAY_ORDER.includes(q.day) ? q.day : null;
+  const s = q.start_time ? toMin(normTime(q.start_time) || "") : null, e = q.end_time ? toMin(normTime(q.end_time) || "") : null;
+  const lecSnap = await db.collection("lectures").where("aishe_code", "==", req.head.aishe_code).get();
+  const lectures = lecSnap.docs.map((d) => ({ ...d.data(), lecture_id: d.id }));
+  const used = {};
+  lectures.forEach((l) => { if (l.room) used[roomKey(l.room)] = (used[roomKey(l.room)] || 0) + 1; });
+  const exclude = new Set(String(q.exclude_id || "").split(",").filter(Boolean));
+  const withSlot = day && s !== null && e !== null && s < e;
+  const out = rooms.map((r) => {
+    let busy = null;
+    if (withSlot) {
+      const l = lectures.find((x) => x.day === day && x.room && roomKey(x.room) === r.name_key && !exclude.has(x.lecture_id) && overlaps(s, e, toMin(x.start_time), toMin(x.end_time)));
+      if (l) busy = { subject_name: l.subject_name || "another class", start_time: l.start_time, end_time: l.end_time, course_abbr: (req.head.courseMap[l.course_id] || {}).abbr || "" };
+    }
+    return {
+      room_id: r.room_id, name: r.name, type: r.type, capacity: r.capacity || null, course_id: r.course_id, course_abbr: r.course_abbr || "",
+      own: !!req.head.courseMap[r.course_id], lectures: used[r.name_key] || 0, busy,
+    };
+  }).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true }));
+  return res.json({ success: true, rooms: out, types: ROOM_TYPES });
+}));
+
+function readRoomFields(body, current = {}) {
+  const name = body.name !== undefined ? roomName(body.name) : current.name;
+  if (!name) fail(400, "Give the room a name, e.g. 112 or Lab B14");
+  const type = body.type !== undefined ? String(body.type) : current.type || "classroom";
+  if (!ROOM_TYPES.includes(type)) fail(400, "type must be classroom or lab");
+  let capacity = body.capacity !== undefined ? body.capacity : current.capacity;
+  if (capacity === "" || capacity === null || capacity === undefined) capacity = null;
+  else {
+    capacity = Number(capacity);
+    if (!Number.isInteger(capacity) || capacity < 1 || capacity > 2000) fail(400, "Capacity must be a whole number between 1 and 2000");
+  }
+  return { name, type, capacity };
+}
+
+router.post("/rooms", wrap(async (req, res) => {
+  const body = req.body || {};
+  const course = courseOrFail(req, body.course_id);
+  const f = readRoomFields(body);
+  const key = roomKey(f.name);
+  const same = await db.collection("rooms").where("aishe_code", "==", req.head.aishe_code).where("name_key", "==", key).limit(1).get();
+  if (!same.empty) {
+    const o = same.docs[0].data();
+    fail(409, `${o.name} already exists${o.course_abbr ? ` (${o.course_abbr})` : ""}. Room names are shared across the college.`);
+  }
+  const ref = db.collection("rooms").doc();
+  await ref.set(clean({
+    aishe_code: req.head.aishe_code, course_id: course.course_id, course_abbr: course.abbr || "", course_name: course.course_name || "",
+    name: f.name, name_key: key, type: f.type, capacity: f.capacity || undefined, created_by: req.head.teacher_id, created_at: ts(),
+  }));
+  await audit(req, "room.create", "rooms", ref.id, { name: f.name, type: f.type, course: course.abbr });
+  return res.status(201).json({ success: true, room_id: ref.id });
+}));
+
+async function loadOwnRoom(req, id) {
+  const ref = db.collection("rooms").doc(String(id));
+  const doc = await ref.get();
+  if (!doc.exists || doc.data().aishe_code !== req.head.aishe_code) fail(404, "Room not found");
+  const room = { room_id: doc.id, ...doc.data() };
+  if (!req.head.courseMap[room.course_id]) fail(403, `${room.name} belongs to ${room.course_abbr || "another course"}. Only its owners can change it.`);
+  return { ref, room };
+}
+
+router.put("/rooms/:id", wrap(async (req, res) => {
+  const { ref, room } = await loadOwnRoom(req, req.params.id);
+  const body = req.body || {};
+  const f = readRoomFields(body, room);
+  const key = roomKey(f.name);
+  if (key !== room.name_key) {
+    const same = await db.collection("rooms").where("aishe_code", "==", req.head.aishe_code).where("name_key", "==", key).limit(1).get();
+    if (!same.empty) fail(409, `${f.name} already exists. Room names are shared across the college.`);
+  }
+  const ops = [(b) => b.update(ref, clean({ name: f.name, name_key: key, type: f.type, capacity: f.capacity === null ? FieldDelete() : f.capacity }))];
+  let moved = 0;
+  if (key !== room.name_key || f.name !== room.name) {
+    // lectures hold the room by name: carry them over to the new name
+    const snap = await db.collection("lectures").where("aishe_code", "==", req.head.aishe_code).get();
+    snap.docs.forEach((d) => {
+      const l = d.data();
+      if (l.room && roomKey(l.room) === room.name_key) { moved++; ops.push((b) => b.update(d.ref, { room: f.name })); }
+      else if (l.room_pending && l.room_pending.room_id === room.room_id) ops.push((b) => b.update(d.ref, { "room_pending.name": f.name }));
+    });
+  }
+  await commitInBatches(ops);
+  await audit(req, "room.update", "rooms", room.room_id, { from: room.name, to: f.name, type: f.type });
+  return res.json({ success: true, lectures_updated: moved });
+}));
+
+router.delete("/rooms/:id", wrap(async (req, res) => {
+  const { ref, room } = await loadOwnRoom(req, req.params.id);
+  const snap = await db.collection("lectures").where("aishe_code", "==", req.head.aishe_code).get();
+  const using = snap.docs.filter((d) => d.data().room && roomKey(d.data().room) === room.name_key).length;
+  if (using) fail(409, `${room.name} is used by ${using} timetable slot${using === 1 ? "" : "s"}. Move them to another room first.`);
+  const pend = snap.docs.filter((d) => d.data().room_pending && d.data().room_pending.room_id === room.room_id);
+  await commitInBatches([(b) => b.delete(ref), ...pend.map((d) => (b) => b.update(d.ref, { room_pending: FieldDelete() }))]);
+  const reqs = await db.collection("room_requests").where("room_id", "==", room.room_id).get();
+  const open = reqs.docs.filter((d) => d.data().status === "pending");
+  if (open.length) await commitInBatches(open.map((d) => (b) => b.update(d.ref, { status: "cancelled", note: "Room was removed", decided_at: ts() })));
+  await audit(req, "room.delete", "rooms", room.room_id, { name: room.name });
+  return res.json({ success: true });
+}));
+
+// Saves the room names already typed into this course's timetable, so they can be picked from now on.
+router.post("/rooms/import", wrap(async (req, res) => {
+  const course = courseOrFail(req, (req.body || {}).course_id);
+  const [rooms, snap] = await Promise.all([
+    loadRooms(req),
+    db.collection("lectures").where("aishe_code", "==", req.head.aishe_code).where("course_id", "==", course.course_id).get(),
+  ]);
+  const have = new Set(rooms.map((r) => r.name_key));
+  const found = new Map();
+  snap.docs.forEach((d) => {
+    const l = d.data();
+    const n = roomName(l.room);
+    if (!n || have.has(roomKey(n))) return;
+    const cur = found.get(roomKey(n)) || { name: n, lab: false };
+    if (/\blab\b|\bpractical\b/i.test(`${l.subject_name || ""} ${n}`) || /L$/i.test(String(l.subject_code || ""))) cur.lab = true;
+    found.set(roomKey(n), cur);
+  });
+  const ops = [...found.entries()].map(([key, v]) => (b) => b.set(db.collection("rooms").doc(), clean({
+    aishe_code: req.head.aishe_code, course_id: course.course_id, course_abbr: course.abbr || "", course_name: course.course_name || "",
+    name: v.name, name_key: key, type: v.lab ? "lab" : "classroom", created_by: req.head.teacher_id, created_at: ts(),
+  })));
+  if (ops.length) await commitInBatches(ops);
+  return res.json({ success: true, imported: ops.length });
+}));
+
+router.get("/room-requests", wrap(async (req, res) => {
+  const snap = await db.collection("room_requests").where("aishe_code", "==", req.head.aishe_code).get();
+  const all = snap.docs.map((d) => ({ id: d.id, ...d.data() }));
+  const mine = (id) => !!req.head.courseMap[id];
+  const byNew = (a, b) => String(toISO(b.created_at) || "").localeCompare(String(toISO(a.created_at) || ""));
+  const incoming = all.filter((r) => mine(r.owner_course_id) && r.status === "pending").sort(byNew).map(roomRequestView);
+  const outgoing = all.filter((r) => mine(r.course_id) && r.status !== "cancelled").sort(byNew).slice(0, 30).map(roomRequestView);
+  return res.json({ success: true, incoming, outgoing });
+}));
+
+router.post("/room-requests/:id/decide", wrap(async (req, res) => {
+  const ref = db.collection("room_requests").doc(String(req.params.id));
+  const doc = await ref.get();
+  if (!doc.exists || doc.data().aishe_code !== req.head.aishe_code) fail(404, "Request not found");
+  const rq = { id: doc.id, ...doc.data() };
+  if (!req.head.courseMap[rq.owner_course_id]) fail(403, "Only the owner of this room can answer");
+  if (rq.status !== "pending") fail(409, `This request was already ${rq.status}`);
+  const approve = (req.body || {}).approve === true;
+  const note = String((req.body || {}).note || "").trim().slice(0, 200);
+  const lecRef = db.collection("lectures").doc(rq.lecture_id);
+  const lecDoc = await lecRef.get();
+  const by = personName(req.head.teacher);
+  const tell = (title, body) => {
+    if (!rq.requested_by_uid) return;
+    try { notifyFn({ userIds: [rq.requested_by_uid], title, body, data: { screen: "TeacherHome" } }); }
+    catch (e) { console.error("HEAD: push failed", e.message); }
+  };
+  const close = async (status, why) => {
+    await ref.update(clean({ status, note: why || undefined, decided_by: by, decided_at: ts() }));
+    if (lecDoc.exists && lecDoc.data().room_pending && lecDoc.data().room_pending.request_id === rq.id) await lecRef.update({ room_pending: FieldDelete() });
+  };
+
+  if (!lecDoc.exists) { await close("cancelled", "The timetable slot no longer exists"); fail(409, "That timetable slot no longer exists"); }
+  if (!approve) {
+    await close("declined", note);
+    tell(`${rq.room_name} was declined`, `${rq.owner_course_abbr || "The owner"} declined ${rq.room_name} for ${rq.subject_name} (${rq.day} ${rq.start_time}).${note ? " " + note : ""}`);
+    await audit(req, "room.decline", "room_requests", rq.id, { room: rq.room_name, course: rq.course_abbr });
+    return res.json({ success: true, status: "declined" });
+  }
+  // the slot may have moved or the room been taken since the request was made: check again
+  const lec = { ...lecDoc.data(), lecture_id: lecDoc.id };
+  const list = (await loadDayLectures(req, lec.day, lec.course_id)).filter((l) => l.lecture_id !== lec.lecture_id);
+  const clash = conflictsAgainst(list, { day: lec.day, start_time: lec.start_time, end_time: lec.end_time, room: rq.room_name, course_id: "-", semester: null })
+    .find((c) => c.type === "room");
+  if (clash) {
+    await close("declined", "The room was taken in the meantime");
+    tell(`${rq.room_name} is no longer free`, `${rq.room_name} was booked for another class before the request was answered.`);
+    fail(409, `${rq.room_name} was booked for ${clash.subject_name} at ${clash.start_time}-${clash.end_time} in the meantime. The request was closed.`);
+  }
+  await lecRef.update({ room: rq.room_name, room_pending: FieldDelete() });
+  await ref.update(clean({ status: "approved", note: note || undefined, decided_by: by, decided_at: ts() }));
+  tell(`${rq.room_name} approved`, `${rq.subject_name} (${rq.day} ${rq.start_time}-${rq.end_time}) now has ${rq.room_name}.`);
+  await audit(req, "room.approve", "room_requests", rq.id, { room: rq.room_name, course: rq.course_abbr });
+  return res.json({ success: true, status: "approved" });
 }));
 
 router.get("/audit", wrap(async (req, res) => {

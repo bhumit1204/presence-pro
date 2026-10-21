@@ -70,12 +70,13 @@ const NAV = {
 // Head-only management section (collapsible group in the sidebar).
 // Routes are placeholders until each page is built.
 const MANAGE_ITEMS = [
-  { path: "/dashboard/teacher/manage/semesters", label: "Semesters" },
-  { path: "/dashboard/teacher/manage/subjects",  label: "Subjects & Faculty" },
-  { path: "/dashboard/teacher/manage/divisions", label: "Divisions" },
-  { path: "/dashboard/teacher/manage/timetable", label: "Timetable" },
-  { path: "/dashboard/teacher/manage/calendar",  label: "Academic Calendar" },
-  { path: "/dashboard/teacher/manage/reports",   label: "Student Reports" },
+  { path: "/dashboard/teacher/manage/semesters", label: "Semesters",          area: "semesters" },
+  { path: "/dashboard/teacher/manage/subjects",  label: "Subjects & Faculty", area: "subjects" },
+  { path: "/dashboard/teacher/manage/divisions", label: "Divisions",          area: "divisions" },
+  { path: "/dashboard/teacher/manage/timetable", label: "Timetable",          area: "timetable" },
+  { path: "/dashboard/teacher/manage/calendar",  label: "Academic Calendar",  area: "calendar" },
+  { path: "/dashboard/teacher/manage/reports",   label: "Student Reports",    area: "reports" },
+  { path: "/dashboard/teacher/manage/delegation", label: "Delegation",        headOnly: true },
 ];
 
 // "Master of Computer Applications" -> "MCA" (short names like "B.Tech" / "MCA" are kept as they are)
@@ -111,6 +112,12 @@ export default function AppSidebar({ role = "teacher", pendingOD = 0, badges: ex
       // The institute app marks a head with head_of (e.g. "MCA"); the
       // designation can be anything ("head", "Professor"...), so don't use it.
       !!String(profile.head_of || "").trim());
+  // A teacher the head delegated areas to sees just those items under Manage.
+  const delegatedAreas = new Set(
+    (Array.isArray(user.delegations) ? user.delegations : []).map((d) => (typeof d === "string" ? d : d?.area)),
+  );
+  const isDelegate = baseRole === "teacher" && !isHead && delegatedAreas.size > 0;
+  const manageItems = MANAGE_ITEMS.filter((i) => (isHead ? true : !i.headOnly && delegatedAreas.has(i.area)));
   const [manageOpen, setManageOpen] = useState(() =>
     location.pathname.includes("/manage"),
   );
@@ -219,8 +226,8 @@ export default function AppSidebar({ role = "teacher", pendingOD = 0, badges: ex
           );
         })}
 
-        {/* Manage — heads only, collapsible */}
-        {isHead && (
+        {/* Manage — heads, and teachers the head delegated areas to; collapsible */}
+        {(isHead || isDelegate) && (
           <div className="app-sidebar-group">
             <button
               type="button"
@@ -257,7 +264,7 @@ export default function AppSidebar({ role = "teacher", pendingOD = 0, badges: ex
 
             {!collapsed && manageOpen && (
               <div className="app-sidebar-sub">
-                {MANAGE_ITEMS.map(({ path, label }) => (
+                {manageItems.map(({ path, label }) => (
                   <a
                     key={path}
                     href={path}

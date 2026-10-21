@@ -44,7 +44,17 @@ function isHeadUser(user) {
   );
 }
 
+// "area:timetable" — the head, or a teacher the head delegated that area to
+// (the server lists delegations on the session user).
+function hasArea(user, area) {
+  if (isHeadUser(user)) return true;
+  if (user?.role !== "teacher") return false;
+  const list = Array.isArray(user?.delegations) ? user.delegations : [];
+  return list.some((d) => (typeof d === "string" ? d : d?.area) === area);
+}
+
 function roleMatches(user, r) {
+  if (typeof r === "string" && r.startsWith("area:")) return hasArea(user, r.slice(5));
   if (r === "head")    return isHeadUser(user);
   if (r === "teacher") return user?.role === "teacher" || isHeadUser(user);
   return user?.role === r;

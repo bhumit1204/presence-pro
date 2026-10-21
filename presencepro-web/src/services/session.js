@@ -106,6 +106,8 @@ export function updateSession({ user, profile, token } = {}) {
     if (user.role !== undefined)      next.role      = user.role;
     if (user.is_active !== undefined) next.is_active = user.is_active !== false;
     if (user.is_head !== undefined)   next.is_head   = !!user.is_head;
+    // Manage areas a head delegated to this teacher (sidebar + route guards)
+    if (Array.isArray(user.delegations)) next.delegations = user.delegations;
   }
   localStorage.setItem(USER_KEY, JSON.stringify(next));
   if (profile) localStorage.setItem(PROFILE_KEY, JSON.stringify(profile));

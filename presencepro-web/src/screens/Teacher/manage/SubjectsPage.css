@@ -171,3 +171,8 @@
 .sf-bulk { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 10px; background: #F9FAFB; border: 1px solid #E5E7EB; }
 .sf-bulk-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .sf-bulk-row .mg-input { flex: 1 1 220px; }
+
+/* tutorial / lab chips on a subject row */
+.sf-chip { display: inline-flex; align-items: center; gap: 2px; padding-right: 3px; }
+.sf-chip-x { border: none; background: none; color: inherit; font-size: 14px; line-height: 1; cursor: pointer; padding: 0 4px; border-radius: 8px; opacity: 0.7; }
+.sf-chip-x:hover { opacity: 1; background: rgba(0, 0, 0, 0.08); }

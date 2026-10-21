@@ -16,6 +16,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ManageShell from "../../../components/ManageShell";
 import { headApi } from "../../../services/headApi";
+import { CommentPin } from "../../../components/SuggestionsProvider";
 import "./SubjectsPage.css";
 
 const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
@@ -158,7 +159,7 @@ function AssignModal({ subject, teachers, department, onClose, onDone }) {
 }
 
 // ── Add / edit subject ───────────────────────────────────────────────────────
-function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, onSaved }) {
+function SubjectModal({ course, subject, defaultSemester, groups = [], subjects = [], onClose, onSaved }) {
   const editing = !!subject;
   const total = course.total_semesters || 1;
   const [name, setName] = useState(subject?.subject_name || "");
@@ -166,6 +167,10 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
   const [sem, setSem] = useState(subject?.semester_number || defaultSemester || 1);
   const [compulsory, setCompulsory] = useState(subject ? subject.compulsary : true);
   const [group, setGroup] = useState(subject?.elective_group || "");
+  // new subjects can also be a Lab or a Tutorial; both can hang off an existing subject (same classroom)
+  const [kind, setKind] = useState("subject");        // subject | lab | tutorial  (new subjects only)
+  const [labOf, setLabOf] = useState("new");          // new | existing
+  const [parentId, setParentId] = useState("");
   const [enroll, setEnroll] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -178,7 +183,11 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
     return () => window.removeEventListener("keydown", onKey);
   }, [saving, onClose]);
 
-  const valid = name.trim() && code.trim();
+  const linked = !editing && (kind === "tutorial" || (kind === "lab" && labOf === "existing"));
+  const parents = subjects.filter((x) => x.kind !== "lab" && x.semester_number === Number(sem) &&
+    !(kind === "tutorial" ? x.has_tutorial : x.has_lab));
+  useEffect(() => { if (parentId && !parents.some((x) => x.subject_id === parentId)) setParentId(""); }, [sem, kind, labOf]); // eslint-disable-line
+  const valid = linked ? !!parentId : name.trim() && code.trim();
   const dirty =
     !editing ||
     name.trim() !== subject.subject_name ||
@@ -206,6 +215,8 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
       } else {
         res = await headApi.post("/subjects", {
           course_id: course.course_id,
+          type: kind === "subject" ? (compulsory ? "compulsory" : "elective") : kind,
+          parent_subject_id: linked ? parentId : undefined,
           subject_name: name.trim(),
           subject_code: code.trim(),
           semester: Number(sem),
@@ -214,7 +225,8 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
           enroll_students: compulsory ? enroll : false,
         });
       }
-      onSaved(res, { created: !editing, assignNext, name: name.trim(), semester: Number(sem) });
+      const parent = linked ? subjects.find((x) => x.subject_id === parentId) : null;
+      onSaved(res, { created: !editing, assignNext: linked ? false : assignNext, name: linked ? `${kind === "tutorial" ? "Tutorial" : "Lab"} of ${parent?.subject_code || "the subject"}` : name.trim(), semester: Number(sem), linked });
     } catch (err) {
       setError(err.message);
       setSaving(false);
@@ -234,19 +246,68 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
         </div>
 
         <div className="mg-modal-body">
+          {!editing && (
+            <div className="mg-field">
+              <span className="mg-label" id="sf-kind-label">What are you adding?</span>
+              <div className="sf-seg" role="radiogroup" aria-labelledby="sf-kind-label">
+                {[["subject", "Subject"], ["lab", "Lab"], ["tutorial", "Tutorial"]].map(([k, l]) => (
+                  <button key={k} type="button" role="radio" aria-checked={kind === k} disabled={saving}
+                          className={`sf-seg-btn${kind === k ? " sf-seg-btn--on" : ""}`} onClick={() => setKind(k)}>{l}</button>
+                ))}
+              </div>
+              <span className="mg-help">
+                {kind === "tutorial" && "A tutorial always belongs to an existing subject: same classroom, same teacher, and its attendance counts for that subject."}
+                {kind === "lab" && "A lab can be a new subject with its own classroom, or belong to an existing subject and share its classroom."}
+                {kind === "subject" && "Compulsory subjects are taken by everyone; for electives students choose."}
+              </span>
+            </div>
+          )}
+
+          {!editing && kind === "lab" && (
+            <div className="mg-field">
+              <span className="mg-label" id="sf-labof-label">Lab of</span>
+              <div className="sf-seg" role="radiogroup" aria-labelledby="sf-labof-label">
+                {[["new", "A new lab subject"], ["existing", "An existing subject"]].map(([k, l]) => (
+                  <button key={k} type="button" role="radio" aria-checked={labOf === k} disabled={saving}
+                          className={`sf-seg-btn${labOf === k ? " sf-seg-btn--on" : ""}`} onClick={() => setLabOf(k)}>{l}</button>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {linked && (
+            <div className="mg-field">
+              <label className="mg-label" htmlFor="sf-parent">{kind === "tutorial" ? "Tutorial for which subject?" : "Lab of which subject?"}</label>
+              <select id="sf-parent" className="mg-input" value={parentId} disabled={saving} onChange={(e) => setParentId(e.target.value)}>
+                <option value="">Pick a subject</option>
+                {parents.map((x) => <option key={x.subject_id} value={x.subject_id}>{x.subject_code} · {x.subject_name}</option>)}
+              </select>
+              {parents.length === 0 && <span className="mg-help">No subject in {semName(sem)} can take a {kind} right now.</span>}
+              <span className="mg-help">
+                {kind === "tutorial"
+                  ? "Tutorial sessions use this subject's classroom and teacher. You schedule them from the Timetable."
+                  : "Lab sessions share this subject's classroom, where the teacher can post lab work next to assignments. You schedule them from the Timetable."}
+              </span>
+            </div>
+          )}
+
+          {!linked && (
           <div className="mg-field">
-            <label className="mg-label" htmlFor="sf-name">Subject name</label>
+            <label className="mg-label" htmlFor="sf-name">{!editing && kind === "lab" ? "Lab name" : "Subject name"}</label>
             <input id="sf-name" ref={firstRef} className="mg-input" value={name} maxLength={120} disabled={saving}
-                   placeholder="e.g. Data Structures" onChange={(e) => setName(e.target.value)} />
+                   placeholder={!editing && kind === "lab" ? "e.g. Data Structures Lab" : "e.g. Data Structures"} onChange={(e) => setName(e.target.value)} />
           </div>
+          )}
 
           <div className="sf-two">
+            {!linked && (
             <div className="mg-field">
               <label className="mg-label" htmlFor="sf-code">Subject code</label>
               <input id="sf-code" className="mg-input" value={code} maxLength={20} disabled={saving}
                      style={{ textTransform: "uppercase" }} placeholder="e.g. MCA101"
                      onChange={(e) => setCode(e.target.value)} />
             </div>
+            )}
             <div className="mg-field">
               <label className="mg-label" htmlFor="sf-sem">Semester</label>
               <select id="sf-sem" className="mg-input" value={sem} disabled={saving} onChange={(e) => setSem(Number(e.target.value))}>
@@ -257,6 +318,7 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
             </div>
           </div>
 
+          {(editing ? subject.kind !== "lab" : kind === "subject") && (
           <div className="mg-field">
             <span className="mg-label" id="sf-type-label">Type</span>
             <div className="sf-seg" role="radiogroup" aria-labelledby="sf-type-label">
@@ -275,8 +337,9 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
                 : "Students choose one subject from each elective group themselves."}
             </span>
           </div>
+          )}
 
-          {!compulsory && (
+          {!compulsory && (editing ? subject.kind !== "lab" : kind === "subject") && (
             <div className="mg-field">
               <label className="mg-label" htmlFor="sf-group">Elective group</label>
               <input id="sf-group" className="mg-input" list="sf-group-list" value={group} maxLength={40} disabled={saving}
@@ -289,7 +352,7 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
             </div>
           )}
 
-          {!editing && compulsory && (
+          {!editing && compulsory && !linked && (
             <label className="sf-check">
               <input type="checkbox" checked={enroll} disabled={saving} onChange={(e) => setEnroll(e.target.checked)} />
               <span>Enrol the current students of {semName(sem)} now</span>
@@ -308,13 +371,13 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], onClose, 
 
         <div className="mg-modal-footer">
           <button type="button" className="mg-btn" onClick={onClose} disabled={saving}>Cancel</button>
-          {!editing && (
+          {!editing && !linked && (
             <button type="button" className="mg-btn" onClick={() => submit(true)} disabled={!valid || saving}>
               Save &amp; assign teacher
             </button>
           )}
           <button type="submit" className="mg-btn mg-btn--primary" disabled={!valid || saving}>
-            {saving ? "Saving…" : editing ? "Save changes" : "Add subject"}
+            {saving ? "Saving…" : editing ? "Save changes" : kind === "tutorial" ? "Add tutorial" : kind === "lab" ? "Add lab" : "Add subject"}
           </button>
         </div>
       </form>
@@ -674,18 +737,33 @@ function ConfirmModal({ title, body, confirmLabel, busyLabel, onConfirm, onClose
 }
 
 // ── Subject row ──────────────────────────────────────────────────────────────
-function SubjectRow({ s, onAssign, onRemove, onEdit, onDelete, onStudents }) {
+function SubjectRow({ s, onAssign, onRemove, onEdit, onDelete, onStudents, onUnlink }) {
   return (
-    <div className="sf-row" role="listitem">
+    <div className="sf-row cm-hover" role="listitem">
       <div className="sf-row-main">
         <div className="sf-row-title">
           <span className="sf-code">{s.subject_code}</span>
           <span className="sf-name">{s.subject_name}</span>
+          <CommentPin inline courseId={s.course_id} about={`${s.subject_code} ${s.subject_name}`.slice(0, 120)} />
         </div>
         <div className="sf-row-tags">
-          <span className={`mg-badge ${s.compulsary ? "mg-badge--gray" : "mg-badge--amber"}`}>
-            {s.compulsary ? "Compulsory" : `Elective${s.elective_group ? ` · ${s.elective_group}` : ""}`}
-          </span>
+          {s.kind === "lab"
+            ? <span className="mg-badge mg-badge--green">Lab</span>
+            : (
+              <span className={`mg-badge ${s.compulsary ? "mg-badge--gray" : "mg-badge--amber"}`}>
+                {s.compulsary ? "Compulsory" : `Elective${s.elective_group ? ` · ${s.elective_group}` : ""}`}
+              </span>
+            )}
+          {s.has_lab && (
+            <span className="mg-badge mg-badge--green sf-chip">Lab
+              <button type="button" className="sf-chip-x" onClick={() => onUnlink(s, "has_lab")} aria-label={`Remove the lab of ${s.subject_code}`}>×</button>
+            </span>
+          )}
+          {s.has_tutorial && (
+            <span className="mg-badge mg-badge--green sf-chip">Tutorial
+              <button type="button" className="sf-chip-x" onClick={() => onUnlink(s, "has_tutorial")} aria-label={`Remove the tutorial of ${s.subject_code}`}>×</button>
+            </span>
+          )}
           <button type="button" className="sf-link" onClick={() => onStudents(s)} aria-label={`Students of ${s.subject_code}`}>
             {plural(s.student_count || 0, "student")}
           </button>
@@ -847,6 +925,23 @@ export default function SubjectsPage() {
       },
     });
 
+  const unlinkType = (s, field) => {
+    const label = field === "has_tutorial" ? "tutorial" : "lab";
+    setModal({
+      type: "confirm",
+      title: `Remove ${label}`,
+      body: `Remove the ${label} of ${s.subject_code} · ${s.subject_name}? Its timetable slots must be removed first.`,
+      confirmLabel: `Remove ${label}`,
+      busyLabel: "Removing…",
+      run: async () => {
+        await headApi.put(`/subjects/${s.subject_id}`, { [field]: false });
+        patchSubject(s.subject_id, { [field]: false });
+        setModal(null);
+        setNotice({ type: "success", text: `The ${label} of ${s.subject_code} was removed.` });
+      },
+    });
+  };
+
   const deleteSubject = (s) =>
     setModal({
       type: "confirm",
@@ -874,7 +969,7 @@ export default function SubjectsPage() {
     setModal(null);
     const list = await loadSubjects(courseId);
     const enr = res.enrolled_students ? ` ${plural(res.enrolled_students, "student")} enrolled.` : "";
-    setNotice({ type: "success", text: info.created ? `${info.name} added to ${semName(info.semester)}.${enr}` : `Subject updated.${enr}` });
+    setNotice({ type: "success", text: info.created ? `${info.name} added to ${semName(info.semester)}.${enr}${info.linked ? " Schedule it from the Timetable." : ""}` : `Subject updated.${enr}` });
     if (info.created) setSemFilter((f) => (f && f !== info.semester ? 0 : f));
     if (info.created && info.assignNext && list) {
       const created = list.find((x) => x.subject_id === res.subject_id);
@@ -1061,6 +1156,7 @@ export default function SubjectsPage() {
                                 onRemove={removeTeacher}
                                 onEdit={(x) => setModal({ type: "subject", subject: x })}
                                 onStudents={(x) => setModal({ type: "students", subject: x })}
+                                onUnlink={unlinkType}
                                 onDelete={deleteSubject} />
                   ))}
                 </div>
@@ -1085,7 +1181,7 @@ export default function SubjectsPage() {
                      onClose={closeModal} onDone={(res) => onAssigned(modal.subject, res)} />
       )}
       {modal?.type === "subject" && course && (
-        <SubjectModal course={course} subject={modal.subject} defaultSemester={semFilter || 1} groups={egroups}
+        <SubjectModal course={course} subject={modal.subject} defaultSemester={semFilter || 1} groups={egroups} subjects={subjects}
                       onClose={closeModal} onSaved={onSubjectSaved} />
       )}
       {modal?.type === "egroup" && course && (
