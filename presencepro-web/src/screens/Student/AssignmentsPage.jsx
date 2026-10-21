@@ -2,7 +2,7 @@
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  StudentShell, PageHeader, useFeed, Tabs, Skeleton, Empty, ErrorBox, StatePill, SubjectDot,
+  StudentShell, PageHeader, useFeed, Tabs, Skeleton, Empty, ErrorBox, StatePill, SubjectDot, Pill,
   assignmentState, isOpenWork, dueLabel, fmtDate, useNow,
 } from "./ui";
 
@@ -74,6 +74,7 @@ export default function AssignmentsPage() {
                 <div className="st-row-meta">
                   <SubjectDot id={a.subject_id} size={8} /> <span>{a.subject_name}</span>
                   {a.marks != null && <span>· {a.marks} marks</span>}
+                  {a.kind === "lab_work" && <Pill tone="purple">Lab work</Pill>}
                 </div>
               </span>
               <span className="st-row-end">

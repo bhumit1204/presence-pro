@@ -226,3 +226,11 @@
   .rm-form, .rm-row, .rm-row--edit, .rm-req { grid-template-columns: minmax(0, 1fr); }
   .rm-actions { justify-content: flex-start; }
 }
+
+/* ── Lab batches ─────────────────────────────────────────────────────── */
+.tt-batch { display: flex; flex-direction: column; gap: 6px; padding: 8px 0; border-top: 1px solid #F3F4F6; }
+.tt-batch:first-of-type { border-top: none; padding-top: 0; }
+.tt-batch-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; font-size: 13px; color: #111827; }
+.tt-batch-who { font-size: 12.5px; color: #6B7280; }
+.tt-cuts { display: flex; flex-wrap: wrap; gap: 10px 16px; }
+.tt-cut { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: #374151; min-width: 180px; flex: 1 1 200px; }

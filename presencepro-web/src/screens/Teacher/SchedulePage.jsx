@@ -41,6 +41,16 @@ const DAY_SHORT = {
   Saturday: "Sat",
 };
 
+// Lab / tutorial / lab batch / division of a lecture, e.g. ["Lab", "B1", "Div A"]
+const KIND_LABEL = { lab: "Lab", tutorial: "Tutorial" };
+function lecTags(l) {
+  const t = [];
+  if (l && KIND_LABEL[l.kind]) t.push(KIND_LABEL[l.kind]);
+  if (l && l.batch_no) t.push(l.batch || `B${l.batch_no}`);
+  if (l && l.division_name) t.push(`Div ${l.division_name}`);
+  return t;
+}
+
 function fmt12(t) {
   if (!t) return "—";
   const [h, m] = t.split(":").map(Number);
@@ -166,6 +176,9 @@ function AssignModal({ lecture, uid, onClose, onDone }) {
             <h3 className="sc-modal-title">Assign Lecture</h3>
             <p className="sc-modal-sub">
               {lecture.subject_name}
+              {lecTags(lecture).length > 0 && (
+                <span className="sc-modal-course"> · {lecTags(lecture).join(" · ")}</span>
+              )}
               {lecture.course_name && (
                 <span className="sc-modal-course">
                   {" "}
@@ -489,6 +502,11 @@ export default function SchedulePage() {
                                         {lec.course_name}
                                       </span>
                                     )}
+                                    {lecTags(lec).length > 0 && (
+                                      <span className="sc-course-name" style={{ fontWeight: 700 }}>
+                                        {lecTags(lec).join(" · ")}
+                                      </span>
+                                    )}
                                   </div>
                                 </div>
                               </td>
@@ -558,6 +576,11 @@ export default function SchedulePage() {
                           {lec.course_name && (
                             <div className="sc-lec-course">
                               {lec.course_name}
+                            </div>
+                          )}
+                          {lecTags(lec).length > 0 && (
+                            <div className="sc-lec-course" style={{ fontWeight: 700 }}>
+                              {lecTags(lec).join(" · ")}
                             </div>
                           )}
                           {lec.subject_code && (

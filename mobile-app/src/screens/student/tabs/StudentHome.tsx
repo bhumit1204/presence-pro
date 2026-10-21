@@ -27,6 +27,7 @@ import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE } from "../../../services/api";
 import { Avatar, Banner, Card, Chip, Screen, SP, T, Tone, font, shadow } from "../../../components/ui";
+import { lectureTag, meantForStudent, rollOf, withTag } from "../../../utils/batches";
 
 const API_URL = API_BASE;
 
@@ -41,6 +42,13 @@ interface LectureData {
   start_time: string;
   end_time: string;
   day?: string;
+  division_id?: string | null;
+  kind?: string | null;          // "lab" | "tutorial" | null (plain lecture)
+  batch?: string | null;         // lab batch, e.g. "B1"
+  batch_no?: number | null;
+  batch_of?: number | null;
+  batch_after?: string | null;
+  batch_upto?: string | null;
 }
 
 type TodoFilter = "thisWeek" | "nextWeek" | "thisMonth";
@@ -130,6 +138,8 @@ const StudentHome = () => {
     course_id: string;
     enrolled_subjects: string[];
     subject_map: Record<string, string>;
+    division_id: string | null;   // which division the student is in
+    roll: string;                 // roll number: decides the lab batch
   } | null>(null);
 
   // ─── Helper: clear ALL lecture state + storage ───────────────────────────
@@ -351,6 +361,8 @@ const StudentHome = () => {
         course_id: course_id || "",
         enrolled_subjects: enrolledSubjects,
         subject_map: subjectMap,
+        division_id: studentData.division_id || null,
+        roll: rollOf(studentData),
       };
 
       await validateAndRestoreSession(session.uid);
@@ -552,17 +564,26 @@ const StudentHome = () => {
       collection(db, "lecture_sessions"),
       where("aishe_code", "==", aishe_code),
       where("is_live", "==", true),
-      limit(1)
+      limit(10)   // several classes can be live at once (other divisions, lab batches): pick the one that is mine
     );
 
     const unsubscribe = onSnapshot(liveQ, async (snapshot) => {
-      // ── No live session at all → clear everything ─────────────────────────
-      if (snapshot.empty) {
+      // ── The live session meant for THIS student: their division and their lab batch ─
+      const me = studentProfile.current;
+      const mine = snapshot.docs.filter((d) => {
+        const x: any = d.data();
+        if (x.is_live !== true) return false;
+        if (course_id && x.course_id && x.course_id !== course_id) return false;
+        return meantForStudent(x, me?.division_id, me?.roll);
+      });
+
+      // ── Nothing live for me → clear everything ────────────────────────────
+      if (mine.length === 0) {
         await clearLectureState();
         return;
       }
 
-      const sessionDoc = snapshot.docs[0];
+      const sessionDoc = mine[0];
       const sessionId  = sessionDoc.id;
       const data       = sessionDoc.data();
 
@@ -573,9 +594,6 @@ const StudentHome = () => {
         await clearLectureState();
         return;
       }
-
-      // Course mismatch — session belongs to a different course, ignore
-      if (course_id && data.course_id && data.course_id !== course_id) return;
 
       // ── Live session found → populate state ───────────────────────────────
       setLectureState("ongoing");
@@ -589,17 +607,20 @@ const StudentHome = () => {
         try {
           const lectureDoc = await getDoc(doc(db, "lectures", data.lecture_id));
           if (lectureDoc.exists()) {
-            setOngoingLecture({ id: lectureDoc.id, ...lectureDoc.data() } as LectureData);
+            setOngoingLecture(withTag({ id: lectureDoc.id, ...lectureDoc.data() } as LectureData));
           }
         } catch {}
       } else {
-        setOngoingLecture({
+        setOngoingLecture(withTag({
           subject_name: data.subject_name,
           room:         data.room || "",
           start_time:   data.scheduled_start_time || "",
           end_time:     data.scheduled_end_time   || "",
           aishe_code,
-        });
+          kind:         data.kind || null,
+          batch:        data.batch || null,
+          batch_no:     data.batch_no || null,
+        } as LectureData));
       }
 
       setMarkingStatus(data.marking_status || "closed");
@@ -643,7 +664,7 @@ const StudentHome = () => {
       const json = await res.json();
       if (json.success) {
         setToday(json.today);
-        setNextLecture(json.nextLecture ?? null);
+        setNextLecture(withTag(json.nextLecture) ?? null);
         // Only set session from API response if we don't already have one from Firestore
         if (!lectureSessionId && json.lecture_is_live && json.lecture_session_id) {
           setLectureSessionId(json.lecture_session_id);
@@ -768,6 +789,19 @@ const StudentHome = () => {
           </TouchableOpacity>
         </View>
 
+        <View style={{ flexDirection: "row", gap: 10, marginBottom: SP.md }}>
+          {([["Timetable", "StudentTimetable", "calendar-outline"], ["Calendar", "StudentCalendar", "calendar-number-outline"]] as const).map(([label, route, icon]) => (
+            <TouchableOpacity key={route} activeOpacity={0.85} onPress={() => navigation.navigate(route)} style={{ flex: 1 }}>
+              <Card>
+                <View style={{ flexDirection: "row", alignItems: "center", gap: 8 }}>
+                  <Ionicons name={icon as any} size={20} color={T.primary} />
+                  <Text style={font.h3}>{label}</Text>
+                </View>
+              </Card>
+            </TouchableOpacity>
+          ))}
+        </View>
+
         {electivesPending > 0 && (
           <TouchableOpacity activeOpacity={0.85} onPress={() => navigation.navigate("ElectiveSelection")} style={{ marginBottom: SP.md }}>
             <Banner tone="warning" icon="library-outline" title="Choose your electives">
@@ -882,7 +916,9 @@ const StudentHome = () => {
                   </View>
                   <View style={{ flex: 1, gap: 2 }}>
                     <Text style={font.h3} numberOfLines={1}>{item.title}</Text>
-                    <Text style={font.small} numberOfLines={1}>{item.subject_name}</Text>
+                    <Text style={font.small} numberOfLines={1}>
+                      {item.subject_name}{item.rawAssignment?.kind === "lab_work" ? " · Lab work" : ""}
+                    </Text>
                     <View style={styles.metaRow}>
                       <Ionicons name="time-outline" size={11} color={T.muted} />
                       <Text style={font.small} numberOfLines={1}>

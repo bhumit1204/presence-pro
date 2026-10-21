@@ -54,7 +54,8 @@ import ClassReport from "../screens/reports/teacher/ClassReport";
 import MarkAttendance from "../screens/reports/teacher/MarkAttendance";
 import ODLeaveRequest from "../screens/student/tabs/ODLeaveRequest";
 import ElectiveSelection from "../screens/student/tabs/ElectiveSelection";
-
+import StudentTimetable from "../screens/student/StudentTimetable";
+import StudentCalendar from "../screens/student/StudentCalendar";
 import ODRequestTeacher from "../screens/reports/teacher/ODRequestTeacher";
 
 
@@ -226,6 +227,9 @@ export default function AppNavigator() {
         <Stack.Screen name="ODLeaveRequest"     component={ODLeaveRequest}     />
         <Stack.Screen name="ElectiveSelection" component={ElectiveSelection} />
         <Stack.Screen name="ODRequestsTeacher" component={ODRequestTeacher}  />
+
+        <Stack.Screen name="StudentTimetable" component={StudentTimetable} />
+        <Stack.Screen name="StudentCalendar" component={StudentCalendar} />
 
       </Stack.Navigator>
     </NavigationContainer>

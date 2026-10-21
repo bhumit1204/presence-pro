@@ -8,6 +8,7 @@ const { guard, fromQuery, fromBody } = require("../middleware/auth");
 const { TTLCache } = require("../utils/cache");
 const { getSubject } = require("../utils/ownership");
 const { chunk, commitInBatches } = require("../utils/firestore");
+const { inBatch, rollOf, batchFields } = require("../utils/batches");
 
 // ─────────────────────────────────────────────────────────────────────────────
 // HELPERS
@@ -315,37 +316,44 @@ function getLectureSessionsForSubject(subject_id) {
     const lecturesSnap = await db
       .collection("lectures")
       .where("subject_id", "==", subject_id)
-      .select("division_id")
+      .select("division_id", "batch", "batch_no", "batch_of", "batch_after", "batch_upto")
       .get();
 
     const lectureIds = lecturesSnap.docs.map((d) => d.id);
     if (!lectureIds.length) return [];
     const lectureDiv = Object.fromEntries(lecturesSnap.docs.map((d) => [d.id, d.data().division_id || null]));
+    const lectureBatch = Object.fromEntries(lecturesSnap.docs.map((d) => [d.id, d.data().batch_no ? batchFields(d.data()) : null]));
 
     const docs = await inChunks(lectureIds, (c) =>
       db.collection("lecture_sessions")
         .where("lecture_id", "in", c)
         .where("status", "==", "completed")
-        .select("date", "started_at", "attendance_session_id", "lecture_id", "division_id")
+        .select("date", "started_at", "attendance_session_id", "lecture_id", "division_id", "batch", "batch_no", "batch_of", "batch_after", "batch_upto")
     );
 
     return docs.map((doc) => {
       const data = doc.data();
       const date = data.date || toISO(data.started_at)?.split("T")[0] || null;
       // a session held for one division (null = for everybody)
-      return { sessionId: doc.id, date, data, division: data.division_id || lectureDiv[data.lecture_id] || null };
+      // a lab batch: the session (or, for older ones, its lecture) says which roll range attended
+      const batch = data.batch_no ? batchFields(data) : lectureBatch[data.lecture_id] || null;
+      return { sessionId: doc.id, date, data, division: data.division_id || lectureDiv[data.lecture_id] || null, batch };
     });
   });
 }
 
-/** the sessions a student of `divisionId` was expected to attend: common ones + their division's own */
-const sessionsForDivision = (sessions, divisionId) => sessions.filter((x) => !x.division || x.division === (divisionId || null));
+/**
+ * the sessions a student of `divisionId` was expected to attend: common ones + their division's own.
+ * A lab batch's session counts only for the students of its roll range, so pass the student (needs the roll number);
+ * without a student the batch sessions are left out.
+ */
+const sessionsForDivision = (sessions, divisionId, student) =>
+  sessions.filter((x) => (!x.division || x.division === (divisionId || null)) && (!x.batch || (!!student && inBatch(x.batch, rollOf(student)))));
 
-/** division of one student (cached profile lookup); null when unknown */
-async function divisionOfStudent(uid) {
+/** profile of one student (cached lookup); null when unknown */
+async function profileOfStudent(uid) {
   try {
-    const st = await require("../utils/students").getStudentByUid(uid);
-    return (st && st.division_id) || null;
+    return (await require("../utils/students").getStudentByUid(uid)) || null;
   } catch { return null; }
 }
 
@@ -473,7 +481,8 @@ router.get("/student/:student_uid/attendance", guard.teacher(fromQuery("teacher_
     if (!(await ownsSubject(teacher_id, subject_id)))
       return res.status(403).json({ success: false, error: "Access denied" });
 
-    const sessions    = sessionsForDivision(await getLectureSessionsForSubject(subject_id), await divisionOfStudent(student_uid));
+    const stProfile   = await profileOfStudent(student_uid);
+    const sessions    = sessionsForDivision(await getLectureSessionsForSubject(subject_id), (stProfile && stProfile.division_id) || null, stProfile);
     const sessionIds  = sessions.map((s) => s.sessionId);
     const allRecords  = await buildAttendanceRecords(student_uid, subject_id, sessionIds, sessions);
 
@@ -532,7 +541,7 @@ router.post("/attendance/manual", guard.teacher(fromBody("teacher_id")), async (
     const student_roll = sd.roll_no || sd.roll_number || null;
 
     // ── Attendance count guard ──────────────────────────────────────────────
-    const allSessions    = sessionsForDivision(await getLectureSessionsForSubject(subject_id), sd.division_id || null);
+    const allSessions    = sessionsForDivision(await getLectureSessionsForSubject(subject_id), sd.division_id || null, sd);
     const totalLectures  = allSessions.length;
     const existingAll    = await buildAttendanceRecords(student_uid, subject_id, allSessions.map((s) => s.sessionId), allSessions);
     const currentPresent = existingAll.filter(isPresentish).length;
@@ -738,7 +747,7 @@ router.get("/attendance/by-date", guard.teacher(fromQuery("teacher_id")), async 
     const todays = allSessions.filter((x) => x.date === date);
     const result = students.map((s) => ({
       ...s,
-      status: (hasLecture && sessionsForDivision(todays, s.division_id || null).length > 0) ? (attMap[s.uid]?.status || "absent") : "no_class",
+      status: (hasLecture && sessionsForDivision(todays, s.division_id || null, s).length > 0) ? (attMap[s.uid]?.status || "absent") : "no_class",
       attendance_id: attMap[s.uid]?.attendance_id || null,
       marked_by: attMap[s.uid]?.marked_by || null,
     }));
@@ -783,7 +792,7 @@ router.get("/student/:student_uid/full", guard.teacher(fromQuery("teacher_id")),
     const [quizzesSnap, assignmentsSnap, sessions] = await Promise.all([
       db.collection("quizzes").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("quiz_id").get(),
       db.collection("assignments").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("assignment_id").get(),
-      getLectureSessionsForSubject(subject_id).then((all) => sessionsForDivision(all, s.division_id || null)),
+      getLectureSessionsForSubject(subject_id).then((all) => sessionsForDivision(all, s.division_id || null, s)),
     ]);
     const sessionIds = sessions.map((x) => x.sessionId);
 
@@ -928,12 +937,15 @@ async function buildClassReport(teacher_id, subject_id, divisionFilter = "") {
     assSubMap[d.student_uid][d.assignment_id] = d;
   });
 
+  // sessions held for a division (without lab batches: those depend on the student's roll number)
   const heldCache = new Map();
   const held_of = (div) => {
     const k = div || "";
     if (!heldCache.has(k)) heldCache.set(k, sessionsForDivision(sessions, div || null).length);
     return heldCache.get(k);
   };
+  const hasBatches = sessions.some((x) => x.batch);
+  const held_for = (s) => (hasBatches ? sessionsForDivision(sessions, s.division_id || null, s).length : held_of(s.division_id));
 
   const studentResults = students.map((s) => {
     // ── Attendance ──────────────────────────────────────────────────
@@ -941,7 +953,7 @@ async function buildClassReport(teacher_id, subject_id, divisionFilter = "") {
       ? sourceRows(manualBy.get(s.uid) || [], odBy.get(s.uid) || [], attSessions, recBy.get(s.uid) || [], sessionDateMap, s.uid)
       : sourceRows(manualBy.get(s.uid) || [], odBy.get(s.uid) || [], [], [], {}, s.uid);
     const present = attRecords.filter(isPresentish).length;
-    const held = held_of(s.division_id);                    // lectures meant for this student's division
+    const held = held_for(s);                               // lectures meant for this student's division (and lab batch)
     const absent = Math.max(0, held - present);
     const late = attRecords.filter((r) => r.status === "late").length;
     const attendance_pct =
@@ -1014,7 +1026,9 @@ async function buildClassReport(teacher_id, subject_id, divisionFilter = "") {
     success: true,
     class_summary: {
       total_students: students.length,
-      total_lectures: divisionFilter && divisionFilter !== "none" ? held_of(divisionFilter) : totalLectures,
+      total_lectures: hasBatches
+        ? Math.max(0, ...students.map(held_for))                       // lab batches meet separately: the most any student was expected at
+        : (divisionFilter && divisionFilter !== "none" ? held_of(divisionFilter) : totalLectures),
       total_quizzes: totalQuizzes,
       total_assignments: totalAssignments,
       avg_attendance_pct,

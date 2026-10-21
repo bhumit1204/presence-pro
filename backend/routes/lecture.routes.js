@@ -41,6 +41,8 @@ const { createCoalescer } = require("../utils/coalesce");
 const { chunk, getDocsByIds, commitInBatches, isAlreadyExists } = require("../utils/firestore");
 const { getStudentByUid, getStudentByRoll } = require("../utils/students");
 const prox = require("../utils/proximity");
+const { inBatch, rollOf, batchFields } = require("../utils/batches");
+const { semesterMatches } = require("../utils/studentTimetable");
 
 /* ═══════════════════════════════════════════════════════════════════════════
    small helpers
@@ -1411,7 +1413,7 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
     }
 
     // Resolve course_id from the lecture document for per-course filtering
-    let course_id = null, division_id = null, division_name = null, subject_id = null, kind = null;
+    let course_id = null, division_id = null, division_name = null, subject_id = null, kind = null, batch = {};
     if (lecture_id) {
       const lectureData = await getLecture(lecture_id);
       if (lectureData) {
@@ -1420,6 +1422,7 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
         division_name = lectureData.division_name || null;
         subject_id = lectureData.subject_id || null;
         kind = lectureData.kind || null;           // "tutorial" | "lab" | null (plain lecture)
+        batch = batchFields(lectureData);          // a lab batch: only the students of that roll range belong to the session
         if (req.auth) {
           const istDate = istDateString(new Date(Date.now() + IST_OFFSET));
           if (!allow(req, res, await teacherCoversLecture(teacher_id, lecture_id, lectureData, istDate), "start-own-lecture")) return;
@@ -1436,6 +1439,7 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
       division_name,
       subject_id,
       kind,
+      ...batch,
       subject_name: String(subject_name).slice(0, 200),
       room: room ? String(room).slice(0, 100) : null,
       is_live: true,
@@ -1543,6 +1547,7 @@ async function sessionSubjectId(ls) {
 /** is this student part of the class the session is for? (division + elective choice) */
 function inSessionClass(ls, elective, subject_id, student) {
   if (ls?.division_id && student?.division_id !== ls.division_id) return false;
+  if (!inBatch(ls, rollOf(student))) return false;              // a lab batch is for its own roll range only
   return takesSubject(student, elective, subject_id);
 }
 
@@ -1581,9 +1586,11 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
     ]);
 
     const myDivision = student.division_id || null;
+    const myRoll = rollOf(student);
     const elective = await electiveSubjectIds(course_id || student.course_id);
     const sameClass = liveSessions.filter(({ data }) => {
       if (data.division_id && data.division_id !== myDivision) return false;   // another division's class
+      if (!inBatch(data, myRoll)) return false;                                // another lab batch
       if (!data.course_id || !course_id) return true;
       return data.course_id === course_id;
     });
@@ -1644,7 +1651,7 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
     });
 
     let nextLecture = null;
-    const sorted = lectures.filter((l) => (!l.division_id || l.division_id === myDivision) && takesSubject(student, elective, l.subject_id)).sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
+    const sorted = lectures.filter((l) => semesterMatches(l, student) && (!l.division_id || l.division_id === myDivision) && inBatch(l, myRoll) && takesSubject(student, elective, l.subject_id)).sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
     for (const lecture of sorted) {
       if (!nextLecture && toMinutes(lecture.start_time) > currentMinutes) nextLecture = lecture;
     }
@@ -2079,6 +2086,8 @@ async function studentBelongsToSession(student, att) {
   if (aishe && student.aishe_code && aishe !== student.aishe_code) return false;
   // a class held for one division is for that division's students only
   if (ls?.division_id && student.division_id !== ls.division_id) return false;
+  // a lab batch is for the students of its roll range
+  if (!inBatch(ls, rollOf(student))) return false;
   // an elective is for the students who chose it
   if (ls?.course_id) {
     const elective = await electiveSubjectIds(ls.course_id);
@@ -2274,7 +2283,7 @@ const rosterQuery = (course_name, aishe_code) =>
 /** students of the class: [{uid,name,roll_number}] (30 s cache; the doc order of the query is kept) */
 const getRoster = (course_name, aishe_code) =>
   rosterCache.memo(`r:${aishe_code}|${course_name}`, 30_000, async () => {
-    const snap = await rosterQuery(course_name, aishe_code).select("uid", "name", "roll_number", "division_id", "enrolled_subjects").get();
+    const snap = await rosterQuery(course_name, aishe_code).select("uid", "name", "roll_number", "roll_no", "division_id", "enrolled_subjects").get();
     return snap.docs.map((d) => d.data());
   });
 
@@ -2325,7 +2334,7 @@ router.get("/attendance/verify-students", readLimit, guard.teacherOnly, async (r
       return {
         uid: data.uid,
         name: data.name || "Unknown",
-        roll_no: data.roll_number || "-",
+        roll_no: data.roll_number || data.roll_no || "-",
         is_present: status === "present",
         status, // present | pending | none
         verification: rec?.verification || null,
@@ -2364,7 +2373,7 @@ router.post("/attendance/verify-attendance", guard.teacherOnly, async (req, res)
 
     // fresh reads here (this is a write decision)
     const [studentsSnap, existingRecordsSnap] = await Promise.all([
-      rosterQuery(c.course_name, c.aishe_code).select("uid", "name", "roll_number", "division_id", "enrolled_subjects").get(),
+      rosterQuery(c.course_name, c.aishe_code).select("uid", "name", "roll_number", "roll_no", "division_id", "enrolled_subjects").get(),
       db.collection("attendance_records").where("attendance_session_id", "==", attendance_session_id).select("student_uid", "status", "verification").get(),
     ]);
 
@@ -2476,6 +2485,7 @@ router.post("/attendance/mark-manual", guard.teacherOnly, async (req, res) => {
 
     for (const { uid, s } of found) {
       const id = markedKey(attendance_session_id, uid);
+      if (ls.batch_no && !inBatch(ls, rollOf(s))) { skipped.push(uid); continue; }   // a lab batch marks its own students only
       if (existing.has(id)) {
         skipped.push(uid);
         continue;

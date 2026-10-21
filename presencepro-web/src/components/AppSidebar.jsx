@@ -45,6 +45,8 @@ const NAV = {
   student: [
     { path: "/dashboard/student", label: "Home", icon: <GridIcon /> },
     { path: "/dashboard/student/classes", label: "My Classes", icon: <ClassIcon /> },
+    { path: "/dashboard/student/timetable", label: "Timetable", icon: <ClockIcon /> },
+    { path: "/dashboard/student/calendar", label: "Academic Calendar", icon: <CalIcon /> },
     {
       path: "/dashboard/student/assignments",
       label: "Assignments",
@@ -399,6 +401,14 @@ function QrIcon() {
       <rect x="14" y="3" width="7" height="7" rx="1" />
       <rect x="3" y="14" width="7" height="7" rx="1" />
       <path d="M14 14h3v3h-3zM20 14v.01M14 20h.01M17 20h4v-3" />
+    </Svg>
+  );
+}
+function ClockIcon() {
+  return (
+    <Svg>
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
     </Svg>
   );
 }

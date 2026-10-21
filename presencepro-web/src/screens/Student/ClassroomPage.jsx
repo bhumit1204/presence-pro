@@ -34,7 +34,7 @@ function AssignmentRow({ a, now, onOpen }) {
       <span className="st-row-icon" style={{ background: "#6B7280" }}>📝</span>
       <span className="st-row-body">
         <div className="st-row-title">{a.title}</div>
-        <div className="st-row-meta"><span>{isOpenWork(st) || st === "missed" ? dueLabel(a.due_date, now) : `Due ${fmtDate(a.due_date)}`}</span>{a.marks != null && <span>· {a.marks} marks</span>}</div>
+        <div className="st-row-meta"><span>{isOpenWork(st) || st === "missed" ? dueLabel(a.due_date, now) : `Due ${fmtDate(a.due_date)}`}</span>{a.marks != null && <span>· {a.marks} marks</span>}{a.kind === "lab_work" && <Pill tone="purple">Lab work</Pill>}</div>
       </span>
       <span className="st-row-end">
         <StatePill state={st} />
@@ -109,7 +109,7 @@ export default function ClassroomPage() {
                     <div className="st-post-head">
                       <span className="st-row-icon" style={{ background: color }}>📝</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="st-post-title">New assignment: {item.a.title}</div>
+                        <div className="st-post-title">{item.a.kind === "lab_work" ? "New lab work" : "New assignment"}: {item.a.title}</div>
                         <div className="st-post-meta">Posted {fmtDateTime(item.a.created_at)} · {dueLabel(item.a.due_date, now)}</div>
                       </div>
                       <StatePill state={assignmentState(item.a, now)} />

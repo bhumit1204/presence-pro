@@ -11,6 +11,7 @@
  *
  * Backend: /api/web/head   GET /context  GET /teachers  GET /timetable
  *   POST /timetable  PUT|DELETE /timetable/:id  POST /timetable/overrides  DELETE /timetable/overrides/:id
+ *   GET /timetable/batch-plan  POST /timetable/batches        (a lab of one division split into 2 or 3 batches by roll number)
  */
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ManageShell from "../../../components/ManageShell";
@@ -50,6 +51,9 @@ function upcomingDates(today, day, count = 10) {
   return out;
 }
 
+// "rolls 101 - 130" style text for a batch slot (the lecture only stores its bounds)
+const batchRange = (l) => (l.batch_after && l.batch_upto ? `rolls after ${l.batch_after} up to ${l.batch_upto}` : l.batch_upto ? `rolls up to ${l.batch_upto}` : l.batch_after ? `rolls after ${l.batch_after}` : "");
+
 // ── shared bits ──────────────────────────────────────────────────────────────
 function TeacherSelect({ id, teachers, value, onChange, disabled, defaultLabel }) {
   const sorted = useMemo(
@@ -84,7 +88,7 @@ function ConflictBox({ conflicts, blocked }) {
 // Two lectures compete for the same students unless they belong to two different divisions.
 const sharesStudents = (a, b) => !a || !b || a === b;
 
-function ApplyTo({ id, divisions, value, onChange, disabled, locked }) {
+function ApplyTo({ id, divisions, value, onChange, disabled, locked, help }) {
   if (!divisions.length) return null;
   return (
     <div className="mg-field">
@@ -94,7 +98,7 @@ function ApplyTo({ id, divisions, value, onChange, disabled, locked }) {
         {divisions.map((d) => <option key={d.division_id} value={d.division_id}>Division {d.name} only</option>)}
       </select>
       <span className="mg-help">
-        {value
+        {help ? help : value
           ? "Only this division sees the lecture and its attendance. Give it its own teacher below if a different teacher takes this division."
           : "A common lecture: students of all divisions attend it together."}
       </span>
@@ -168,7 +172,7 @@ function useSubmit() {
 }
 
 // ── Add / edit a weekly slot (permanent) ─────────────────────────────────────
-function LectureDialog({ mode, lecture, defaults, data, teachers, course, semester, onClose, onSaved, onChangeDay }) {
+function LectureDialog({ mode, lecture, defaults, data, teachers, course, semester, onClose, onSaved, onChangeDay, onBatches }) {
   const editing = mode === "edit";
   const [subjectId, setSubjectId] = useState(lecture?.subject_id || (editing ? "" : data.subjects[0]?.subject_id || ""));
   const [day, setDay] = useState(lecture?.day || defaults?.day || "Monday");
@@ -213,7 +217,9 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
         && overlaps(toMin(start), toMin(end), toMin(l.start_time), toMin(l.end_time)))
     : [];
   // editing one option of an elective slot: show the others that run with it
-  const withIt = editing && lecture.elective_group
+  const withIt = editing && lecture.batch_no && lecture.slot_id
+    ? data.lectures.filter((l) => l.lecture_id !== lecture.lecture_id && l.slot_id === lecture.slot_id)
+    : editing && lecture.elective_group
     ? data.lectures.filter((l) => l.lecture_id !== lecture.lecture_id && l.elective_group === lecture.elective_group && l.day === lecture.day
         && l.start_time === lecture.start_time && l.end_time === lecture.end_time && (l.division_id || "") === (lecture.division_id || ""))
     : [];
@@ -225,7 +231,7 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
       if (lecture.kind !== "tutorial" && teacher !== initialTeacher) body.teacher_id = teacher || subject?.teacher_assigned || lecture.teacher_id;
       if (division !== initialDivision) body.division_id = division || null;
       const res = await headApi.put(`/timetable/${lecture.lecture_id}`, body);
-      onSaved(res.room_requested ? `Lecture updated. ${res.room_requested} belongs to another course, so a request was sent. The lecture keeps its current room until it is approved.` : "Lecture updated for every week.");
+      onSaved(res.room_requested ? `Lecture updated. ${res.room_requested} belongs to another course, so a request was sent. The lecture keeps its current room until it is approved.` : res.batches_moved ? `Lab updated for every week. The other ${res.batches_moved === 1 ? "batch moved" : `${res.batches_moved} batches moved`} with it.` : "Lecture updated for every week.");
     } else if (group) {
       const res = await headApi.post("/timetable/group", {
         course_id: course.course_id, semester, group: group.name, day, start_time: start, end_time: end,
@@ -246,9 +252,10 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
   });
 
   const remove = () => sub.run(async () => {
-    await headApi.del(`/timetable/${lecture.lecture_id}`);
-    onSaved("Lecture removed from the timetable.");
+    const res = await headApi.del(`/timetable/${lecture.lecture_id}`);
+    onSaved(res && res.deleted > 1 ? `Lab removed from the timetable (${res.deleted} batches).` : "Lecture removed from the timetable.");
   });
+  const isBatch = editing && !!lecture.batch_no;
 
   return (
     <Modal
@@ -259,9 +266,9 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
         <>
           {editing && (
             confirmDelete ? (
-              <button type="button" className="mg-btn mg-btn--danger" onClick={remove} disabled={sub.busy}>Yes, delete this lecture</button>
+              <button type="button" className="mg-btn mg-btn--danger" onClick={remove} disabled={sub.busy}>{isBatch ? "Yes, delete all batches" : "Yes, delete this lecture"}</button>
             ) : (
-              <button type="button" className="mg-btn mg-btn--danger" onClick={() => setConfirmDelete(true)} disabled={sub.busy}>Delete</button>
+              <button type="button" className="mg-btn mg-btn--danger" onClick={() => setConfirmDelete(true)} disabled={sub.busy}>{isBatch ? "Delete all batches" : "Delete"}</button>
             )
           )}
           <button type="button" className="mg-btn" onClick={onClose} disabled={sub.busy}>Cancel</button>
@@ -303,10 +310,21 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
             </div>
           )}
           {kind === "tutorial" && <span className="mg-help">A tutorial uses the subject's classroom and is taught by the subject's teacher. Attendance counts for the subject.</span>}
+          {effKind === "lab" && (
+            <button type="button" className="tt-linkrow" onClick={() => onBatches({ day, start, end, division })} disabled={sub.busy}>
+              Does the division share this lab? <span>Split it into batches →</span>
+            </button>
+          )}
         </div>
       )}
-      {editing && lecture.kind && <span className="mg-help"><strong>{lecture.kind === "lab" ? "Lab" : "Tutorial"}</strong> session of {lecture.subject_name}.</span>}
-      <ApplyTo id="tt-div" divisions={data.divisions || []} value={division} disabled={sub.busy}
+      {editing && lecture.kind && !lecture.batch_no && <span className="mg-help"><strong>{lecture.kind === "lab" ? "Lab" : "Tutorial"}</strong> session of {lecture.subject_name}.</span>}
+      {isBatch && (
+        <div className="tt-with">
+          <strong>Batch {lecture.batch}</strong> of {lecture.batch_of}{batchRange(lecture) ? ` · ${batchRange(lecture)}` : ""}.
+          A new day or time moves every batch of this lab; the room and teacher change this batch only.
+        </div>
+      )}
+      <ApplyTo id="tt-div" divisions={data.divisions || []} value={division} disabled={sub.busy} locked={isBatch}
                onChange={(v) => { setDivision(v); sub.setConflicts([]); }} />
       <div className="tt-two">
         <div className="mg-field">
@@ -375,9 +393,9 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
 
       {withIt.length > 0 && (
         <div className="tt-with">
-          <strong>{lecture.elective_group}</strong> also runs at this time:
+          <strong>{lecture.batch_no ? "The other batches" : lecture.elective_group}</strong> {lecture.batch_no ? "run at the same time:" : "also runs at this time:"}
           <ul>
-            {withIt.map((l) => <li key={l.lecture_id}>{l.subject_code || l.subject_name}{l.room ? ` · Room ${l.room}` : " · no room"}{l.teacher_name ? ` · ${l.teacher_name}` : ""}</li>)}
+            {withIt.map((l) => <li key={l.lecture_id}>{l.batch ? `${l.batch} · ` : ""}{l.subject_code || l.subject_name}{l.room ? ` · Room ${l.room}` : " · no room"}{l.teacher_name ? ` · ${l.teacher_name}` : ""}</li>)}
           </ul>
         </div>
       )}
@@ -393,6 +411,205 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
       )}
       <ConflictBox conflicts={sub.conflicts} blocked={sub.blocked} />
       {sub.error && <div className="mg-banner mg-banner--error" role="alert"><span className="mg-banner-text">⚠ {sub.error}</span></div>}
+    </Modal>
+  );
+}
+
+// ── A lab split into batches (2 or 3, by roll number) ────────────────────────
+function BatchDialog({ defaults, data, teachers, course, semester, onClose, onSaved }) {
+  const labs = useMemo(() => data.subjects.filter((s) => (s.kind === "lab" || s.has_lab) && s.compulsary !== false), [data.subjects]);
+  const [count, setCount] = useState(2);
+  const [day, setDay] = useState(defaults?.day || "Monday");
+  const [start, setStart] = useState(defaults?.start || "14:00");
+  const [end, setEnd] = useState(defaults?.end || "16:00");
+  const [division, setDivision] = useState(defaults?.division || data.divisions?.[0]?.division_id || "");
+  const [rows, setRows] = useState([0, 1, 2].map((i) => ({ subject: labs[i % Math.max(1, labs.length)]?.subject_id || "", room: "", teacher: "" })));
+  const [cuts, setCuts] = useState(null);       // null = split evenly; else the last roll number of every batch but the last
+  const [plan, setPlan] = useState(null);
+  const [planBusy, setPlanBusy] = useState(false);
+  const sub = useSubmit();
+  const roomList = useRooms(day, start, end, "");
+  const shown = rows.slice(0, count);
+  const setRow = (i, patch) => { setRows((r) => r.map((x, k) => (k === i ? { ...x, ...patch } : x))); sub.setConflicts([]); };
+  const validTime = toMin(end) > toMin(start);
+
+  // the preview of who lands in which batch
+  useEffect(() => {
+    let live = true;
+    setPlanBusy(true);
+    const t = setTimeout(async () => {
+      try {
+        const q = `course_id=${encodeURIComponent(course.course_id)}&semester=${semester}&count=${count}${division ? `&division_id=${encodeURIComponent(division)}` : ""}${cuts ? `&cuts=${encodeURIComponent(cuts.join(","))}` : ""}`;
+        const d = await headApi.get(`/timetable/batch-plan?${q}`);
+        if (live) setPlan(d);
+      } catch (err) { if (live) setPlan({ batches: [], rolls: [], students: 0, problem: err.message }); }
+      finally { if (live) setPlanBusy(false); }
+    }, 250);
+    return () => { live = false; clearTimeout(t); };
+  }, [course.course_id, semester, count, division, cuts]);
+  useEffect(() => { setCuts(null); }, [count, division]);
+
+  const moveCut = (i, roll) => {
+    const base = cuts || (plan?.batches || []).slice(0, count - 1).map((b) => b.upto || "");
+    if (base.length < count - 1) return;
+    const next = base.map((c, k) => (k === i ? roll : c));
+    setCuts(next);
+    sub.setConflicts([]);
+  };
+  const cutValues = cuts || (plan?.batches || []).slice(0, count - 1).map((b) => b.upto || "");
+
+  const taken = (i) => shown.filter((_, k) => k !== i).map((x) => x.room).filter(Boolean);
+  const subjectOf = (id) => data.subjects.find((x) => x.subject_id === id);
+  const teacherClash = (() => {
+    const seen = new Map();
+    for (let i = 0; i < shown.length; i++) {
+      const sj = subjectOf(shown[i].subject);
+      const tid = shown[i].teacher || sj?.teacher_assigned || "";
+      if (!tid) continue;
+      if (seen.has(tid)) return `One teacher can't take B${seen.get(tid) + 1} and B${i + 1} at the same time.`;
+      seen.set(tid, i);
+    }
+    return "";
+  })();
+  const missingTeacher = shown.some((x) => { const sj = subjectOf(x.subject); return x.subject && !(x.teacher || sj?.teacher_assigned); });
+  // a split is only needed when the division does not fit in one lab (rooms without a capacity can't be checked)
+  const capOf = (name) => (roomList.rooms || []).find((r) => r.name === name)?.capacity || 0;
+  const maxCap = Math.max(0, ...shown.map((x) => capOf(x.room)));
+  const fitsOne = !!plan && maxCap > 0 && plan.students > 0 && plan.students <= maxCap;
+  const valid = validTime && !fitsOne && shown.every((x) => x.subject) && !teacherClash && !missingTeacher && plan && !plan.problem && plan.batches.length === count;
+
+  const save = (force) => sub.run(async () => {
+    const res = await headApi.post("/timetable/batches", {
+      course_id: course.course_id, semester, division_id: division || undefined, day, start_time: start, end_time: end,
+      cuts: cuts || undefined, force: force || undefined,
+      batches: shown.map((x) => ({ subject_id: x.subject, room: x.room, teacher_id: x.teacher || undefined })),
+    });
+    onSaved(`Lab added to ${day} in ${res.created} batches.${res.rooms_requested?.length ? ` ${res.rooms_requested.join(", ")} belongs to another course, so a request was sent; that batch has no room until it is approved.` : ""}`);
+  });
+
+  return (
+    <Modal
+      title="Lab in batches"
+      sub={`${course.abbr} · Semester ${semester} · every week`}
+      onClose={onClose} busy={sub.busy} wide
+      footer={
+        <>
+          <button type="button" className="mg-btn" onClick={onClose} disabled={sub.busy}>Cancel</button>
+          {sub.conflicts.length > 0 && !sub.blocked ? (
+            <button type="button" className="mg-btn mg-btn--danger" onClick={() => save(true)} disabled={sub.busy}>Save anyway</button>
+          ) : (
+            <button type="button" className="mg-btn mg-btn--primary" onClick={() => save(false)} disabled={!valid || sub.busy}>
+              {sub.busy ? "Saving…" : `Add ${count} batches`}
+            </button>
+          )}
+        </>
+      }
+    >
+      {labs.length === 0 ? (
+        <div className="mg-banner mg-banner--warn" role="status">
+          <span className="mg-banner-text">There is no lab to schedule yet. In Subjects &amp; Faculty add a Lab, either a new one or the lab of an existing subject.</span>
+        </div>
+      ) : (
+        <>
+          <div className="tt-callout">
+            The division&apos;s students are split by roll number. The batches run at the same time, each in its own lab with its own teacher, and each student sees only their batch.
+          </div>
+
+          <div className="mg-field">
+            <span className="mg-label" id="bt-count-label">Number of batches</span>
+            <div className="tt-seg" role="radiogroup" aria-labelledby="bt-count-label">
+              {[2, 3].map((n) => (
+                <button key={n} type="button" role="radio" aria-checked={count === n} disabled={sub.busy}
+                        className={`tt-seg-btn${count === n ? " tt-seg-btn--on" : ""}`} onClick={() => { setCount(n); sub.setConflicts([]); }}>{n} batches</button>
+              ))}
+            </div>
+          </div>
+
+          <ApplyTo id="bt-div" divisions={data.divisions || []} value={division} disabled={sub.busy} help="Pick the division whose lab this is. Its students are split into the batches."
+                   onChange={(v) => { setDivision(v); sub.setConflicts([]); }} />
+
+          <div className="tt-two">
+            <div className="mg-field">
+              <label className="mg-label" htmlFor="bt-day">Day</label>
+              <select id="bt-day" className="mg-input" value={day} disabled={sub.busy} onChange={(e) => { setDay(e.target.value); sub.setConflicts([]); }}>
+                {DAYS.map((d) => <option key={d}>{d}</option>)}
+              </select>
+            </div>
+            <div className="tt-two">
+              <div className="mg-field">
+                <label className="mg-label" htmlFor="bt-start">Starts</label>
+                <input id="bt-start" type="time" className="mg-input" value={start} disabled={sub.busy} onChange={(e) => { setStart(e.target.value); sub.setConflicts([]); }} />
+              </div>
+              <div className="mg-field">
+                <label className="mg-label" htmlFor="bt-end">Ends</label>
+                <input id="bt-end" type="time" className="mg-input" value={end} disabled={sub.busy} onChange={(e) => { setEnd(e.target.value); sub.setConflicts([]); }} />
+              </div>
+            </div>
+          </div>
+          {validTime ? <span className="mg-help">Length: {dur(start, end)}</span> : <span className="tt-invalid">End time must be after the start time.</span>}
+
+          <fieldset className="tt-group">
+            <legend>Batches</legend>
+            {shown.map((x, i) => {
+              const sj = subjectOf(x.subject);
+              const b = plan?.batches?.[i];
+              return (
+                <div className="tt-batch" key={i}>
+                  <div className="tt-batch-head">
+                    <strong>B{i + 1}</strong>
+                    <span className="tt-batch-who">
+                      {planBusy && !b ? "…" : b ? `${plural(b.size, "student")}${b.first ? ` · roll ${b.first}${b.last && b.last !== b.first ? ` – ${b.last}` : ""}` : ""}` : ""}
+                    </span>
+                  </div>
+                  <div className="tt-group-row">
+                    <select className="mg-input" aria-label={`Lab for B${i + 1}`} value={x.subject} disabled={sub.busy} onChange={(e) => setRow(i, { subject: e.target.value, teacher: "" })}>
+                      <option value="">Pick the lab</option>
+                      {labs.map((l) => <option key={l.subject_id} value={l.subject_id}>{l.subject_code} · {l.subject_name}{l.kind === "lab" ? "" : " (lab)"}</option>)}
+                    </select>
+                    <RoomSelect rooms={roomList.rooms} value={x.room} disabled={sub.busy} onlyType="lab" ariaLabel={`Lab room for B${i + 1}`}
+                                taken={taken(i)} onChange={(v) => setRow(i, { room: v })} />
+                    <TeacherSelect id={`bt-t-${i}`} teachers={teachers} value={x.teacher} disabled={sub.busy} onChange={(v) => setRow(i, { teacher: v })}
+                                   defaultLabel={sj?.teacher_name ? sj.teacher_name : "Pick a teacher"} />
+                  </div>
+                </div>
+              );
+            })}
+            <span className="mg-help">Every batch needs its own lab room and its own teacher. Two batches can do the same lab or different ones.</span>
+            {fitsOne && <span className="tt-invalid">All {plan.students} students fit in one lab (capacity {maxCap}), so batches are not needed. Add a normal lab session instead.</span>}
+            {teacherClash && <span className="tt-invalid">{teacherClash}</span>}
+            {!teacherClash && missingTeacher && <span className="tt-invalid">Pick a teacher for every batch (some labs have none assigned yet).</span>}
+          </fieldset>
+
+          <div className="mg-field">
+            <span className="mg-label">Who goes where</span>
+            {plan?.problem ? (
+              <span className="tt-invalid">{plan.problem}</span>
+            ) : plan && plan.students > 0 ? (
+              <>
+                <span className="mg-help">
+                  {plural(plan.students, "student")} are split evenly by roll number.
+                  {plan.without_roll > 0 ? ` ${plural(plan.without_roll, "student")} without a roll number join the last batch.` : ""} Move a split point if you want different sizes:
+                </span>
+                <div className="tt-cuts">
+                  {Array.from({ length: count - 1 }, (_, i) => (
+                    <label key={i} className="tt-cut">
+                      <span>B{i + 1} ends at roll</span>
+                      <select className="mg-input" value={cutValues[i] || ""} disabled={sub.busy || !plan.rolls.length} onChange={(e) => moveCut(i, e.target.value)}>
+                        {plan.rolls.slice(0, -1).map((r) => <option key={r.roll_no} value={r.roll_no}>{r.roll_no}{r.name ? ` · ${r.name}` : ""}</option>)}
+                      </select>
+                    </label>
+                  ))}
+                </div>
+              </>
+            ) : (
+              <span className="mg-help">{planBusy ? "Counting students…" : "No students found yet for this class."}</span>
+            )}
+          </div>
+
+          <ConflictBox conflicts={sub.conflicts} blocked={sub.blocked} />
+          {sub.error && <div className="mg-banner mg-banner--error" role="alert"><span className="mg-banner-text">⚠ {sub.error}</span></div>}
+        </>
+      )}
     </Modal>
   );
 }
@@ -717,10 +934,10 @@ function Grid({ lectures, colorOf, onSlot, onEmpty, courseId }) {
                       className="tt-slot"
                       style={{ background: bg, color: fg, borderColor: fg }}
                       onClick={() => onSlot(l)}
-                      title={`${l.subject_name} · ${l.start_time}–${l.end_time}${l.teacher_name ? ` · ${l.teacher_name}` : ""}${l.room ? ` · ${l.room}` : ""}`}
+                      title={`${l.subject_name}${l.batch ? ` · ${l.batch}${batchRange(l) ? ` (${batchRange(l)})` : ""}` : ""} · ${l.start_time}–${l.end_time}${l.teacher_name ? ` · ${l.teacher_name}` : ""}${l.room ? ` · ${l.room}` : ""}`}
                       aria-label={`${l.subject_code || l.subject_name} ${day} ${l.start_time} to ${l.end_time}`}
                     >
-                      <span className="tt-slot-code">{l.subject_code || l.subject_name}{l.kind === "tutorial" ? " · Tutorial" : l.kind === "lab" ? " · Lab" : ""}{l.elective_group ? ` · ${l.elective_group}` : ""}{l.division_name ? ` · ${l.division_name}` : ""}</span>
+                      <span className="tt-slot-code">{l.subject_code || l.subject_name}{l.kind === "tutorial" ? " · Tutorial" : l.kind === "lab" ? " · Lab" : ""}{l.batch ? ` ${l.batch}` : ""}{l.elective_group ? ` · ${l.elective_group}` : ""}{l.division_name ? ` · ${l.division_name}` : ""}</span>
                       <span className="tt-slot-name">{l.subject_name}</span>
                       <span className="tt-slot-meta">
                         {l.teacher_name || "No teacher"}{l.teacher_pinned ? " *" : ""}{l.room ? ` · ${l.room}` : ""}
@@ -732,7 +949,7 @@ function Grid({ lectures, colorOf, onSlot, onEmpty, courseId }) {
                     {courseId && (
                       <CommentPin
                         courseId={courseId}
-                        about={`${l.subject_code || l.subject_name}${l.kind === "tutorial" ? " Tutorial" : l.kind === "lab" ? " Lab" : ""} · ${day} ${l.start_time}-${l.end_time}${l.division_name ? ` · Div ${l.division_name}` : ""}`}
+                        about={`${l.subject_code || l.subject_name}${l.kind === "tutorial" ? " Tutorial" : l.kind === "lab" ? " Lab" : ""}${l.batch ? ` ${l.batch}` : ""} · ${day} ${l.start_time}-${l.end_time}${l.division_name ? ` · Div ${l.division_name}` : ""}`}
                       />
                     )}
                     </div>
@@ -774,7 +991,7 @@ function PrintTable({ lectures }) {
                 <td key={t.s + t.e}>
                   {here.map((l) => (
                     <div key={l.lecture_id}>
-                      <b>{l.subject_code || l.subject_name}{l.division_name ? ` (${l.division_name})` : ""}</b>
+                      <b>{l.subject_code || l.subject_name}{l.batch ? ` ${l.batch}` : ""}{l.division_name ? ` (${l.division_name})` : ""}</b>
                       <div>{l.teacher_name || "—"}{l.teacher_pinned ? " *" : ""}</div>
                       {l.room && <div>{l.room}</div>}
                     </div>
@@ -933,6 +1150,8 @@ export default function TimetablePage() {
           <button className="mg-btn" onClick={() => setModal({ type: "rooms" })}>
             Rooms{requests.incoming.length > 0 ? ` (${requests.incoming.length})` : ""}
           </button>
+          <button className="mg-btn" onClick={() => setModal({ type: "batches", defaults: { division: viewDivision ? viewDivision.division_id : "" } })} disabled={!data.subjects.some((s) => s.kind === "lab" || s.has_lab)}
+                  title="Split a division's lab into 2 or 3 batches">Lab batches</button>
           <button className="mg-btn" onClick={() => setModal({ type: "special" })} disabled={!data.subjects.length}>Special session</button>
           <button className="mg-btn mg-btn--primary" onClick={() => setModal({ type: "add" })} disabled={!data.subjects.length}>+ Add lecture</button>
         </>
@@ -1076,11 +1295,14 @@ export default function TimetablePage() {
 
       {data && course && modal?.type === "add" && (
         <LectureDialog mode="add" defaults={modal.defaults} data={data} teachers={teachers} course={course} semester={semester}
-                       onClose={closeModal} onSaved={saved} />
+                       onClose={closeModal} onSaved={saved} onBatches={(d) => setModal({ type: "batches", defaults: d })} />
       )}
       {data && course && modal?.type === "edit" && (
         <LectureDialog mode="edit" lecture={modal.lecture} data={data} teachers={teachers} course={course} semester={semester}
                        onClose={closeModal} onSaved={saved} onChangeDay={(l) => setModal({ type: "oneday", lecture: l })} />
+      )}
+      {data && course && modal?.type === "batches" && (
+        <BatchDialog defaults={modal.defaults} data={data} teachers={teachers} course={course} semester={semester} onClose={closeModal} onSaved={saved} />
       )}
       {data && course && modal?.type === "oneday" && (
         <OneDayDialog lecture={modal.lecture} data={data} teachers={teachers} course={course} semester={semester}

@@ -2,11 +2,12 @@
 // Two clearly separate things:
 //   Requests   - waiting for you (lecture swap requests, OD requests)
 //   Broadcasts - quick messages YOU sent to students' phones
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useRef, useState } from "react";
 import { Alert, RefreshControl, ScrollView, Text, View } from "react-native";
 import { useNavigation } from "@react-navigation/native";
 import { useOnTabActive } from "../../../navigation/TabContext";
 import { Banner, Button, Card, Chip, EmptyState, T, SP, font } from "../../../components/ui";
+import SessionRequests from "./SessionRequests";
 import { ExpandText, ListCard, ListRow, RequestCard, SwapRequestCard, enc, getJson, useInbox, useTeacher } from "../teacherShared";
 
 export default function TeacherInbox() {
@@ -16,6 +17,8 @@ export default function TeacherInbox() {
   const [broadcasts, setBroadcasts] = useState<any[]>([]);
   const [bError, setBError] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const sessions = useRef<{ refresh: () => Promise<void> }>(null);
+  const [sessionCount, setSessionCount] = useState(0);
 
   const loadBroadcasts = useCallback(async () => {
     try {
@@ -30,17 +33,18 @@ export default function TeacherInbox() {
   useOnTabActive("inbox", () => {
     inbox.refresh();
     loadBroadcasts();
+    sessions.current?.refresh();
   });
 
   const onRefresh = async () => {
     setRefreshing(true);
-    await Promise.all([inbox.refresh(), loadBroadcasts()]);
+    await Promise.all([inbox.refresh(), loadBroadcasts(), sessions.current?.refresh()]);
     setRefreshing(false);
   };
 
   const target = (b: any) => (b.target_type === "class" ? "Whole class" : b.target_type === "group" ? "A group" : "Chosen students");
   const sentSwaps = inbox.swaps.sent.filter((x) => x.status === "pending");
-  const waiting = inbox.requests.length + inbox.sent.length + inbox.swaps.incoming.length + sentSwaps.length;
+  const waiting = inbox.requests.length + inbox.sent.length + inbox.swaps.incoming.length + sentSwaps.length + sessionCount;
   const cancelSwap = (id: string) =>
     Alert.alert("Cancel this exchange request?", undefined, [
       { text: "No", style: "cancel" },
@@ -75,6 +79,7 @@ export default function TeacherInbox() {
         {inbox.swaps.incoming.map((x) => (
           <SwapRequestCard key={x.swap_id} swap={x} onRespond={inbox.respondSwap} />
         ))}
+        <SessionRequests ref={sessions} onCount={setSessionCount} />
         <ListCard>
           <ListRow
             icon="document-text-outline"

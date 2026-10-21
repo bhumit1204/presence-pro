@@ -45,6 +45,16 @@ async function post(path, body) {
   return data;
 }
 
+// Lab / tutorial / lab batch / division of a lecture, e.g. ["Lab", "B1", "Div A"]
+const KIND_LABEL = { lab: "Lab", tutorial: "Tutorial" };
+function lecTags(l) {
+  const t = [];
+  if (l && KIND_LABEL[l.kind]) t.push(KIND_LABEL[l.kind]);
+  if (l && l.batch_no) t.push(l.batch || `B${l.batch_no}`);
+  if (l && l.division_name) t.push(`Div ${l.division_name}`);
+  return t;
+}
+
 function fmt12(t) {
   if (!t) return "—";
   const [h, m] = t.split(":").map(Number);
@@ -448,7 +458,14 @@ export default function Dashboard() {
                           <div className="td-lec-time">
                             {fmt12(lec.start_time)} – {fmt12(lec.end_time)}
                           </div>
-                          <div className="td-lec-name">{lec.subject_name}</div>
+                          <div className="td-lec-name">
+                            {lec.subject_name}
+                            {lecTags(lec).length > 0 && (
+                              <span style={{ fontSize: 11, color: "#6B7280", marginLeft: 6, fontWeight: 600 }}>
+                                {lecTags(lec).join(" · ")}
+                              </span>
+                            )}
+                          </div>
                           <div className="td-lec-room">{lec.room}</div>
                           {lec.is_temporary && (
                             <span

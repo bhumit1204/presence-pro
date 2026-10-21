@@ -47,7 +47,9 @@
  *   GET    /timetable?course_id=&semester=
  *   POST   /timetable                               { course_id, subject_id, day, start_time, end_time, room?, teacher_id?, replaces?: [lectureId], force? }
  *   PUT    /timetable/:id                           { day?, start_time?, end_time?, room?, teacher_id?, force? }
- *   DELETE /timetable/:id
+ *   DELETE /timetable/:id                           (a lab split into batches is deleted as a whole)
+ *   GET    /timetable/batch-plan?course_id=&semester=&division_id=&count=2|3&cuts=   how the roll numbers split into lab batches
+ *   POST   /timetable/batches                       { course_id, semester, division_id?, day, start_time, end_time, cuts?, batches: [{ subject_id, room?, teacher_id? }] }  one lab slot, 2 or 3 batches
  *   POST   /timetable/overrides                     one-date change: { course_id, kind: "modify"|"cancel"|"special", date, lecture_id?, changes?, special?, replaces?, note?, force? }
  *   DELETE /timetable/overrides/:id                 undo a one-date change
  *   GET    /calendar?academic_year=
@@ -82,6 +84,7 @@ const win = require("../../services/semesterWindow");
 const { TTLCache } = require("../../utils/cache");
 const { queueConcurrent, rateLimit } = require("../../utils/limiter");
 const { isAlreadyExists } = require("../../utils/firestore");
+const labBatches = require("../../utils/batches");
 let sharedVerify = null;
 try { sharedVerify = require("../../middleware/auth").verifyToken; } catch { /* optional: falls back to admin.auth() */ }
 
@@ -593,16 +596,23 @@ async function loadDayLectures(req, day, course_id) {
 
 // marks lectures of elective subjects with `egroup` (course|semester|group) so the options of one group may share a time slot
 async function annotateElectiveGroups(list, course_id) {
+  // the batches of one lab slot run side by side: they may share the time (but never a teacher or a room)
+  list.forEach((l) => { if (l.batch_no && l.slot_id) l.egroup = `batch|${l.slot_id}`; });
   if (!list.some((l) => l.course_id === course_id && l.subject_id)) return;
   const subs = await subjectsOfCourse(course_id);
   const byId = Object.fromEntries(subs.filter((x) => x.compulsary === false).map((x) => [x.subject_id, `${parseSem(x.semester)}|${groupKey(x)}`]));
-  list.forEach((l) => { if (l.course_id === course_id && byId[l.subject_id]) l.egroup = byId[l.subject_id]; });
+  list.forEach((l) => { if (!l.egroup && l.course_id === course_id && byId[l.subject_id]) l.egroup = byId[l.subject_id]; });
 }
 const egroupOfSubject = (subject) => (subject && subject.compulsary === false ? `${parseSem(subject.semester)}|${groupKey(subject)}` : undefined);
 
 async function egroupOfSubjectId(id) {
   const d = await db.collection("subjects").doc(String(id)).get();
   return d.exists ? egroupOfSubject(d.data()) : undefined;
+}
+// the group a lecture shares its time with: the other batches of its lab slot, or the other options of its elective group
+async function egroupOfLecture(lec) {
+  if (lec.batch_no && lec.slot_id) return `batch|${lec.slot_id}`;
+  return lec.subject_id ? egroupOfSubjectId(lec.subject_id) : undefined;
 }
 
 async function divisionOrFail(req, course, sem, id) {
@@ -1590,6 +1600,11 @@ function lectureView(l, names = {}, subjectsById = {}) {
     elective_group: l.elective_group || (subj.compulsary === false ? subj.elective_group || null : null),
     slot_id: l.slot_id || null,
     kind: l.kind || (subj.kind === "lab" ? "lab" : ""),
+    batch: l.batch_no ? (l.batch || `B${l.batch_no}`) : "",
+    batch_no: l.batch_no || null,
+    batch_of: l.batch_of || null,
+    batch_after: l.batch_no && l.batch_after != null ? l.batch_after : null,
+    batch_upto: l.batch_no && l.batch_upto != null ? l.batch_upto : null,
     day: l.day,
     start_time: l.start_time,
     end_time: l.end_time,
@@ -2126,6 +2141,160 @@ router.post("/timetable/group", wrap(async (req, res) => {
   return res.status(201).json({ success: true, slot_id, lecture_ids: ids, created: ids.length });
 }));
 
+// ── Lab batches ──────────────────────────────────────────────────────────────
+// One lab slot of a division, split into 2 or 3 batches by roll number. Every batch is a normal lecture
+// (own subject / lab, room and teacher) carrying its roll range; they share a slot_id and run at the same time.
+
+// the other batches of the same lab slot (with their document refs)
+async function batchSiblings(lecture) {
+  if (!lecture.slot_id) return [];
+  const snap = await db.collection("lectures").where("slot_id", "==", lecture.slot_id).get();
+  return snap.docs.filter((d) => d.id !== lecture.lecture_id && d.data().batch_no)
+    .map((d) => ({ ...d.data(), lecture_id: d.id, ref: d.ref }))
+    .sort((a, b) => a.batch_no - b.batch_no);
+}
+
+// the students a batch split is made from: active students of this semester (and division)
+async function batchPool(req, course, sem, division) {
+  return (await studentsOfCourse(req.head.aishe_code, course))
+    .filter((st) => isActiveStudent(st) && parseSem(st.semester) === sem && (!division || st.division_id === division.division_id));
+}
+
+// GET /timetable/batch-plan?course_id=&semester=&division_id=&count=2|3&cuts=2310,2330
+//   preview of how the roll numbers split, and the list of roll numbers to pick split points from
+router.get("/timetable/batch-plan", wrap(async (req, res) => {
+  const course = courseOrFail(req, req.query.course_id);
+  const sem = parseSem(req.query.semester);
+  if (sem === null) fail(400, "semester is required");
+  const division = await divisionOrFail(req, course, sem, req.query.division_id || null);
+  const pool = await batchPool(req, course, sem, division);
+  const count = Number(req.query.count) || 2;
+  const cuts = String(req.query.cuts || "").split(",").map((x) => x.trim()).filter(Boolean);
+  const plan = labBatches.planBatches(pool.map(labBatches.rollOf), count, cuts.length ? cuts : null);
+  const rolls = pool.map((st) => ({ roll_no: labBatches.rollOf(st), name: st.name || [st.first_name, st.last_name].filter(Boolean).join(" ") }))
+    .filter((r) => r.roll_no).sort((a, b) => labBatches.naturalCompare(a.roll_no, b.roll_no));
+  // first / last roll number of every batch, for the preview ("101 - 130")
+  const batches = plan.ok ? plan.batches.map((b) => {
+    const members = rolls.filter((r) => labBatches.inBatch({ batch_no: b.batch_no, batch_after: b.after, batch_upto: b.upto }, r.roll_no));
+    return { ...b, first: members.length ? members[0].roll_no : null, last: members.length ? members[members.length - 1].roll_no : null };
+  }) : [];
+  return res.json({
+    success: true, students: pool.length, without_roll: pool.length - rolls.length,
+    batches, problem: plan.ok ? null : plan.error, rolls,
+  });
+}));
+
+// POST /timetable/batches
+//   { course_id, semester, division_id?, day, start_time, end_time, cuts?: [roll, ...],
+//     batches: [{ subject_id, room?, teacher_id? }, ...]  (2 or 3: B1, B2, B3), force? }
+router.post("/timetable/batches", wrap(async (req, res) => {
+  const body = req.body || {};
+  const course = courseOrFail(req, body.course_id);
+  const sem = parseSem(body.semester);
+  if (sem === null) fail(400, "semester is required");
+  const options = Array.isArray(body.batches) ? body.batches : [];
+  if (options.length < 2 || options.length > 3) fail(400, "A lab can be split into 2 or 3 batches");
+
+  const slot = readSlotFields({ day: body.day, start_time: body.start_time, end_time: body.end_time });
+  const division = await divisionOrFail(req, course, sem, body.division_id);
+
+  const rows = [];
+  for (let i = 0; i < options.length; i++) {
+    const o = options[i] || {};
+    const label = `B${i + 1}`;
+    if (!o.subject_id) fail(400, `${label}: pick the lab this batch does`);
+    const subject = (await loadHeadSubject(req, o.subject_id)).subject;
+    if (subject.course_id !== course.course_id) fail(400, `${label}: that subject does not belong to this course`);
+    if (parseSem(subject.semester) !== sem) fail(400, `${label}: ${subject.subject_name} is not in semester ${sem}`);
+    if (subject.compulsary === false) fail(400, `${label}: batches are not available for elective subjects`);
+    slotKind(subject, "lab");                                   // a lab subject, or a subject that has a lab
+    const teacherId = o.teacher_id || subject.teacher_assigned;
+    if (!teacherId) fail(400, `${label}: allocate a teacher to ${subject.subject_name} before scheduling it`);
+    const teacher = await activeTeacherOrFail(req, teacherId);
+    const rr = await resolveRoom(req, o.room, "lab");
+    rows.push({ label, no: i + 1, subject, teacher, rr });
+  }
+
+  // the batches run at the same time: no shared teacher, no shared room
+  const tSeen = new Map(), rSeen = new Map();
+  rows.forEach((r) => {
+    if (tSeen.has(r.teacher.id)) fail(400, `${r.teacher.name} can't take ${tSeen.get(r.teacher.id)} and ${r.label} at the same time`);
+    tSeen.set(r.teacher.id, r.label);
+    if (r.rr.name) {
+      const k = up(r.rr.name);
+      if (rSeen.has(k)) fail(400, `Room ${r.rr.name} is given to both ${rSeen.get(k)} and ${r.label}. Each batch needs its own room.`);
+      rSeen.set(k, r.label);
+    }
+  });
+
+  // who is in which batch
+  const pool = await batchPool(req, course, sem, division);
+  const cuts = Array.isArray(body.cuts) ? body.cuts : null;
+  const plan = labBatches.planBatches(pool.map(labBatches.rollOf), rows.length, cuts && cuts.length ? cuts : null);
+  if (!plan.ok) fail(400, plan.error);
+  // batches exist only because the division does not fit in one lab: if a chosen lab holds everybody, no split is needed
+  const caps = rows.map((r) => (r.rr.owner && r.rr.owner.capacity) || 0).filter(Boolean);
+  if (caps.length && pool.length <= Math.max(...caps)) {
+    fail(400, `All ${pool.length} students fit in one lab (capacity ${Math.max(...caps)}), so batches are not needed. Add a normal lab session instead.`);
+  }
+
+  // clashes with what is already in the timetable (the new batches never clash with each other)
+  const conflicts = [];
+  for (const r of rows) {
+    const found = await findConflicts(req, {
+      ...slot, room: r.rr.name, course_id: course.course_id, semester: sem, teacher_id: r.teacher.id,
+      division_id: division ? division.division_id : undefined,
+    });
+    const tagged = found.map((c) => ({ ...c, message: `${r.label}: ${c.message}` }));
+    blockOnRoomClash(r.rr, tagged);
+    conflicts.push(...tagged);
+  }
+  if (conflicts.length && body.force !== true) fail(409, "This slot clashes with an existing lecture", { conflicts });
+
+  const slot_id = db.collection("lectures").doc().id;
+  const ids = [];
+  const ops = rows.map((r, i) => {
+    const ref = db.collection("lectures").doc();
+    ids.push(ref.id);
+    r.lecture_id = ref.id;
+    const pb = plan.batches[i];
+    return (b) => b.set(ref, clean({
+      lecture_id: ref.id,
+      aishe_code: req.head.aishe_code,
+      course_id: course.course_id,
+      semester: r.subject.semester || semLabel(sem),
+      subject_id: r.subject.subject_id,
+      subject_name: r.subject.subject_name || "",
+      subject_code: r.subject.subject_code || "",
+      kind: "lab",
+      teacher_id: r.teacher.id,
+      teacher_name: r.teacher.name,
+      teacher_pinned: r.teacher.id !== r.subject.teacher_assigned ? true : undefined,
+      division_id: division ? division.division_id : undefined,
+      division_name: division ? division.name : undefined,
+      slot_id,
+      batch: pb.name, batch_no: pb.batch_no, batch_of: rows.length, batch_after: pb.after, batch_upto: pb.upto,
+      day: slot.day,
+      start_time: slot.start_time,
+      end_time: slot.end_time,
+      room: r.rr.foreign ? "" : r.rr.name,
+      department: req.head.department,
+      created_by: req.head.teacher_id,
+      created_at: ts(),
+    }));
+  });
+  await commitInBatches(ops);
+
+  // a lab of another course is requested from its owner; that batch has no room until they answer
+  const requested = [];
+  for (const r of rows) {
+    if (r.rr.foreign) { await createRoomRequest(req, r.rr, course, { lecture_id: r.lecture_id, subject_name: r.subject.subject_name }, { ...slot, room: r.rr.name }); requested.push(r.rr.name); }
+  }
+
+  await audit(req, "timetable.create_batches", "lectures", slot_id, { batches: rows.map((r) => `${r.label}:${r.subject.subject_code}`), ...slot });
+  return res.status(201).json({ success: true, slot_id, lecture_ids: ids, created: ids.length, batches: plan.batches, rooms_requested: requested });
+}));
+
 router.put("/timetable/:id", wrap(async (req, res) => {
   const { ref, lecture } = await loadHeadLecture(req, req.params.id);
   const body = req.body || {};
@@ -2164,9 +2333,30 @@ router.put("/timetable/:id", wrap(async (req, res) => {
   }
   const conflicts = await findConflicts(req, {
     ...slot, course_id: lecture.course_id, semester: sem, teacher_id, exclude_id: lecture.lecture_id,
-    division_id: division_id || undefined, egroup: lecture.subject_id ? await egroupOfSubjectId(lecture.subject_id) : undefined,
+    division_id: division_id || undefined, egroup: await egroupOfLecture(lecture),
   });
   blockOnRoomClash(rr, conflicts);
+
+  // a lab slot split into batches moves as one: the other batches follow a new day / time
+  let siblings = [];
+  const timeChanged = slot.day !== lecture.day || slot.start_time !== lecture.start_time || slot.end_time !== lecture.end_time;
+  if (lecture.batch_no && lecture.slot_id) {
+    if (division_id !== (lecture.division_id || null)) fail(400, "The batches of a lab belong to their division. Delete the lab slot and add it again to change the division.");
+    siblings = await batchSiblings(lecture);
+    if (timeChanged) {
+      const ids = [lecture.lecture_id, ...siblings.map((x) => x.lecture_id)];
+      for (const sb of siblings) {
+        if (sb.override_id) fail(409, `${sb.batch || "Another batch"} has a temporary change running today. Undo that change first, or wait until tomorrow.`);
+        const found = await findConflicts(req, {
+          ...slot, room: sb.room || "", course_id: sb.course_id, semester: sem, teacher_id: sb.teacher_id, exclude_ids: ids,
+          division_id: sb.division_id || undefined, egroup: `batch|${lecture.slot_id}`,
+        });
+        const tagged = found.map((c) => ({ ...c, message: `${sb.batch || "Batch"}: ${c.message}` }));
+        blockOnRoomClash(await lookupSavedRoom(req, sb.room), tagged);
+        conflicts.push(...tagged);
+      }
+    }
+  }
   if (conflicts.length && body.force !== true) fail(409, "This slot clashes with an existing lecture", { conflicts });
 
   // a room of another course is requested from its owner; until they answer the slot keeps its current room
@@ -2180,17 +2370,41 @@ router.put("/timetable/:id", wrap(async (req, res) => {
     division_name: division_id ? division_name : admin.firestore.FieldValue.delete(),
     updated_by: req.head.teacher_id, updated_at: ts(),
   }));
+  if (timeChanged && siblings.length) {
+    await commitInBatches(siblings.map((sb) => (b) => b.update(sb.ref, {
+      day: slot.day, start_time: slot.start_time, end_time: slot.end_time, updated_by: req.head.teacher_id, updated_at: ts(),
+    })));
+  }
   if (roomChanged) {
     await cancelRoomRequests(lecture.lecture_id, "The room was changed");
     if (keepRoom) await createRoomRequest(req, rr, req.head.courseMap[lecture.course_id], lecture, slot);
   }
   await audit(req, "timetable.update", "lectures", lecture.lecture_id, { ...slot, teacher_id });
-  return res.json({ success: true, room_requested: keepRoom ? rr.name : undefined });
+  return res.json({ success: true, room_requested: keepRoom ? rr.name : undefined, batches_moved: timeChanged ? siblings.length : 0 });
 }));
 
 router.delete("/timetable/:id", wrap(async (req, res) => {
   const { ref, lecture } = await loadHeadLecture(req, req.params.id);
   if (lecture.override_id) fail(409, "This lecture has a temporary change running today. Undo that change first, or wait until tomorrow.");
+
+  // the batches of a lab slot are one unit: deleting one removes them all
+  if (lecture.batch_no && lecture.slot_id) {
+    const all = [lecture, ...(await batchSiblings(lecture))];
+    for (const l of all) {
+      if (l.override_id) fail(409, `${l.batch || "A batch"} has a temporary change running today. Undo that change first, or wait until tomorrow.`);
+      const used = await db.collection("lecture_sessions").where("lecture_id", "==", l.lecture_id).limit(1).get();
+      if (!used.empty) fail(409, `${l.batch || "A batch"} of this lab already has attendance history, so the lab can't be deleted. Edit its day, time or room instead.`);
+    }
+    const pendingAll = [];
+    for (const l of all) {
+      (await db.collection("timetable_overrides").where("lecture_id", "==", l.lecture_id).get()).docs
+        .filter((d) => d.data().status === "scheduled").forEach((d) => pendingAll.push(d));
+    }
+    await commitInBatches([...all.map((l) => (b) => b.delete(db.collection("lectures").doc(l.lecture_id))), ...pendingAll.map((d) => (b) => b.delete(d.ref))]);
+    for (const l of all) await cancelRoomRequests(l.lecture_id, "The timetable slot was deleted");
+    await audit(req, "timetable.delete_batches", "lectures", lecture.slot_id, { subject: lecture.subject_code || lecture.subject_name, day: lecture.day, start_time: lecture.start_time, batches: all.length });
+    return res.json({ success: true, deleted: all.length });
+  }
 
   const sessions = await db.collection("lecture_sessions").where("lecture_id", "==", lecture.lecture_id).limit(1).get();
   if (!sessions.empty) {
@@ -2284,7 +2498,7 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
       course_id: course.course_id, semester: sem,
       teacher_id: changes.teacher_id || lecture.teacher_id,
       division_id: lecture.division_id || undefined,
-      egroup: lecture.subject_id ? (await egroupOfSubjectId(lecture.subject_id)) : undefined,
+      egroup: await egroupOfLecture(lecture),
     };
     exclude = [lecture.lecture_id];
   }
@@ -2638,13 +2852,14 @@ const attendanceOfSubject = (subject_id, sinceDate, untilDate) =>
   attendanceCache.memo(`${subject_id}|${sinceDate || ""}|${untilDate || ""}`, 30_000, () => attendanceOfSubjectUncached(subject_id, sinceDate, untilDate));
 
 async function attendanceOfSubjectUncached(subject_id, sinceDate, untilDate) {
-  const lecSnap = await db.collection("lectures").where("subject_id", "==", subject_id).select("division_id").get();
+  const lecSnap = await db.collection("lectures").where("subject_id", "==", subject_id).select("division_id", "batch", "batch_no", "batch_of", "batch_after", "batch_upto").get();
   const lectureIds = lecSnap.docs.map((d) => d.id);
   const lectureDiv = Object.fromEntries(lecSnap.docs.map((d) => [d.id, d.data().division_id || null]));
+  const lectureBatch = Object.fromEntries(lecSnap.docs.map((d) => [d.id, d.data().batch_no ? labBatches.batchFields(d.data()) : null]));
   const sessions = [];
   const diag = { lectures: lectureIds.length, sessions_any: 0, sessions_completed: 0, in_range: 0 };
   const sessionSnaps = await Promise.all(chunks(lectureIds, CHUNK).map((ch) =>
-    db.collection("lecture_sessions").where("lecture_id", "in", ch).select("status", "date", "started_at", "lecture_id", "division_id").get()));
+    db.collection("lecture_sessions").where("lecture_id", "in", ch).select("status", "date", "started_at", "lecture_id", "division_id", "batch", "batch_no", "batch_of", "batch_after", "batch_upto").get()));
   for (const snap of sessionSnaps) {
     snap.docs.forEach((d) => {
       const x = d.data();
@@ -2654,7 +2869,7 @@ async function attendanceOfSubjectUncached(subject_id, sinceDate, untilDate) {
       const date = x.date || (toISO(x.started_at) || "").slice(0, 10) || "";
       if (date && sinceDate && date < sinceDate) return;
       if (date && untilDate && date > untilDate) return;
-      sessions.push({ id: d.id, date, div: x.division_id || lectureDiv[x.lecture_id] || null });
+      sessions.push({ id: d.id, date, div: x.division_id || lectureDiv[x.lecture_id] || null, batch: x.batch_no ? labBatches.batchFields(x) : lectureBatch[x.lecture_id] || null });
     });
   }
   diag.in_range = sessions.length;
@@ -2685,8 +2900,9 @@ async function attendanceOfSubjectUncached(subject_id, sinceDate, untilDate) {
     if (r.source === "od" ? counts(r.status || "od") : counts(r.status)) ids.forEach((sid) => mark(r.student_uid, sid));
     else if (r.source === "manual" && r.status === "absent") ids.forEach((sid) => unmark(r.student_uid, sid));
   });
-  // lectures held for ONE division = the common ones + that division's own (no division = common ones only)
-  const totalFor = (divisionId) => sessions.filter((x) => !x.div || x.div === (divisionId || null)).length;
+  // lectures held for ONE division = the common ones + that division's own (no division = common ones only).
+  // A lab batch counts only for the students of its roll range, so pass the student when there is one.
+  const totalFor = (divisionId, student) => sessions.filter((x) => (!x.div || x.div === (divisionId || null)) && (!x.batch || (!!student && labBatches.inBatch(x.batch, labBatches.rollOf(student))))).length;
   return { total: sessions.length, totalFor, presentOf, diag };
 }
 
@@ -2718,7 +2934,7 @@ async function defaultersOf(course, sem, students, fromDate = null, untilDate = 
     if (att.total > 0) {
       enrolled.forEach((s) => {
         const uid = s.uid || s.student_id;
-        const held = att.totalFor(s.division_id);
+        const held = att.totalFor(s.division_id, s);
         if (!held) return;
         const attended = Math.min((att.presentOf[uid] || new Set()).size, held);
         const pct = Math.round((attended / held) * 1000) / 10;
@@ -3120,7 +3336,7 @@ function studentRow(s, course, subjects, acts, withDetail) {
   mine.forEach((subj) => {
     const act = acts[subj.subject_id];
     if (!act) return;
-    const held = act.att.totalFor(s.division_id);
+    const held = act.att.totalFor(s.division_id, s);
     const got = Math.min((act.att.presentOf[uid] || new Set()).size, held);
     if (held > 0) { attended += got; total += held; }
     per[subj.subject_id] = { attended: got, total: held, pct: held ? r1((got / held) * 100) : null };

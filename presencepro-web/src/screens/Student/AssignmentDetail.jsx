@@ -160,6 +160,7 @@ export default function AssignmentDetail() {
                   {a.marks != null && <span>{a.marks} marks</span>}
                   <span style={{ color: overdue && !sub ? "#DC2626" : undefined }}>{sub && a.due_date ? `Due ${fmtDateTime(a.due_date)}` : dueLabel(a.due_date, now)}</span>
                   <span>Posted {fmtDateTime(a.created_at)}</span>
+                  {a.kind === "lab_work" && <Pill tone="purple">Lab work</Pill>}
                   {a.allow_late && <Pill tone="amber">Late submissions allowed</Pill>}
                 </div>
               </div>

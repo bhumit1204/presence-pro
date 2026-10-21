@@ -9,6 +9,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { auth, db } from "../../../services/firebase";
 import { getDoc, doc, collection, query, where, getDocs } from "firebase/firestore";
 import { Banner, Button, Card, Chip, EmptyState, ProgressBar, Screen, SP, T, TONE, Tone, font } from "../../../components/ui";
+import { meantForStudent, rollOf } from "../../../utils/batches";
 
 const API_URL = API_BASE;
 const OD_COLOR = "#7C3AED";
@@ -114,6 +115,8 @@ export default function StudentAttendance() {
       const studentData    = studentSnap.data();
       const enrolledSubs: string[] = studentData.enrolled_subjects || [];
       const studentCourseId: string = studentData.course_id || "";
+      const myDivision: string | null = studentData.division_id || null;   // a lecture of another division is not mine
+      const myRoll = rollOf(studentData);                                  // and a lab batch is decided by the roll number
       setStudentName(studentData.name || studentData.first_name || "Student");
 
 
@@ -158,7 +161,10 @@ export default function StudentAttendance() {
             const lecturesSnap = await getDocs(
               query(collection(db, "lectures"), where("subject_id", "==", sid))
             );
-            const lectureIds = lecturesSnap.docs.map((d) => d.id);
+            // only the lectures meant for me: my division, and (for a lab split into batches) my batch
+            const lectureIds = lecturesSnap.docs
+              .filter((d) => meantForStudent(d.data(), myDivision, myRoll))
+              .map((d) => d.id);
 
             // 3b. Find completed lecture_sessions
             const sessionIds: string[] = [];
@@ -326,7 +332,7 @@ export default function StudentAttendance() {
                   assignments.push({
                     assignment_id:  a.assignment_id,
                     title:          a.title,
-                    subject_name:   a.subject_name || subjectNameMap[sid] || "—",
+                    subject_name:   `${a.subject_name || subjectNameMap[sid] || "—"}${a.kind === "lab_work" ? " · Lab work" : ""}`,
                     marks:          a.marks,
                     due_date:       a.due_date,
                     status,

@@ -13,6 +13,7 @@ import { useOnTabActive, useTab } from "../../../navigation/TabContext";
 import AttendanceCard from "../../../components/AttendanceCard";
 import { Avatar, Banner, Button, Card, Sheet, T, SP, font } from "../../../components/ui";
 import { DayLectures, ListCard, ListRow, enc, getJson, greeting, longDay, postJson, useInbox, useTeacher, ymd } from "../teacherShared";
+import { lectureTag, withTag } from "../../../utils/batches";
 
 const SESSION_KEYS = ["is_lecture_ongoing", "lecture_start_time", "current_lecture_session_id", "saved_lecture_details"];
 const GUIDE_KEY = "tp_guide_seen_v1";
@@ -28,6 +29,10 @@ type Lecture = {
   end_time: string;
   day?: string;
   is_temporary?: boolean;
+  kind?: string | null;          // "lab" | "tutorial" | null (plain lecture)
+  batch?: string | null;         // lab batch, e.g. "B1"
+  batch_no?: number | null;
+  division_name?: string | null;
 };
 
 export default function TeacherToday() {
@@ -36,6 +41,7 @@ export default function TeacherToday() {
   const teacher = useTeacher();
   const inbox = useInbox();
 
+  const [sessionReq, setSessionReq] = useState(0);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -86,6 +92,10 @@ export default function TeacherToday() {
       if (stateRef.current === "idle") setOngoing(j.ongoingLecture || null);
       setNext(j.nextLecture || null);
       setLoadError(null);
+      try {
+        const sr = await getJson(`/api/web/teacher/session-requests?uid=${enc(teacher.uid)}`);
+        setSessionReq((sr.pending || 0) + (sr.notices || []).length);
+      } catch { /* the rest of the day still works */ }
     } catch (e: any) {
       setLoadError(e?.message || "Could not load your day.");
     }
@@ -220,7 +230,7 @@ export default function TeacherToday() {
   };
 
   const onMethod = async (method: string) => {
-    const lecture = active;
+    const lecture = withTag(active, true);   // the screens print subject_name: it carries "(Lab · B1 · Div A)"
     if (method === "code") return navigation.navigate("CodeAttendance", { lectureSessionId: sessionId, lecture });
     if (method === "bio_geo") return navigation.navigate("BioGeoAttendance", { lectureSessionId: sessionId, lecture });
     if (method === "multi") return navigation.navigate("MultiAttendance", { lectureSessionId: sessionId, lecture });
@@ -255,7 +265,7 @@ export default function TeacherToday() {
   });
   const dayLabel = (d: Date, i: number) => (i === 0 ? "Today" : i === 1 ? "Tomorrow" : d.toLocaleDateString("en-IN", { weekday: "short", day: "numeric" }));
 
-  const attention = inbox.requests.length + inbox.odPending + liveQuizzes.length;
+  const attention = inbox.requests.length + inbox.odPending + liveQuizzes.length + sessionReq;
 
   if (loading && state !== "ongoing") {
     return (
@@ -305,7 +315,7 @@ export default function TeacherToday() {
       {active && !activeIsLater ? (
         <Card style={{ marginBottom: SP.xxl, padding: SP.xl }}>
           <AttendanceCard
-            lecture={active}
+            lecture={withTag(active, true) as any}
             lectureState={state}
             userRole="teacher"
             timerSeconds={seconds}
@@ -321,7 +331,7 @@ export default function TeacherToday() {
         <Card flat style={{ marginBottom: SP.xxl }}>
           <Text style={font.h3}>{active ? "No more classes today" : "You are free"}</Text>
           <Text style={[font.body, { marginTop: 2 }]}>
-            {active ? `Next: ${active.day}, ${active.start_time}` : "Nothing scheduled"}
+            {active ? `Next: ${active.day}, ${active.start_time}${lectureTag(active, true) ? ` · ${active.subject_name} (${lectureTag(active, true)})` : ""}` : "Nothing scheduled"}
           </Text>
         </Card>
       )}
@@ -336,6 +346,14 @@ export default function TeacherToday() {
                 icon="swap-horizontal"
                 tone="info"
                 title={`${inbox.requests.length} lecture request${inbox.requests.length === 1 ? "" : "s"}`}
+                onPress={() => setCurrentTab("inbox")}
+              />
+            )}
+            {sessionReq > 0 && (
+              <ListRow
+                icon="calendar-outline"
+                tone="info"
+                title={`${sessionReq} special session update${sessionReq === 1 ? "" : "s"}`}
                 onPress={() => setCurrentTab("inbox")}
               />
             )}

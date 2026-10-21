@@ -28,6 +28,8 @@ import TakeTest from "./screens/Student/TakeTest";
 import TestResult from "./screens/Student/TestResult";
 import StudentAnnouncementsPage from "./screens/Student/AnnouncementsPage";
 import StudentProfilePage from "./screens/Student/ProfilePage";
+import StudentTimetable from "./screens/Student/StudentTimetable";
+import StudentCalendar from "./screens/Student/StudentCalendar";
 
 export default function App() {
   return (
@@ -94,6 +96,11 @@ export default function App() {
         element={<ProtectedRoute role="student"><ClassesPage /></ProtectedRoute>} />
       <Route path="/dashboard/student/classes/:subjectId"
         element={<ProtectedRoute role="student"><ClassroomPage /></ProtectedRoute>} />
+
+      <Route path="/dashboard/student/timetable"
+        element={<ProtectedRoute role="student"><StudentTimetable /></ProtectedRoute>} />
+      <Route path="/dashboard/student/calendar"
+        element={<ProtectedRoute role="student"><StudentCalendar /></ProtectedRoute>} />
 
       <Route path="/dashboard/student/assignments"
         element={<ProtectedRoute role="student"><StudentAssignmentsPage /></ProtectedRoute>} />

@@ -87,6 +87,8 @@ function FileIcon({ type }) {
   return "📎";
 }
 
+const isLabWork = (a) => a?.kind === "lab_work";
+
 function StatusBadge({ sub }) {
   if (!sub)                    return <span className="ap-badge ap-badge--missing">Not submitted</span>;
   if (sub.status === "graded") return <span className="ap-badge ap-badge--graded">Graded</span>;
@@ -109,6 +111,7 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
     editAssignment?.due_date ? editAssignment.due_date.slice(0, 16) : ""
   );
   const [allowLate,     setAllowLate]     = useState(editAssignment?.allow_late ?? false);
+  const [kind,          setKind]          = useState(editAssignment?.kind || "assignment"); // "assignment" | "lab_work"
 
   // Files: existing (already uploaded) + new (picked by user)
   const [existingFiles, setExistingFiles] = useState(editAssignment?.attachments || []);
@@ -162,6 +165,10 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
     } finally { setUploading(false); }
   };
 
+  // lab work is offered only for a subject that has a lab
+  const canLabWork   = !!activeSubj?.has_lab || kind === "lab_work";
+  const effectiveKind = canLabWork ? kind : "assignment";
+
   const validate = () => {
     if (!activeSubj)            { setError("Select a subject"); return false; }
     if (!title.trim())          { setError("Title is required"); return false; }
@@ -189,6 +196,7 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
         course_id:    activeSubj.course_id,
         subject_id:   activeSubj.subject_id,
         title:        title.trim(),
+        kind:         effectiveKind,
         instructions: instructions.trim() || undefined,
         questions:    questions.trim()    || undefined,
         marks:        Number(marks),
@@ -213,7 +221,9 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
     <div className="ap-form-wrap">
       <div className="ap-form-header">
         <button className="ap-back-btn" onClick={onCancel}>← Back</button>
-        <h2 className="ap-form-title">{isEdit ? "Edit Assignment" : "New Assignment"}</h2>
+        <h2 className="ap-form-title">
+          {isEdit ? (effectiveKind === "lab_work" ? "Edit Lab Work" : "Edit Assignment") : (effectiveKind === "lab_work" ? "New Lab Work" : "New Assignment")}
+        </h2>
       </div>
 
       {error && <div className="ap-error">{error}</div>}
@@ -236,6 +246,19 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
       )}
       {!isEdit && subjects.length === 1 && (
         <div className="ap-subj-display">Subject: <strong>{subjects[0].subject_name}</strong></div>
+      )}
+
+      {canLabWork && (
+        <div className="ap-card">
+          <label className="ap-label">Type</label>
+          <div className="ap-subject-pills">
+            <button type="button" className={`ap-pill${effectiveKind === "assignment" ? " ap-pill--active" : ""}`} onClick={() => setKind("assignment")}>Assignment</button>
+            <button type="button" className={`ap-pill${effectiveKind === "lab_work" ? " ap-pill--active" : ""}`} onClick={() => setKind("lab_work")}>Lab work</button>
+          </div>
+          <div style={{ fontSize: 12, color: "#6B7280", marginTop: 6 }}>
+            Lab work is for practicals of this subject&apos;s lab. Students see it labelled as lab work.
+          </div>
+        </div>
       )}
 
       <div className="ap-card">
@@ -333,7 +356,7 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
         className="ap-submit-btn"
         disabled={saving || uploading}
         onClick={handleSubmit}>
-        {uploading ? "Uploading files…" : saving ? "Saving…" : isEdit ? "Save Changes" : "Create Assignment"}
+        {uploading ? "Uploading files…" : saving ? "Saving…" : isEdit ? "Save Changes" : effectiveKind === "lab_work" ? "Create Lab Work" : "Create Assignment"}
       </button>
     </div>
   );
@@ -682,6 +705,7 @@ function AssignmentDetail({ assignment: initialAssignment, teacherId, subjects, 
       <div className="ap-detail-topbar">
         <button className="ap-back-btn" onClick={() => onBack(false)}>← Back</button>
         <h2 className="ap-detail-title">{assignment.title}</h2>
+        {isLabWork(assignment) && <span className="ap-info-chip ap-info-chip--purple" style={{ marginLeft: 8 }}>Lab work</span>}
         <div className="ap-detail-actions">
           <button className="ap-icon-btn" onClick={() => onEdit(assignment)} title="Edit">✏️</button>
           <button className="ap-icon-btn ap-icon-btn--danger"
@@ -876,14 +900,18 @@ export default function AssignmentsPage() {
             subject_name: l.subject_name,
             subject_code: l.subject_code,
             course_id:    l.course_id,
+            has_lab:      !!(map[l.subject_id]?.has_lab || l.kind === "lab"),   // a lab session is scheduled for it
           };
         });
         const subjs = Object.values(map);
         setSubjects(subjs);
         if (subjs.length) setActiveSubj(subjs[0]);
+        else setLoading(false);          // nothing is scheduled for this teacher yet: don't spin forever
         if (data.teacher_id) setTeacherId(data.teacher_id);
+      } else {
+        setLoading(false);
       }
-    } catch (e) { setError(e.message); }
+    } catch (e) { setError(e.message); setLoading(false); }
   }, [uid]);
 
   const loadAssignments = useCallback(async () => {
@@ -933,6 +961,12 @@ export default function AssignmentsPage() {
 
       {loading ? (
         <div className="ap-loading">Loading assignments…</div>
+      ) : subjects.length === 0 ? (
+        <div className="ap-empty-state">
+          <div style={{ fontSize: 40, marginBottom: 12 }}>📚</div>
+          <div style={{ fontWeight: 700, fontSize: 16, color: "#111827" }}>No subjects scheduled yet</div>
+          <div style={{ color: "#6B7280", marginTop: 4 }}>Assignments are created per subject. Once a lecture of yours is on the timetable, its subject appears here.</div>
+        </div>
       ) : assignments.length === 0 ? (
         <div className="ap-empty-state">
           <div style={{ fontSize: 40, marginBottom: 12 }}>📝</div>
@@ -949,6 +983,7 @@ export default function AssignmentsPage() {
                 <div className="ap-list-card-top">
                   <div className="ap-list-title">{a.title}</div>
                   <div className="ap-list-meta">
+                    {isLabWork(a) && <span className="ap-info-chip ap-info-chip--green">Lab work</span>}
                     <span className="ap-info-chip ap-info-chip--purple">{a.marks} pts</span>
                     <span className={`ap-info-chip${overdue ? " ap-info-chip--red" : ""}`}>
                       {overdue ? "Overdue" : "Due"} {fmtShort(a.due_date)}

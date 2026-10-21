@@ -28,6 +28,7 @@ const { guard, allow, fromAny, fromQuery } = require("../../middleware/auth");
 const { TTLCache } = require("../../utils/cache");
 const { chunk, commitInBatches } = require("../../utils/firestore");
 const { assignmentStudentsHandler } = require("../../utils/assignmentStudents");
+const { inBatch, rollOf } = require("../../utils/batches");
 
 // ─── Timezone helpers (IST = UTC+5:30) ───────────────────────────────────────
 const IST_OFFSET_MS = 330 * 60 * 1000;
@@ -354,6 +355,8 @@ async function buildClassReport(teacher_id, subject_id, subjData) {
       name:        data.name || `${data.first_name || ""} ${data.last_name || ""}`.trim(),
       email:       data.email    || null,
       roll_no:     data.roll_no  || null,
+      roll:        rollOf(data),
+      division_id: data.division_id || null,
       course_name: data.course_name || null,
       semester:    data.semester || null,
     };
@@ -386,14 +389,16 @@ async function buildClassReport(teacher_id, subject_id, subjData) {
         db.collection("lecture_sessions")
           .where("lecture_id", "in", c)
           .where("status", "==", "completed")
-          .select("date", "started_at"))
+          .select("date", "started_at", "division_id", "batch_no", "batch_after", "batch_upto"))
     : [];
   const sessionIds = sessionDocs.map((d) => d.id);
   const totalLectures = sessionIds.length;
 
   const sessionDateMap = {};
+  const sessionMeta = {};   // division + lab batch of every session, so a student owes only the sessions meant for them
   for (const doc of sessionDocs) {
     const d = doc.data();
+    sessionMeta[doc.id] = { division_id: d.division_id || null, batch_no: d.batch_no || null, batch_after: d.batch_after == null ? null : d.batch_after, batch_upto: d.batch_upto == null ? null : d.batch_upto };
     sessionDateMap[doc.id] = d.date || toISO(d.started_at)?.split("T")[0] || doc.id;
   }
 
@@ -494,11 +499,20 @@ async function buildClassReport(teacher_id, subject_id, subjData) {
   });
 
   // ── Per-student stats ─────────────────────────────────────────────────────
+  const owedBy = (s) => sessionIds.reduce((n, id) => {
+    const m = sessionMeta[id] || {};
+    return n + ((!m.division_id || !s.division_id || m.division_id === s.division_id) && inBatch(m, s.roll) ? 1 : 0);
+  }, 0);
+  const owed = Object.create(null);
+  students.forEach((s) => { owed[s.uid] = owedBy(s); });
+  const classLectures = students.reduce((mx, s) => Math.max(mx, owed[s.uid]), 0);
+
   const studentResults = students.map((s) => {
     const uid     = s.uid;
-    const present = attCountMap[uid]?.size ?? 0;
-    const attendance_pct = totalLectures > 0
-      ? parseFloat(((present / totalLectures) * 100).toFixed(1))
+    const total   = owed[uid];
+    const present = Math.min(attCountMap[uid]?.size ?? 0, total || Infinity);
+    const attendance_pct = total > 0
+      ? parseFloat(((present / total) * 100).toFixed(1))
       : null;
 
     // Quiz stats
@@ -523,7 +537,7 @@ async function buildClassReport(teacher_id, subject_id, subjData) {
       course_name:          s.course_name,
       semester:             s.semester,
       present,
-      absent:               Math.max(0, totalLectures - present),
+      absent:               Math.max(0, total - present),
       attendance_pct,
       quiz_attempted:       attempted.length,
       quiz_avg_pct,
@@ -547,7 +561,7 @@ async function buildClassReport(teacher_id, subject_id, subjData) {
     subject_name: subjData.subject_name,
     class_summary: {
       total_students:       students.length,
-      total_lectures:       totalLectures,
+      total_lectures:       classLectures,
       total_quizzes:        quizzes.length,
       total_assignments:    assignments.length,
       avg_attendance_pct:   avg(withAtt,  "attendance_pct"),
@@ -841,6 +855,135 @@ router.get("/timetable", guard.self(fromAny("uid")), async (req, res) => {
 // server is started with ENABLE_DEBUG_ROUTES=1 (it would otherwise hand out full
 // OD requests of a teacher to anyone who knows the uid).
 // ─────────────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// SPECIAL-SESSION REQUESTS
+// A head (or delegate) can put a one-day special session in place of a lecture. The teacher whose
+// lecture it takes over must approve first; a rejection (optional reason) is sent to whoever can edit
+// that timetable: the person who made it, the head and the teachers delegated the timetable.
+//   GET  /session-requests?uid=               { requests:[...], pending, notices:[...] }
+//   POST /session-requests/:id/ack            { uid }   hides one outcome notice from my inbox
+//   POST /session-requests/:id/decide         { uid, approve, reason? }
+// ─────────────────────────────────────────────────────────────────────────────
+let _notify = () => {};
+try { _notify = require("../../services/notify").notify || _notify; } catch { /* push is optional */ }
+const pushUids = (userIds, title, body, screen) => {
+  const list = [...new Set((userIds || []).filter(Boolean))];
+  if (!list.length) return;
+  try { _notify({ userIds: list, title, body, data: { screen } }); } catch (e) { console.error("session request push failed", e.message); }
+};
+async function uidsOfTeachers(ids) {
+  const out = [];
+  for (const id of [...new Set(ids.filter(Boolean))]) {
+    const d = await db.collection("teachers").doc(id).get();
+    if (d.exists) out.push(d.data().user_id || d.id);
+  }
+  return out;
+}
+async function timetableEditorIds(o) {
+  const ids = new Set([o.created_by]);
+  const dl = await db.collection("delegations").where("course_id", "==", o.course_id).get();
+  dl.docs.forEach((d) => { if (d.data().area === "timetable" && d.data().teacher_id) ids.add(d.data().teacher_id); });
+  if (o.department) {
+    const hs = await db.collection("teachers").where("head_of", "==", o.department).get();
+    hs.docs.forEach((d) => { if (d.data().aishe_code === o.aishe_code) ids.add(d.id); });
+  }
+  return [...ids].filter(Boolean);
+}
+const nameOfTeacher = (t) => [t.first_name, t.last_name].filter(Boolean).join(" ") || t.name || "A teacher";
+
+router.get("/session-requests", guard.self(fromAny("uid")), async (req, res) => {
+  try {
+    const { teacher_id } = await resolveTeacher(req.query.uid);
+    const today = istDateStr(nowIST());
+    const snap = await db.collection("timetable_overrides").where("approver_ids", "array-contains", teacher_id).get();
+    const rows = snap.docs.map((d) => ({ ...d.data(), override_id: d.id })).filter((o) => o.kind === "special" && o.date >= today);
+    const requests = rows.map((o) => {
+      const mine = (o.approvals || {})[teacher_id] || {};
+      return {
+        override_id: o.override_id, date: o.date, day: dayName(o.date), note: o.note || "",
+        requested_by: o.requested_by_name || "", status: o.status,
+        my_status: mine.status || "pending", my_reason: mine.reason || "",
+        session: {
+          title: (o.special || {}).subject_name || "Special session", teacher_name: (o.special || {}).teacher_name || "",
+          start_time: (o.special || {}).start_time, end_time: (o.special || {}).end_time, room: (o.special || {}).room || "",
+          division_name: (o.special || {}).division_name || "",
+        },
+        replaces: (o.replaced_info || []).filter((l) => l.teacher_id === teacher_id),
+      };
+    }).sort((a, b) => (a.my_status === "pending" ? 0 : 1) - (b.my_status === "pending" ? 0 : 1) || a.date.localeCompare(b.date));
+    // Outcomes for the people who can edit the timetable (rejections with the reason, approvals)
+    const nsnap = await db.collection("timetable_overrides").where("notice_to", "array-contains", teacher_id).get();
+    const notices = nsnap.docs.map((d) => ({ ...d.data(), override_id: d.id }))
+      .filter((o) => o.kind === "special" && !(o.notice_seen || []).includes(teacher_id))
+      .map((o) => ({
+        override_id: o.override_id, outcome: o.status === "rejected" ? "rejected" : "approved", date: o.date, day: dayName(o.date),
+        title: (o.special || {}).subject_name || "Special session",
+        start_time: (o.special || {}).start_time, end_time: (o.special || {}).end_time,
+        by: o.status === "rejected" ? (o.rejected_by || "") : "", reason: o.status === "rejected" ? (o.reject_reason || "") : "",
+      }))
+      .sort((a, b) => a.date.localeCompare(b.date));
+    return res.json({ success: true, requests, pending: requests.filter((r) => r.my_status === "pending" && r.status === "awaiting_approval").length, notices });
+  } catch (e) {
+    return res.status(e.status || 500).json({ success: false, error: e.status ? e.message : "Failed to load requests" });
+  }
+});
+
+router.post("/session-requests/:id/decide", guard.self(fromAny("uid")), async (req, res) => {
+  try {
+    const { teacher_id, data: me } = await resolveTeacher((req.body || {}).uid);
+    const approve = (req.body || {}).approve === true;
+    const reason = String((req.body || {}).reason || "").trim().slice(0, 300);
+    const ref = db.collection("timetable_overrides").doc(String(req.params.id));
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "Request not found" });
+    const o = { ...snap.data(), override_id: snap.id };
+    if (!(o.approver_ids || []).includes(teacher_id)) return res.status(403).json({ success: false, error: "This request is not for you" });
+    if (o.status !== "awaiting_approval") return res.status(409).json({ success: false, error: `This request is already ${o.status}` });
+    if ((o.approvals[teacher_id] || {}).status !== "pending") return res.status(409).json({ success: false, error: "You already answered this request" });
+    if (o.date < istDateStr(nowIST())) return res.status(409).json({ success: false, error: "That date has passed" });
+
+    const what = (o.special || {}).subject_name || "The special session";
+    const by = nameOfTeacher(me);
+    const approvals = { ...o.approvals, [teacher_id]: { ...o.approvals[teacher_id], status: approve ? "approved" : "rejected", ...(reason ? { reason } : {}), decided_at: admin.firestore.FieldValue.serverTimestamp() } };
+
+    if (!approve) {
+      const editors = (await timetableEditorIds(o)).filter((id) => id !== teacher_id);
+      await ref.update({ approvals, status: "rejected", reject_reason: reason, rejected_by: by, notice_to: editors, notice_seen: [], rejected_at: admin.firestore.FieldValue.serverTimestamp(), updated_at: admin.firestore.FieldValue.serverTimestamp() });
+      const uids = await uidsOfTeachers(editors);
+      pushUids(uids, "Special session rejected", `${by} rejected "${what}" on ${o.date}.${reason ? " Reason: " + reason : ""}`, "TeacherToday");
+      return res.json({ success: true, status: "rejected" });
+    }
+
+    const all = Object.values(approvals).every((a) => a.status === "approved");
+    await ref.update({ approvals, status: all ? "scheduled" : "awaiting_approval", ...(all ? { notice_to: [o.created_by].filter(Boolean), notice_seen: [] } : {}), updated_at: admin.firestore.FieldValue.serverTimestamp() });
+    let status = all ? "scheduled" : "awaiting_approval";
+    if (all) {
+      if (o.date === istDateStr(nowIST())) {
+        try { await require("./head.routes").syncOverrides(); status = (await ref.get()).data().status; } catch (e) { console.error("override sync failed", e.message); }
+      }
+      const uids = await uidsOfTeachers([o.created_by]);
+      pushUids(uids, "Special session approved", `"${what}" on ${o.date} was approved and is now in the timetable.`, "TeacherToday");
+    }
+    return res.json({ success: true, status });
+  } catch (e) {
+    return res.status(e.status || 500).json({ success: false, error: e.status ? e.message : "Failed to save your answer" });
+  }
+});
+
+router.post("/session-requests/:id/ack", guard.self(fromAny("uid")), async (req, res) => {
+  try {
+    const { teacher_id } = await resolveTeacher((req.body || {}).uid);
+    const ref = db.collection("timetable_overrides").doc(String(req.params.id));
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "Not found" });
+    if (!(snap.data().notice_to || []).includes(teacher_id)) return res.status(403).json({ success: false, error: "Not for you" });
+    await ref.update({ notice_seen: admin.firestore.FieldValue.arrayUnion(teacher_id) });
+    return res.json({ success: true });
+  } catch (e) {
+    return res.status(e.status || 500).json({ success: false, error: e.status ? e.message : "Failed" });
+  }
+});
+
 router.get("/debug", guard.self(fromAny("uid")), async (req, res) => {
   if (process.env.ENABLE_DEBUG_ROUTES !== "1")
     return res.status(404).json({ error: "Not found" });
