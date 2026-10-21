@@ -1765,6 +1765,12 @@ function syncOverrides() {
       db.collection("timetable_overrides").where("status", "==", "applied").get(),
     ]);
     let done = 0;
+    try {
+      const waiting = await db.collection("timetable_overrides").where("status", "==", "awaiting_approval").get();
+      for (const d of waiting.docs) {
+        if (d.data().date < today) { await d.ref.update({ status: "expired", note_system: "Nobody answered before the date", updated_at: ts() }); done++; }
+      }
+    } catch (err) { console.error("HEAD: expiring requests failed", err); }
     for (const d of sched.docs) {
       const o = { ...d.data(), override_id: d.id };
       try {
@@ -1844,6 +1850,28 @@ function overrideView(o, lectureById, names) {
   return view;
 }
 
+// teacher doc ids -> the auth uids push messages go to
+async function teacherUids(ids) {
+  const docs = await getAllDocs([...new Set((ids || []).filter(Boolean))].map((id) => db.collection("teachers").doc(id)));
+  return docs.filter((d) => d.exists).map((d) => d.data().user_id || d.id);
+}
+
+// Special sessions waiting for (or turned down by) the teachers whose lectures they take over.
+async function sessionRequestsOf(course_id, sem) {
+  const today = todayIST();
+  const snap = await db.collection("timetable_overrides").where("course_id", "==", course_id).get();
+  return snap.docs.map((d) => ({ ...d.data(), override_id: d.id }))
+    .filter((o) => (o.status === "awaiting_approval" || o.status === "rejected") && o.semester === sem && o.date >= today)
+    .sort((a, b) => a.date.localeCompare(b.date))
+    .map((o) => ({
+      override_id: o.override_id, date: o.date, weekday: weekdayOf(o.date), status: o.status,
+      title: (o.special && o.special.subject_name) || "Special session",
+      start_time: o.special && o.special.start_time, end_time: o.special && o.special.end_time, room: o.special && o.special.room,
+      approvals: Object.values(o.approvals || {}).map((a) => ({ name: a.name, status: a.status, reason: a.reason || "" })),
+      reject_reason: o.reject_reason || "", rejected_by: o.rejected_by || "",
+    }));
+}
+
 router.get("/timetable", wrap(async (req, res) => {
   const course = courseOrFail(req, req.query.course_id);
   const n = parseSem(req.query.semester);
@@ -1918,6 +1946,7 @@ router.get("/timetable", wrap(async (req, res) => {
       })),
     lectures: lectures.map((l) => ({ ...lectureView(l, names, subjectsById), pending_changes: changesFor[l.lecture_id] || 0 })),
     overrides: upcoming.map((o) => overrideView(o, lectureById, names)),
+    session_requests: await sessionRequestsOf(course.course_id, n),
     divisions: (await divisionsOfCourse(course.course_id)).filter((d) => parseSem(d.semester) === n)
       .map((d) => ({ division_id: d.division_id, name: d.name })).sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true })),
   });
@@ -2553,6 +2582,22 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
       start_time: slot.start_time, end_time: slot.end_time, room: slot.room,
     });
     doc.replaces = replaced.map((l) => l.lecture_id);
+    // The teachers whose lectures this session takes over must agree first.
+    // Until every one of them approves, nothing changes in the timetable.
+    const approvals = {};
+    replaced.forEach((l) => {
+      if (l.teacher_id && l.teacher_id !== req.head.teacher_id) approvals[l.teacher_id] = { name: l.teacher_name || "", status: "pending" };
+    });
+    if (Object.keys(approvals).length) {
+      doc.status = "awaiting_approval";
+      doc.approvals = approvals;
+      doc.approver_ids = Object.keys(approvals);
+      doc.requested_by_name = personName(req.head.teacher);
+      doc.replaced_info = replaced.map((l) => clean({
+        lecture_id: l.lecture_id, teacher_id: l.teacher_id || undefined, subject_name: l.subject_name || "",
+        start_time: l.start_time, end_time: l.end_time, room: l.room || undefined, batch: l.batch || undefined,
+      }));
+    }
     cand = { day, start_time: slot.start_time, end_time: slot.end_time, room: slot.room, course_id: course.course_id, semester: sem, teacher_id: teacher ? teacher.id : undefined, division_id: doc.division_id, egroup: egroupOfSubject(subject) };
     exclude = doc.replaces;
   }
@@ -2572,7 +2617,13 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
   await ref.set(clean({ ...doc, override_id: ref.id }));
   await audit(req, "timetable.override.create", "timetable_overrides", ref.id, clean({ kind, date, lecture_id: doc.lecture_id, semester: sem }));
 
-  let status = "scheduled";
+  let status = doc.status || "scheduled";
+  if (status === "awaiting_approval") {
+    const what = (doc.special && doc.special.subject_name) || "A special session";
+    const uids = await teacherUids(doc.approver_ids);
+    pushTo(uids, "Special session needs your approval", `${what} on ${date} would take over your lecture. Open the app to approve or reject.`, "TeacherSessionRequests");
+    return res.status(201).json({ success: true, override_id: ref.id, status });
+  }
   if (date === today) {                       // takes effect immediately
     try { await syncOverrides(); status = (await ref.get()).data().status; } catch (err) { console.error("HEAD: override sync failed", err); }
   }

@@ -3,6 +3,8 @@
 //   mode "past"   -> future days disabled (attendance history)
 //   mode "future" -> past days disabled   (planning)
 //   mode "any"    -> nothing disabled
+// Pass `academic` (with `events`) to turn it into the academic calendar: nothing is disabled, days carry
+// coloured dots for their events and a legend is shown under the grid. Without `academic` nothing changes.
 import React, { useMemo, useRef, useState } from "react";
 import { PanResponder, Pressable, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
@@ -19,15 +21,37 @@ export interface PickedDate {
   year: number;
 }
 
+export interface AcademicEvent {
+  event_id: string;
+  title: string;
+  event_type: string;
+  start_date: string;       // YYYY-MM-DD
+  end_date?: string;
+}
+
+export const EVENT_TYPES: Record<string, { label: string; color: string }> = {
+  holiday: { label: "Holiday", color: "#EF4444" },
+  exam: { label: "Exam", color: "#F59E0B" },
+  event: { label: "Event", color: "#3B82F6" },
+  working_day_swap: { label: "Working day swap", color: "#8B5CF6" },
+  general: { label: "General", color: "#6B7280" },
+};
+export const eventType = (t: string) => EVENT_TYPES[t] || EVENT_TYPES.general;
+
 interface Props {
   onDateSelect: (date: PickedDate) => void;
   mode?: "past" | "future" | "any";
   initialDate?: Date;
+  academic?: boolean;
+  events?: AcademicEvent[];
 }
 
 const startOfDay = (d: Date) => new Date(d.getFullYear(), d.getMonth(), d.getDate());
 
-export default function AttendanceCalendar({ onDateSelect, mode = "past", initialDate }: Props) {
+const isoOf = (y: number, m: number, d: number) => `${y}-${String(m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+
+export default function AttendanceCalendar({ onDateSelect, mode: modeProp, initialDate, academic = false, events = [] }: Props) {
+  const mode = modeProp || (academic ? "any" : "past");
   const today = useMemo(() => startOfDay(new Date()), []);
   const start = initialDate ? startOfDay(initialDate) : today;
 
@@ -99,15 +123,18 @@ export default function AttendanceCalendar({ onDateSelect, mode = "past", initia
     );
   };
 
+  const rowH = academic ? 50 : 42;
   const cells: React.ReactNode[] = [];
-  for (let i = 0; i < first; i++) cells.push(<View key={"e" + i} style={{ width: CELL, height: 42 }} />);
+  for (let i = 0; i < first; i++) cells.push(<View key={"e" + i} style={{ width: CELL, height: rowH }} />);
   for (let d = 1; d <= total; d++) {
     const dt = new Date(view.y, view.m, d);
     const off = isDisabled(dt);
     const on = sel.d === d && sel.m === view.m && sel.y === view.y;
     const isToday = dt.getTime() === today.getTime();
+    const key = isoOf(view.y, view.m, d);
+    const dayEvents = academic ? events.filter((e) => e.start_date <= key && key <= (e.end_date || e.start_date)) : [];
     cells.push(
-      <View key={d} style={{ width: CELL, height: 42, alignItems: "center", justifyContent: "center" }}>
+      <View key={d} style={{ width: CELL, height: rowH, alignItems: "center", justifyContent: "center" }}>
         <Pressable
           disabled={off}
           onPress={() => pick(d)}
@@ -128,6 +155,13 @@ export default function AttendanceCalendar({ onDateSelect, mode = "past", initia
         >
           <Text style={{ fontSize: 14, color: on ? "#fff" : T.ink, fontWeight: on || isToday ? "800" : "500" }}>{d}</Text>
         </Pressable>
+        {academic && (
+          <View style={{ flexDirection: "row", gap: 3, height: 6, marginTop: 2 }}>
+            {dayEvents.slice(0, 3).map((e, k) => (
+              <View key={k} style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: eventType(e.event_type).color }} />
+            ))}
+          </View>
+        )}
       </View>
     );
   }
@@ -152,6 +186,16 @@ export default function AttendanceCalendar({ onDateSelect, mode = "past", initia
         ))}
       </View>
       <View style={{ flexDirection: "row", flexWrap: "wrap" }}>{cells}</View>
+      {academic && (
+        <View style={{ flexDirection: "row", flexWrap: "wrap", gap: 12, marginTop: SP.md }}>
+          {Object.entries(EVENT_TYPES).map(([k, v]) => (
+            <View key={k} style={{ flexDirection: "row", alignItems: "center", gap: 5 }}>
+              <View style={{ width: 8, height: 8, borderRadius: 4, backgroundColor: v.color }} />
+              <Text style={{ fontSize: 11, color: T.muted, fontWeight: "600" }}>{v.label}</Text>
+            </View>
+          ))}
+        </View>
+      )}
     </View>
   );
 }

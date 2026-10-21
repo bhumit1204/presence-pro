@@ -1,7 +1,7 @@
 // @ts-nocheck
 import { useState, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
-import { signInWithEmailAndPassword, sendPasswordResetEmail } from "firebase/auth";
+import { signInWithEmailAndPassword } from "firebase/auth";
 import { auth } from "../../services/firebase";
 import {
   saveUserSession,
@@ -23,7 +23,7 @@ export default function LoginScreen() {
   const [password, setPassword] = useState("");
   const [loading,  setLoading]  = useState(false);
   const [error,    setError]    = useState("");
-  const [resetMsg, setResetMsg] = useState("");
+  const [showPw,   setShowPw]   = useState(false);
 
   // If already logged in, skip straight to the right dashboard.
   // Never redirect back to "/" (this page) - that was an endless loop for
@@ -52,7 +52,6 @@ export default function LoginScreen() {
   const handleLogin = async (e) => {
     e.preventDefault();
     setError("");
-    setResetMsg("");
 
     if (!email.trim() || !password.trim()) {
       setError("Please enter both email and password.");
@@ -118,21 +117,6 @@ export default function LoginScreen() {
     }
   };
 
-  const handleForgotPassword = async () => {
-    setError("");
-    setResetMsg("");
-    if (!email.trim()) {
-      setError("Enter your email above first, then tap Forgot Password.");
-      return;
-    }
-    try {
-      await sendPasswordResetEmail(auth, email.trim());
-      setResetMsg("Reset email sent — check your inbox.");
-    } catch (err) {
-      setError(err?.message || "Unable to send reset email.");
-    }
-  };
-
   return (
     <div className="login-page">
       {/* ── Left: cover panel ─────────────────────────────────────── */}
@@ -152,7 +136,6 @@ export default function LoginScreen() {
           <p className="login-subtitle">Log in with your registered account</p>
 
           {error    && <div className="login-alert login-alert--error">{error}</div>}
-          {resetMsg && <div className="login-alert login-alert--ok">{resetMsg}</div>}
 
           <label className="login-label" htmlFor="email">Email</label>
           <input
@@ -166,15 +149,46 @@ export default function LoginScreen() {
           />
 
           <label className="login-label" htmlFor="password">Password</label>
-          <input
-            id="password"
-            className="login-input"
-            type="password"
-            placeholder="Enter your password"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            autoComplete="current-password"
-          />
+          <div style={{ position: "relative" }}>
+            <input
+              id="password"
+              className="login-input"
+              type={showPw ? "text" : "password"}
+              placeholder="Enter your password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              autoComplete="current-password"
+              style={{ paddingRight: 44 }}
+            />
+            <button
+              type="button"
+              onClick={() => setShowPw((v) => !v)}
+              aria-label={showPw ? "Hide password" : "Show password"}
+              aria-pressed={showPw}
+              title={showPw ? "Hide password" : "Show password"}
+              style={{
+                position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
+                background: "none", border: 0, padding: 4, cursor: "pointer", color: "#6B7280",
+                display: "flex", alignItems: "center",
+              }}
+            >
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                {showPw ? (
+                  <>
+                    <path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94" />
+                    <path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19" />
+                    <path d="M14.12 14.12a3 3 0 1 1-4.24-4.24" />
+                    <line x1="1" y1="1" x2="23" y2="23" />
+                  </>
+                ) : (
+                  <>
+                    <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                    <circle cx="12" cy="12" r="3" />
+                  </>
+                )}
+              </svg>
+            </button>
+          </div>
 
           <button
             type="submit"
@@ -183,10 +197,6 @@ export default function LoginScreen() {
             style={{ opacity: loading ? 0.7 : 1, cursor: loading ? "not-allowed" : "pointer" }}
           >
             {loading ? "Logging in…" : "Login"}
-          </button>
-
-          <button type="button" className="login-forgot" onClick={handleForgotPassword}>
-            Forgot Password?
           </button>
 
           <div className="login-divider"><span>or</span></div>
