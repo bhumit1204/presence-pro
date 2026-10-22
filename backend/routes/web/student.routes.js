@@ -25,6 +25,7 @@ const { chunk, getDocsByIds, tsISO, isIndexMissing } = require("../../utils/fire
 const { getStudentByUid } = require("../../utils/students");
 const { inBatch, rollOf, batchFields } = require("../../utils/batches");
 const { buildStudentTimetable } = require("../../utils/studentTimetable");
+const { isLive, kindOf } = require("../../utils/assignmentState");
 
 const subjectsCache = new TTLCache({ max: 5000, ttlMs: 30_000 });
 const feedCache = new TTLCache({ max: 5000, ttlMs: 10_000 });
@@ -55,7 +56,7 @@ function loadSubjects(uid) {
     }
 
     const courseIds = [...new Set(subjects.map((s) => s.course_id || student.course_id).filter(Boolean))];
-    const teacherIds = [...new Set(subjects.map((s) => s.teacher_assigned || s.teacher_id || s.created_by).filter(isId))];
+    const teacherIds = [...new Set(subjects.map((s) => (s.division_teachers && student.division_id && s.division_teachers[student.division_id]) || s.teacher_assigned || s.teacher_id || s.created_by).filter(isId))];
     const [courses, teachers] = await Promise.all([
       getDocsByIds("courses", courseIds, ["course_name"]),
       getDocsByIds("teachers", teacherIds, ["name", "full_name", "first_name", "last_name"]),
@@ -63,7 +64,7 @@ function loadSubjects(uid) {
 
     return subjects.map((s) => {
       const course_id = s.course_id || student.course_id || null;
-      const teacher_id = s.teacher_assigned || s.teacher_id || s.created_by || null;
+      const teacher_id = (s.division_teachers && student.division_id && s.division_teachers[student.division_id]) || s.teacher_assigned || s.teacher_id || s.created_by || null;
       const t = teacher_id ? teachers.get(teacher_id) : null;
       return {
         subject_id: s.id,
@@ -102,7 +103,7 @@ router.get("/feed", guard.self(fromQuery("uid")), async (req, res) => {
       const subjects = await loadSubjects(uid);
       if (!subjects) return null;
       const subjectIds = subjects.map((s) => s.subject_id);
-      if (!subjectIds.length) return { subjects, assignments: [], announcements: [] };
+      if (!subjectIds.length) return { subjects, assignments: [], announcements: [], tags: [] };
       const bySubject = new Map(subjects.map((s) => [s.subject_id, s]));
 
       const runIn = async (collection) => {
@@ -112,9 +113,10 @@ router.get("/feed", guard.self(fromQuery("uid")), async (req, res) => {
         return parts.flatMap((p) => p.docs.map((d) => d.data()));
       };
 
-      const [assignmentDocs, announcementDocs, submissionSnap] = await Promise.all([
+      const [assignmentDocs, announcementDocs, tagDocs, submissionSnap] = await Promise.all([
         runIn("assignments"),
         runIn("announcements"),
+        runIn("classwork_tags"),
         db.collection("submissions").where("student_uid", "==", uid).get(),
       ]);
 
@@ -139,6 +141,7 @@ router.get("/feed", guard.self(fromQuery("uid")), async (req, res) => {
       };
 
       const assignments = assignmentDocs
+        .filter(isLive)                       // drafts and not-yet-posted ones stay hidden
         .filter(sameCourse)
         .map((d) => ({
           assignment_id: d.assignment_id,
@@ -147,7 +150,8 @@ router.get("/feed", guard.self(fromQuery("uid")), async (req, res) => {
           course_id: d.course_id || null,
           teacher_id: d.teacher_id || null,
           title: d.title,
-          kind: d.kind === "lab_work" ? "lab_work" : "assignment",   // lab work is shown as such
+          kind: kindOf(d),   // assignment | lab_work | tutorial_work
+          tag_id: d.tag_id || null,
           instructions: d.instructions || null,
           questions: d.questions || null,
           marks: d.marks ?? null,
@@ -171,6 +175,7 @@ router.get("/feed", guard.self(fromQuery("uid")), async (req, res) => {
           teacher_id: d.teacher_id || null,
           title: d.title,
           text: d.text,
+          tag_id: d.tag_id || null,
           is_pinned: !!d.is_pinned,
           attachments: Array.isArray(d.attachments) ? d.attachments : [],
           links: Array.isArray(d.links) ? d.links : [],
@@ -180,7 +185,12 @@ router.get("/feed", guard.self(fromQuery("uid")), async (req, res) => {
         .sort((a, b) => new Date(b.created_at || 0) - new Date(a.created_at || 0))
         .slice(0, 200);
 
-      return { subjects, assignments, announcements };
+      // the teachers' tags (topics) of my subjects, in their order
+      const tags = tagDocs
+        .map((t) => ({ tag_id: t.tag_id, subject_id: t.subject_id, name: t.name, order: Number.isFinite(t.order) ? t.order : 0 }))
+        .sort((a, b) => a.order - b.order || String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+
+      return { subjects, assignments, announcements, tags };
     });
 
     if (!payload) return res.status(404).json({ success: false, error: "Student not found" });

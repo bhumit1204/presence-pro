@@ -155,9 +155,9 @@
 .sf-opt--low { border-color: #F59E0B; }
 .sf-opt--low em { background: #FEF3C7; color: #B45309; }
 .sf-eg-rows { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
-.sf-eg-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 120px auto; gap: 8px; align-items: center; }
+.sf-eg-row { display: grid; grid-template-columns: 22px minmax(0, 1fr) 120px auto auto auto; gap: 8px; align-items: center; }
 .sf-eg-n { font-size: 12px; color: #6B7280; text-align: center; }
-@media (max-width: 560px) { .sf-eg-row { grid-template-columns: 22px minmax(0, 1fr); } .sf-eg-code, .sf-eg-row .sf-link { grid-column: 2; } }
+@media (max-width: 560px) { .sf-eg-row { grid-template-columns: 22px minmax(0, 1fr) auto auto; } .sf-eg-code, .sf-eg-row .sf-link { grid-column: 2 / -1; } .sf-eg-row .sf-check { grid-column: auto; } }
 .sf-seg { display: inline-flex; border: 1px solid #E5E7EB; border-radius: 8px; overflow: hidden; align-self: flex-start; }
 .sf-seg-btn { padding: 6px 12px; background: #fff; border: 0; font: inherit; font-size: 13px; cursor: pointer; color: #374151; }
 .sf-seg-btn--on { background: #4834D4; color: #fff; }
@@ -176,3 +176,26 @@
 .sf-chip { display: inline-flex; align-items: center; gap: 2px; padding-right: 3px; }
 .sf-chip-x { border: none; background: none; color: inherit; font-size: 14px; line-height: 1; cursor: pointer; padding: 0 4px; border-radius: 8px; opacity: 0.7; }
 .sf-chip-x:hover { opacity: 1; background: rgba(0, 0, 0, 0.08); }
+
+/* ── teacher per division ── */
+.sf-divt { display: flex; flex-direction: column; gap: 4px; width: 100%; padding: 8px 10px; background: #F8FAFC; border: 1px solid #E2E8F0; border-radius: 8px; }
+.sf-divt-title { font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; color: #64748B; }
+.sf-divt-row { display: flex; align-items: center; gap: 8px; min-width: 0; font-size: 13px; }
+.sf-divt-div { flex: 0 0 auto; min-width: 22px; padding: 1px 7px; text-align: center; font-weight: 600; color: #1E3A8A; background: #DBEAFE; border-radius: 999px; }
+.sf-divt-who { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #0F172A; }
+.sf-divt-who--none { color: #B45309; }
+.sf-tpick-divs { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+.sf-tpick-row { display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 10px; }
+.sf-tpick-name { font-size: 13px; color: #334155; }
+.sf-opt { margin-left: 6px; font-size: 11px; font-weight: 500; color: #94A3B8; }
+@media (max-width: 520px) { .sf-tpick-row { grid-template-columns: 1fr; gap: 4px; } }
+
+/* Lecture / Tutorial / Lab tick boxes in the Add subject form */
+.sf-checks { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.sf-checkcard { display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border: 1.5px solid #E5E7EB; border-radius: 10px; background: #fff; cursor: pointer; }
+.sf-checkcard input { margin-top: 3px; accent-color: #4834D4; }
+.sf-checkcard span { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.sf-checkcard strong { font-size: 13.5px; color: #111827; }
+.sf-checkcard small { font-size: 11.5px; color: #6B7280; line-height: 1.35; }
+.sf-checkcard--on { border-color: #4834D4; background: #F5F3FF; }
+@media (max-width: 560px) { .sf-checks { grid-template-columns: 1fr; } }

@@ -5,7 +5,7 @@ import * as DocumentPicker from "expo-document-picker";
 import { auth } from "../../../services/firebase";
 import { Banner, Button, Card, Chip, EmptyState, Header, R, SP, Screen, SectionLabel, T, Tone, font } from "../../../components/ui";
 import {
-  Attachment, AttachmentEditor, LinkItem, ResourceList, api, fmtDateTime, isPastDue, jsonInit, uploadFiles,
+  Attachment, AttachmentEditor, KIND_ICON, KIND_LABEL, KIND_SHORT, KIND_TONE, LinkItem, ResourceList, api, kindOf, fmtDateTime, isPastDue, jsonInit, uploadFiles,
 } from "../WorkShared";
 
 type Asset = DocumentPicker.DocumentPickerAsset;
@@ -188,12 +188,14 @@ function Detail({ assignment, uid }: { assignment: any; uid: string }) {
 
   return (
     <Screen>
-      <Header title="Assignment" onBack={() => navigation.goBack()} />
+      <Header title={kindOf(assignment) === "assignment" ? "Assignment" : KIND_LABEL[kindOf(assignment)]} onBack={() => navigation.goBack()} />
       <ScrollView contentContainerStyle={{ padding: SP.lg, paddingBottom: SP.xxl }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         {/* title + chips */}
         <Card style={{ marginBottom: SP.md }}>
           <Text style={font.h1}>{assignment.title}</Text>
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SP.sm, marginTop: SP.md }}>
+            {!!assignment.tag_name && <Chip label={assignment.tag_name} icon="pricetag-outline" tone="neutral" />}
+            <Chip label={KIND_SHORT[kindOf(assignment)]} icon={KIND_ICON[kindOf(assignment)] as any} tone={KIND_TONE[kindOf(assignment)]} />
             <Chip label={`Due ${fmtDateTime(assignment.due_date)}`} icon="time-outline" tone={overdue && !isSubmitted ? "danger" : "neutral"} />
             <Chip label={`${assignment.marks} marks`} tone="primary" />
             {!!assignment.allow_late && <Chip label="Late allowed" tone="warning" />}

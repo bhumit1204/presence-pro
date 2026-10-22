@@ -10,7 +10,8 @@ import {
 } from "../../../components/ui";
 import { HeaderIconButton, StatRow } from "../../reports/teacher/ReportShared";
 import {
-  Attachment, AttachmentEditor, DateTimeField, LinkItem, ResourceList, api, fmtDateTime, fmtShort, isPastDue, jsonInit, uploadFiles,
+  Attachment, AttachmentEditor, DateTimeField, KIND_ICON, KIND_SHORT, KIND_TONE, KindPicker, LinkItem, ResourceList, TagPicker, WorkKind, tagNameOf, useTags, api, fmtDateTime, fmtShort, isPastDue, jsonInit,
+  kindOf, startOfToday, stateOf, uploadFiles,
 } from "../WorkShared";
 
 /* ───────────── types and helpers ───────────── */
@@ -88,7 +89,11 @@ function SheetFrame({ title, onClose, children }: { title: string; onClose: () =
 }
 
 /* ───────────── edit assignment ───────────── */
-function EditSheet({ assignment, teacher_id, onClose, onSaved }: { assignment: any; teacher_id: string; onClose: () => void; onSaved: () => void }) {
+function EditSheet({ assignment, subject, teacher_id, onClose, onSaved }: { assignment: any; subject?: any; teacher_id: string; onClose: () => void; onSaved: () => void }) {
+  const scheduled = stateOf(assignment) === "scheduled";
+  const [kind, setKind] = useState<WorkKind>(kindOf(assignment));
+  const [tagId, setTagId] = useState<string | null>(assignment.tag_id ?? null);
+  const [publishAt, setPublishAt] = useState(new Date(assignment.publish_at || Date.now()));
   const [title, setTitle] = useState<string>(assignment.title || "");
   const [marks, setMarks] = useState(String(assignment.marks ?? ""));
   const [dueDate, setDueDate] = useState(new Date(assignment.due_date));
@@ -100,6 +105,21 @@ function EditSheet({ assignment, teacher_id, onClose, onSaved }: { assignment: a
   const [links, setLinks] = useState<LinkItem[]>(assignment.links || []);
   const [errors, setErrors] = useState<{ title?: string; marks?: string; body?: string }>({});
   const [saving, setSaving] = useState(false);
+  const [errPublish, setErrPublish] = useState<string | undefined>();
+
+  const dirty =
+    kind !== kindOf(assignment) || tagId !== (assignment.tag_id ?? null) || title !== (assignment.title || "") || marks !== String(assignment.marks ?? "") ||
+    dueDate.getTime() !== new Date(assignment.due_date).getTime() || instructions !== (assignment.instructions || "") ||
+    questions !== (assignment.questions || "") || allowLate !== !!assignment.allow_late || files.length > 0 ||
+    existing.length !== (assignment.attachments || []).length || links.length !== (assignment.links || []).length ||
+    (scheduled && publishAt.getTime() !== new Date(assignment.publish_at).getTime());
+  const close = () => {
+    if (!dirty || saving) return onClose();
+    Alert.alert("Discard your changes?", "They have not been saved.", [
+      { text: "Keep editing", style: "cancel" },
+      { text: "Discard", style: "destructive", onPress: onClose },
+    ]);
+  };
 
   const save = async () => {
     const e: typeof errors = {};
@@ -109,7 +129,13 @@ function EditSheet({ assignment, teacher_id, onClose, onSaved }: { assignment: a
     else if (m > 1000) e.marks = "Total marks cannot be more than 1000.";
     if (!instructions.trim() && !questions.trim()) e.body = "Fill in the instructions, the questions, or both.";
     setErrors(e);
-    if (Object.keys(e).length) return;
+    let pe: string | undefined;
+    if (scheduled) {
+      if (publishAt.getTime() <= Date.now()) pe = "Choose a posting time in the future.";
+    }
+    setErrPublish(pe);
+    if (Object.keys(e).length || pe) return;
+    if (scheduled && dueDate.getTime() <= publishAt.getTime()) { Alert.alert("Check the dates", "The due date must be after the posting time."); return; }
 
     setSaving(true);
     try {
@@ -120,6 +146,9 @@ function EditSheet({ assignment, teacher_id, onClose, onSaved }: { assignment: a
         `/api/assignments/${assignment.assignment_id}`,
         jsonInit("PUT", {
           teacher_id,
+          kind,
+          tag_id: tagId,
+          ...(scheduled ? { publish_at: publishAt.toISOString() } : {}),
           title: title.trim(),
           instructions: instructions.trim() || null,
           questions: questions.trim() || null,
@@ -141,11 +170,14 @@ function EditSheet({ assignment, teacher_id, onClose, onSaved }: { assignment: a
   };
 
   return (
-    <SheetFrame title="Edit assignment" onClose={onClose}>
+    <SheetFrame title="Edit assignment" onClose={close}>
       <ScrollView contentContainerStyle={{ padding: SP.lg, paddingBottom: SP.xxl }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
         <Card style={{ marginBottom: SP.md, gap: SP.lg }}>
+          <KindPicker value={kind} onChange={setKind} subject={subject} disabled={saving} />
+          <TagPicker subject_id={assignment.subject_id} course_id={assignment.course_id} teacher_id={teacher_id} value={tagId} onChange={setTagId} disabled={saving} />
           <TextField label="Title" value={title} onChangeText={setTitle} autoCapitalize="sentences" autoCorrect maxLength={300} error={errors.title} editable={!saving} />
           <TextField label="Total marks" value={marks} onChangeText={(t) => setMarks(t.replace(/[^0-9.]/g, ""))} keyboardType="decimal-pad" maxLength={6} error={errors.marks} editable={!saving} />
+          {scheduled && <DateTimeField label="Posts at" value={publishAt} onChange={(d) => { setPublishAt(d); setErrPublish(undefined); }} minimumDate={startOfToday()} error={errPublish} />}
           <DateTimeField label="Due" value={dueDate} onChange={setDueDate} />
           <ToggleRow title="Allow late submissions" sub="Students can turn in after the due date" value={allowLate} onChange={setAllowLate} disabled={saving} />
         </Card>
@@ -411,12 +443,12 @@ export default function TeacherAssignmentDetail() {
       </Screen>
     );
   }
-  return <Detail initial={initial} teacher_id={teacher_id} subjectName={subject?.subject_name} />;
+  return <Detail initial={initial} teacher_id={teacher_id} subject={subject} subjectName={subject?.subject_name} />;
 }
 
 type Filter = "all" | "submitted" | "missing";
 
-function Detail({ initial, teacher_id, subjectName }: { initial: any; teacher_id: string; subjectName?: string }) {
+function Detail({ initial, teacher_id, subject, subjectName }: { initial: any; teacher_id: string; subject?: any; subjectName?: string }) {
   const navigation = useNavigation<any>();
   const [assignment, setAssignment] = useState<any>(initial);
   const [rows, setRows] = useState<Row[]>([]);
@@ -434,11 +466,16 @@ function Detail({ initial, teacher_id, subjectName }: { initial: any; teacher_id
     async (silent = false) => {
       try {
         if (!silent && !loadedOnce.current) setLoading(true);
-        const [subs, assign] = await Promise.all([
-          api<{ submissions: Submission[] }>(`/api/assignments/${id}/submissions?teacher_id=${enc(teacher_id)}`),
-          api<{ assignment: any }>(`/api/assignments/${id}`),
-        ]);
+        const assign = await api<{ assignment: any }>(`/api/assignments/${id}?teacher_id=${enc(teacher_id)}`);
         setAssignment(assign.assignment);
+        if (stateOf(assign.assignment) !== "published") {
+          // a scheduled post has no submissions yet
+          setRows([]);
+          setError(null);
+          loadedOnce.current = true;
+          return;
+        }
+        const subs = await api<{ submissions: Submission[] }>(`/api/assignments/${id}/submissions?teacher_id=${enc(teacher_id)}`);
 
         const submissions = subs.submissions || [];
         const byUid = new Map(submissions.map((s) => [s.student_uid, s]));
@@ -482,7 +519,11 @@ function Detail({ initial, teacher_id, subjectName }: { initial: any; teacher_id
   const graded = rows.filter((r) => r.submission?.status === "graded").length;
   const hidden = rows.filter((r) => r.submission?.status === "graded" && !isReturned(r.submission)).length;
   const missing = total - submitted;
-  const overdue = isPastDue(assignment.due_date);
+  const { tags } = useTags(assignment.subject_id, assignment.course_id);
+  const tagName = tagNameOf(tags, assignment.tag_id);
+  const state = stateOf(assignment);
+  const kind = kindOf(assignment);
+  const overdue = state === "published" && isPastDue(assignment.due_date);
   const visible = filter === "submitted" ? rows.filter((r) => r.submission) : filter === "missing" ? rows.filter((r) => !r.submission) : rows;
 
   /* ── actions ── */
@@ -505,6 +546,23 @@ function Detail({ initial, teacher_id, subjectName }: { initial: any; teacher_id
       },
     ]);
   };
+
+  const setStatus = async (status: "published" | "draft") => {
+    setBusy(true);
+    try {
+      await api(`/api/assignments/${id}`, jsonInit("PUT", { teacher_id, status }));
+      await load(true);
+    } catch (e: any) {
+      Alert.alert(status === "published" ? "Could not post it" : "Could not move it to drafts", e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  const postNow = () =>
+    Alert.alert("Post now?", "Students are notified straight away instead of at the scheduled time.", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Post now", onPress: () => setStatus("published") },
+    ]);
 
   const returnHidden = () => {
     const targets = rows.filter((r) => r.submission?.status === "graded" && !isReturned(r.submission!));
@@ -566,10 +624,26 @@ function Detail({ initial, teacher_id, subjectName }: { initial: any; teacher_id
           )}
 
           <View style={{ flexDirection: "row", flexWrap: "wrap", gap: SP.sm, marginBottom: SP.md }}>
+            <Chip label={KIND_SHORT[kind]} icon={KIND_ICON[kind] as any} tone={KIND_TONE[kind]} />
+            {!!tagName && <Chip label={tagName} icon="pricetag-outline" tone="neutral" />}
             <Chip label={`Due ${fmtDateTime(assignment.due_date)}`} icon="time-outline" tone={overdue ? "danger" : "neutral"} />
             <Chip label={`${assignment.marks} marks`} tone="primary" />
             <Chip label={assignment.allow_late ? "Late allowed" : "No late work"} tone={assignment.allow_late ? "success" : "neutral"} />
           </View>
+
+          {state === "scheduled" && (
+            <Banner tone="info" title={`Posts ${fmtDateTime(assignment.publish_at)}`} style={{ marginBottom: SP.md }}>
+              <Text style={font.body}>Students cannot see this yet. They are notified when it posts.</Text>
+              <View style={{ flexDirection: "row", gap: SP.lg, marginTop: SP.xs }}>
+                <Pressable onPress={postNow} disabled={busy} accessibilityRole="button">
+                  <Text style={{ color: T.primary, fontWeight: "800", fontSize: 13.5 }}>Post now</Text>
+                </Pressable>
+                <Pressable onPress={() => setStatus("draft")} disabled={busy} accessibilityRole="button">
+                  <Text style={{ color: T.primary, fontWeight: "800", fontSize: 13.5 }}>Move to drafts</Text>
+                </Pressable>
+              </View>
+            </Banner>
+          )}
 
           {!!assignment.instructions && (
             <Card style={{ marginBottom: SP.md }}>
@@ -590,6 +664,7 @@ function Detail({ initial, teacher_id, subjectName }: { initial: any; teacher_id
             </Card>
           )}
 
+          {state === "published" && <>
           <StatRow
             items={[
               { value: submitted, label: "Submitted", tone: "primary" },
@@ -666,10 +741,11 @@ function Detail({ initial, teacher_id, subjectName }: { initial: any; teacher_id
               })
             )}
           </Card>
+          </>}
         </ScrollView>
       )}
 
-      {sheet === "edit" && <EditSheet assignment={assignment} teacher_id={teacher_id} onClose={() => setSheet(null)} onSaved={() => load(true)} />}
+      {sheet === "edit" && <EditSheet assignment={assignment} subject={subject} teacher_id={teacher_id} onClose={() => setSheet(null)} onSaved={() => load(true)} />}
       {sheet === "all" && <GradeAllSheet rows={rows} totalMarks={assignment.marks} teacher_id={teacher_id} onClose={() => setSheet(null)} onSaved={() => load(true)} />}
       {grading && <GradeSheet key={grading.uid} row={grading} totalMarks={assignment.marks} teacher_id={teacher_id} onClose={() => setGrading(null)} onSaved={() => load(true)} />}
     </Screen>

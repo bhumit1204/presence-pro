@@ -5,10 +5,11 @@ import {
   StudentShell, useFeed, useQuizzes, Tabs, Skeleton, Empty, ErrorBox, Pill, StatePill,
   Attachments, subjectColor, assignmentState, isOpenWork, dueLabel, fmtDate, fmtDateTime, useNow,
 } from "./ui";
+import { KindFilter, KindPill, TagFilter, TagPill, groupByTag, applyTag, kindOf } from "./workKind";
 
 const BASE = "/dashboard/student";
 
-function AnnouncementPost({ a, color }) {
+function AnnouncementPost({ a, color, tags }) {
   const [open, setOpen] = useState(false);
   const long = (a.text || "").length > 280 || (a.text || "").split("\n").length > 4;
   return (
@@ -17,7 +18,7 @@ function AnnouncementPost({ a, color }) {
         <span className="st-row-icon" style={{ background: color }}>📢</span>
         <div style={{ flex: 1, minWidth: 0 }}>
           <div className="st-post-title">{a.title}</div>
-          <div className="st-post-meta">{fmtDateTime(a.created_at)}{a.is_pinned ? " · 📌 Pinned" : ""}</div>
+          <div className="st-post-meta">{fmtDateTime(a.created_at)}{a.is_pinned ? " · 📌 Pinned" : ""}{a.tag_id ? <> · <TagPill tags={tags} id={a.tag_id} /></> : null}</div>
         </div>
       </div>
       <div className={`st-post-text${!open && long ? " st-post-text--clamp" : ""}`}>{a.text}</div>
@@ -27,14 +28,14 @@ function AnnouncementPost({ a, color }) {
   );
 }
 
-function AssignmentRow({ a, now, onOpen }) {
+function AssignmentRow({ a, now, onOpen, tags }) {
   const st = assignmentState(a, now);
   return (
     <button className="st-row" onClick={onOpen}>
-      <span className="st-row-icon" style={{ background: "#6B7280" }}>📝</span>
+      <span className="st-row-icon" style={{ background: "#6B7280" }}>{kindOf(a).icon}</span>
       <span className="st-row-body">
         <div className="st-row-title">{a.title}</div>
-        <div className="st-row-meta"><span>{isOpenWork(st) || st === "missed" ? dueLabel(a.due_date, now) : `Due ${fmtDate(a.due_date)}`}</span>{a.marks != null && <span>· {a.marks} marks</span>}{a.kind === "lab_work" && <Pill tone="purple">Lab work</Pill>}</div>
+        <div className="st-row-meta"><span>{isOpenWork(st) || st === "missed" ? dueLabel(a.due_date, now) : `Due ${fmtDate(a.due_date)}`}</span>{a.marks != null && <span>· {a.marks} marks</span>}<KindPill a={a} /><TagPill tags={tags} id={a.tag_id} /></div>
       </span>
       <span className="st-row-end">
         <StatePill state={st} />
@@ -51,11 +52,16 @@ export default function ClassroomPage() {
   const feed = useFeed();
   const quizzes = useQuizzes();
   const [tab, setTab] = useState("stream");
+  const [kindSel, setKindSel] = useState("all");
+  const [tagSel, setTagSel] = useState("all");
 
   const subject = (feed.data?.subjects || []).find((s) => s.subject_id === subjectId);
   const color = subjectColor(subjectId);
-  const assignments = (feed.data?.assignments || []).filter((a) => a.subject_id === subjectId);
-  const announcements = (feed.data?.announcements || []).filter((a) => a.subject_id === subjectId);
+  const subjectWork = (feed.data?.assignments || []).filter((a) => a.subject_id === subjectId);
+  const tags = (feed.data?.tags || []).filter((t) => t.subject_id === subjectId);
+  const assignments = applyTag(subjectWork, tagSel).filter((a) => kindSel === "all" || kindOf(a).key === kindSel);
+  const allAnnouncements = (feed.data?.announcements || []).filter((a) => a.subject_id === subjectId);
+  const announcements = applyTag(allAnnouncements, tagSel);
   const allQuizzes = [
     ...(quizzes.data?.live || []).map((q) => ({ ...q, _s: "live" })),
     ...(quizzes.data?.scheduled || []).map((q) => ({ ...q, _s: "scheduled" })),
@@ -70,12 +76,16 @@ export default function ClassroomPage() {
     ...assignments.map((a) => ({ type: "work", at: a.created_at, pinned: false, a })),
   ].sort((x, y) => (x.pinned !== y.pinned ? (x.pinned ? -1 : 1) : new Date(y.at || 0) - new Date(x.at || 0)));
 
-  const groups = [
+  // once the teacher uses tags, classwork is grouped by tag; otherwise by state
+  const tagGroups = groupByTag(assignments, tags);
+  const byTag = tagGroups.length > 1 || !!tagGroups[0]?.label;
+  const stateGroups = [
     ["Assigned", assignments.filter((a) => isOpenWork(assignmentState(a, now)))],
     ["Missed", assignments.filter((a) => assignmentState(a, now) === "missed")],
     ["Turned in", assignments.filter((a) => ["submitted", "late"].includes(assignmentState(a, now)))],
     ["Graded", assignments.filter((a) => assignmentState(a, now) === "graded")],
   ].filter(([, list]) => list.length);
+  const groups = byTag ? tagGroups.map((g) => [`🏷 ${g.label}`, g.items]) : stateGroups;
 
   return (
     <StudentShell title={subject?.subject_name || "Class"} flush>
@@ -98,19 +108,20 @@ export default function ClassroomPage() {
         <ErrorBox error={feed.error && !feed.data ? feed.error : null} onRetry={feed.reload} />
         {feed.loading ? <Skeleton rows={4} height={90} /> : !subject ? (
           <Empty icon="🔍" title="We couldn't find this class" text="It may not be one of your enrolled subjects." action={<button className="st-btn st-btn--primary" onClick={() => nav(`${BASE}/classes`)}>Back to my classes</button>} />
-        ) : tab === "stream" ? (
+        ) : tab === "stream" ? (<>
+          <TagFilter tags={tags} items={[...subjectWork, ...allAnnouncements]} value={tagSel} onChange={setTagSel} />
           <div className="st-split">
             <div className="st-stack">
               {stream.length === 0 ? <Empty icon="🪴" title="Nothing posted yet" text="Announcements and assignments from your teacher will appear here." /> : stream.map((item) =>
                 item.type === "ann" ? (
-                  <AnnouncementPost key={"a" + item.a.announcement_id} a={item.a} color={color} />
+                  <AnnouncementPost key={"a" + item.a.announcement_id} a={item.a} color={color} tags={tags} />
                 ) : (
                   <article key={"w" + item.a.assignment_id} className="st-post" style={{ cursor: "pointer" }} onClick={() => nav(`${BASE}/assignments/${item.a.assignment_id}`)}>
                     <div className="st-post-head">
-                      <span className="st-row-icon" style={{ background: color }}>📝</span>
+                      <span className="st-row-icon" style={{ background: color }}>{kindOf(item.a).icon}</span>
                       <div style={{ flex: 1, minWidth: 0 }}>
-                        <div className="st-post-title">{item.a.kind === "lab_work" ? "New lab work" : "New assignment"}: {item.a.title}</div>
-                        <div className="st-post-meta">Posted {fmtDateTime(item.a.created_at)} · {dueLabel(item.a.due_date, now)}</div>
+                        <div className="st-post-title">{kindOf(item.a).stream}: {item.a.title}</div>
+                        <div className="st-post-meta">Posted {fmtDateTime(item.a.created_at)} · {dueLabel(item.a.due_date, now)}{item.a.tag_id ? <> · <TagPill tags={tags} id={item.a.tag_id} /></> : null}</div>
                       </div>
                       <StatePill state={assignmentState(item.a, now)} />
                     </div>
@@ -131,16 +142,18 @@ export default function ClassroomPage() {
                 </div>
               )}
             </aside>
-          </div>
-        ) : tab === "work" ? (
-          groups.length === 0 ? <Empty icon="📭" title="No classwork yet" text="Assignments will show up here as soon as your teacher posts them." /> : groups.map(([label, list]) => (
+          </div></>
+        ) : tab === "work" ? (<>
+          <TagFilter tags={tags} items={subjectWork} value={tagSel} onChange={setTagSel} />
+          <KindFilter items={subjectWork} value={kindSel} onChange={setKindSel} />
+          {groups.length === 0 ? <Empty icon="📭" title="No classwork yet" text="Assignments will show up here as soon as your teacher posts them." /> : groups.map(([label, list]) => (
             <section key={label}>
               <div className="st-section-head"><h2 className="st-h2">{label} · {list.length}</h2></div>
               <div className="st-card st-card--flat">
-                {list.map((a) => <AssignmentRow key={a.assignment_id} a={a} now={now} onOpen={() => nav(`${BASE}/assignments/${a.assignment_id}`)} />)}
+                {list.map((a) => <AssignmentRow key={a.assignment_id} a={a} now={now} tags={tags} onOpen={() => nav(`${BASE}/assignments/${a.assignment_id}`)} />)}
               </div>
             </section>
-          ))
+          ))}</>
         ) : (
           allQuizzes.length === 0 ? <Empty icon="🧠" title="No tests for this class" /> : (
             <div className="st-card st-card--flat">

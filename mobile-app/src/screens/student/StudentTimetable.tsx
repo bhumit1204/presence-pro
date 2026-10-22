@@ -10,7 +10,7 @@ const DAYS = ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"
 
 type Lec = {
   lecture_id: string; subject_name: string; subject_code?: string; kind?: string; kind_label?: string;
-  batch?: string; teacher_name?: string; division_name?: string; elective?: boolean;
+  batch?: string; teacher_name?: string; division_name?: string; elective?: boolean; elective_group?: string;
   day: string; start_time: string; end_time: string; room?: string;
 };
 type Change = {
@@ -119,7 +119,7 @@ export default function StudentTimetable() {
                   <View style={[styles.row, { marginTop: SP.sm, flexWrap: "wrap" }]}>
                     {!!l.kind_label && <Chip label={l.kind_label} tone="info" />}
                     {!!l.batch && <Chip label={`Batch ${l.batch}`} tone="primary" />}
-                    {l.elective && <Chip label="Elective" tone="warning" />}
+                    {l.elective && <Chip label={l.elective_group ? `Elective: ${l.elective_group}` : "Elective"} tone="warning" />}
                   </View>
                 )}
               </Card>

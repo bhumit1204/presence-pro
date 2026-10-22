@@ -234,3 +234,6 @@
 .tt-batch-who { font-size: 12.5px; color: #6B7280; }
 .tt-cuts { display: flex; flex-wrap: wrap; gap: 10px 16px; }
 .tt-cut { display: flex; flex-direction: column; gap: 4px; font-size: 12.5px; color: #374151; min-width: 180px; flex: 1 1 200px; }
+/* tutorial and lab sessions look different from lectures, so an elective's tutorial is easy to tell apart */
+.tt-slot--tutorial { border-style: dashed !important; }
+.tt-slot--lab { border-width: 2px !important; }

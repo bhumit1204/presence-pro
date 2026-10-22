@@ -13,6 +13,7 @@ const { createCoalescer } = require("../utils/coalesce");
 const { looksLikeItsType } = require("../utils/upload");
 const { teacherOwnsSubject, studentEnrolled } = require("../utils/ownership");
 const { assignmentStudentsHandler } = require("../utils/assignmentStudents");
+const { KINDS, stateOf, isLive, kindOf, toMs } = require("../utils/assignmentState");
 const {
   getDocsByIds, queryInChunks, commitInBatches, isIndexMissing, isAlreadyExists, tsISO,
 } = require("../utils/firestore");
@@ -82,6 +83,7 @@ function dropAssignment(id) {
 function dropLists(subject_id, course_id) {
   listCache.del(`a|${subject_id}|${course_id}`);
   listCache.del(`n|${subject_id}|${course_id}`);
+  listCache.del(`t|${subject_id}|${course_id}`);
 }
 
 // submissions_count is incremented by every student submitting. Hundreds of
@@ -292,6 +294,143 @@ router.post(
 );
 
 // ═══════════════════════════════════════════════════════════════════
+//  CLASSWORK TAGS (topics) — "CA Assignment", "Syllabus", ...
+//  A subject has its own list of tags, made by its teachers. An assignment or an announcement
+//  carries at most one tag_id. Students see the work grouped by tag and can filter by it.
+//
+//    GET    /api/assignments/tags?subject_id=&course_id=        -> { tags: [{ tag_id, name, order }] }
+//    POST   /api/assignments/tags      { teacher_id, subject_id, course_id, name }   (an existing name is returned, not duplicated)
+//    PUT    /api/assignments/tags/:id  { teacher_id, name?, order? }
+//    DELETE /api/assignments/tags/:id?teacher_id=               (its items stay, untagged)
+// ═══════════════════════════════════════════════════════════════════
+const MAX_TAGS_PER_SUBJECT = 30;
+const tagKey = (name) => String(name || "").trim().replace(/\s+/g, " ").toLowerCase();
+const tagClean = (name) => String(name || "").trim().replace(/\s+/g, " ").slice(0, 40);
+
+async function tagsOf(subject_id, course_id) {
+  return listCache.memo(`t|${subject_id}|${course_id}`, 5_000, async () => {
+    const snap = await db.collection("classwork_tags").where("subject_id", "==", subject_id).where("course_id", "==", course_id).get();
+    return snap.docs
+      .map((d) => d.data())
+      .map((t) => ({ tag_id: t.tag_id, name: t.name, order: Number.isFinite(t.order) ? t.order : 0, subject_id: t.subject_id, course_id: t.course_id }))
+      .sort((a, b) => a.order - b.order || a.name.localeCompare(b.name, undefined, { numeric: true }));
+  });
+}
+
+/** tag_id on an incoming item: "" / null clears it, otherwise it must be a tag of the same subject. Returns { value } or { error }. */
+async function resolveTag(tag_id, subject_id, course_id) {
+  if (tag_id === undefined) return { skip: true };
+  if (tag_id === null || tag_id === "") return { value: null };
+  if (!isId(tag_id)) return { error: "tag_id is not valid" };
+  const snap = await db.collection("classwork_tags").doc(tag_id).get();
+  const t = snap.exists ? snap.data() : null;
+  if (!t || t.subject_id !== subject_id || t.course_id !== course_id) return { error: "That tag does not belong to this subject" };
+  return { value: tag_id };
+}
+
+router.get("/tags", async (req, res) => {
+  try {
+    const { subject_id, course_id } = req.query;
+    if (!isId(subject_id) || !isId(course_id)) return res.status(400).json({ success: false, error: "subject_id and course_id are required" });
+    return res.json({ success: true, tags: await tagsOf(subject_id, course_id) });
+  } catch (e) {
+    console.error("GET TAGS ERROR:", e);
+    return res.status(500).json({ success: false, error: "Failed to fetch tags" });
+  }
+});
+
+router.post("/tags", guard.teacher(fromBody("teacher_id")), async (req, res) => {
+  try {
+    const { teacher_id, subject_id, course_id } = req.body;
+    const name = tagClean(req.body.name);
+    if (!isId(teacher_id) || !isId(subject_id) || !isId(course_id)) return res.status(400).json({ success: false, error: "teacher_id, subject_id and course_id are required" });
+    if (!name) return res.status(400).json({ success: false, error: "Give the tag a name" });
+    if (!allow(req, res, await teacherOwnsSubject(teacher_id, subject_id), "tag-subject")) return;
+
+    const tags = await tagsOf(subject_id, course_id);
+    const same = tags.find((t) => tagKey(t.name) === tagKey(name));
+    if (same) return res.json({ success: true, tag: same, existing: true });
+    if (tags.length >= MAX_TAGS_PER_SUBJECT) return res.status(400).json({ success: false, error: `At most ${MAX_TAGS_PER_SUBJECT} tags per subject` });
+
+    const ref = db.collection("classwork_tags").doc();
+    const doc = {
+      tag_id: ref.id, subject_id, course_id, name,
+      order: tags.reduce((m, t) => Math.max(m, t.order), 0) + 1,
+      created_by: teacher_id,
+      created_at: admin.firestore.FieldValue.serverTimestamp(),
+    };
+    await ref.set(doc);
+    dropLists(subject_id, course_id);
+    return res.status(201).json({ success: true, tag: { tag_id: ref.id, name, order: doc.order, subject_id, course_id } });
+  } catch (e) {
+    console.error("CREATE TAG ERROR:", e);
+    if (!res.headersSent) return res.status(500).json({ success: false, error: "Failed to create the tag" });
+  }
+});
+
+router.put("/tags/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { teacher_id } = req.body;
+    if (!isId(id) || !isId(teacher_id)) return res.status(404).json({ success: false, error: "Tag not found" });
+    const ref = db.collection("classwork_tags").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "Tag not found" });
+    const tag = snap.data();
+    if (!allow(req, res, await teacherOwnsSubject(teacher_id, tag.subject_id), "tag-subject")) return;
+
+    const updates = {};
+    if (req.body.name !== undefined) {
+      const name = tagClean(req.body.name);
+      if (!name) return res.status(400).json({ success: false, error: "Give the tag a name" });
+      const tags = await tagsOf(tag.subject_id, tag.course_id);
+      if (tags.some((t) => t.tag_id !== id && tagKey(t.name) === tagKey(name))) return res.status(409).json({ success: false, error: "A tag with that name already exists" });
+      updates.name = name;
+    }
+    if (req.body.order !== undefined) {
+      const o = Number(req.body.order);
+      if (!Number.isFinite(o)) return res.status(400).json({ success: false, error: "order must be a number" });
+      updates.order = o;
+    }
+    if (!Object.keys(updates).length) return res.json({ success: true });
+    await ref.update(updates);
+    dropLists(tag.subject_id, tag.course_id);
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("UPDATE TAG ERROR:", e);
+    if (!res.headersSent) return res.status(500).json({ success: false, error: "Failed to update the tag" });
+  }
+});
+
+router.delete("/tags/:id", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { teacher_id } = req.query;
+    if (!isId(id) || !isId(teacher_id)) return res.status(404).json({ success: false, error: "Tag not found" });
+    const ref = db.collection("classwork_tags").doc(id);
+    const snap = await ref.get();
+    if (!snap.exists) return res.status(404).json({ success: false, error: "Tag not found" });
+    const tag = snap.data();
+    if (!allow(req, res, await teacherOwnsSubject(teacher_id, tag.subject_id), "tag-subject")) return;
+
+    // the items keep existing, they just lose the tag
+    const ops = [];
+    for (const col of ["assignments", "announcements"]) {
+      const used = await db.collection(col).where("subject_id", "==", tag.subject_id).where("tag_id", "==", id).get();
+      used.docs.forEach((d) => ops.push((b) => b.update(d.ref, { tag_id: null })));
+    }
+    ops.push((b) => b.delete(ref));
+    await commitInBatches(ops);
+    ops.length = 0;
+    dropLists(tag.subject_id, tag.course_id);
+    return res.json({ success: true });
+  } catch (e) {
+    console.error("DELETE TAG ERROR:", e);
+    if (!res.headersSent) return res.status(500).json({ success: false, error: "Failed to delete the tag" });
+  }
+});
+
+// ═══════════════════════════════════════════════════════════════════
 // ───────────────────────────────────────────────────────────────────
 //  ANNOUNCEMENTS
 // ───────────────────────────────────────────────────────────────────
@@ -319,6 +458,7 @@ router.post("/announcements", guard.teacher(fromBody("teacher_id")), async (req,
       is_pinned   = false,
       attachments,
       links,
+      tag_id,
     } = req.body;
 
     if (!teacher_id || !course_id || !subject_id || !title || !text) {
@@ -337,6 +477,9 @@ router.post("/announcements", guard.teacher(fromBody("teacher_id")), async (req,
 
     if (!allow(req, res, await teacherOwnsSubject(teacher_id, subject_id), "announce-subject")) return;
 
+    const tg = await resolveTag(tag_id, subject_id, course_id);
+    if (tg.error) return res.status(400).json({ success: false, error: tg.error });
+
     // Parse attachments — either pre-uploaded objects or empty
     const parsedAttachments = parseAttachmentsLoose(attachments) || [];
     const parsedLinks = parseLinks(links);
@@ -353,6 +496,7 @@ router.post("/announcements", guard.teacher(fromBody("teacher_id")), async (req,
       title:             title.trim(),
       text:              text.trim(),
       is_pinned:         Boolean(is_pinned),
+      tag_id:            tg.value ?? null,
       attachments:       parsedAttachments,
       links:             parsedLinks,
       created_at:        now,
@@ -457,7 +601,7 @@ router.get("/announcements", async (req, res) => {
 router.put("/announcements/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
     const { id } = req.params;
-    const { teacher_id, title, text, is_pinned, attachments, links, deleted_keys } = req.body;
+    const { teacher_id, title, text, is_pinned, attachments, links, deleted_keys, tag_id } = req.body;
 
     if (!teacher_id) {
       return res.status(400).json({ success: false, error: "teacher_id required" });
@@ -486,6 +630,11 @@ router.put("/announcements/:id", guard.teacher(fromBody("teacher_id")), async (r
       updates.text = text.trim();
     }
     if (is_pinned   !== undefined) updates.is_pinned   = Boolean(is_pinned);
+    if (tag_id !== undefined) {
+      const tg = await resolveTag(tag_id, existing.subject_id, existing.course_id);
+      if (tg.error) return res.status(400).json({ success: false, error: tg.error });
+      updates.tag_id = tg.value;
+    }
     if (attachments !== undefined) {
       const parsed = parseAttachmentsLoose(attachments);
       if (parsed === null) return res.status(400).json({ success: false, error: "attachments must be valid JSON" });
@@ -558,6 +707,65 @@ router.delete("/announcements/:id", guard.teacher(fromQuery("teacher_id")), asyn
 // ───────────────────────────────────────────────────────────────────
 // ═══════════════════════════════════════════════════════════════════
 
+// ─── kind / status helpers ───────────────────────────────────────
+const KIND_TITLE = { assignment: "📝 New Assignment", lab_work: "🧪 New Lab Work", tutorial_work: "📘 New Tutorial Work" };
+
+/** Lab work needs a lab, tutorial work needs a tutorial. Lab work goes to the whole division. */
+async function kindError(kind, subject_id) {
+  if (kind === "assignment") return null;
+  const sd = await db.collection("subjects").doc(subject_id).get();
+  const sj = sd.exists ? sd.data() : {};
+  if (kind === "lab_work" && sj.kind !== "lab" && sj.has_lab !== true) return "This subject has no lab, so it can't have lab work";
+  if (kind === "tutorial_work" && sj.has_tutorial !== true) return "This subject has no tutorial, so it can't have tutorial work";
+  return null;
+}
+
+/** Tell the students. Called when something is posted: now, or when its scheduled time comes. */
+async function announcePosted(a) {
+  try {
+    const ids = await getStudentUidsForSubject(a.subject_id);
+    const due = toMs(a.due_date);
+    notify({
+      userIds: ids,
+      title: KIND_TITLE[kindOf(a)],
+      body: `${a.title} — Due ${due ? new Date(due).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" }) : "soon"}`,
+      data: { screen: "StudentWork", params: { subject_id: a.subject_id, course_id: a.course_id } },
+    });
+  } catch (e) {
+    console.error("ASSIGNMENT NOTIFY ERROR:", e.message);
+  }
+}
+
+/**
+ * Post the scheduled assignments whose time has come: flip them to published and notify.
+ * They are already visible to students from publish_at on; this sends the notification and tidies the status.
+ */
+async function publishDue() {
+  const snap = await db.collection("assignments").where("status", "==", "scheduled").get();
+  const now = Date.now();
+  let posted = 0;
+  for (const d of snap.docs) {
+    const a = d.data();
+    const at = toMs(a.publish_at);
+    if (at != null && at > now) continue;
+    const won = await db.runTransaction(async (t) => {
+      const cur = await t.get(d.ref);
+      if (!cur.exists || cur.data().status !== "scheduled") return false;
+      t.update(d.ref, { status: "published", published_at: admin.firestore.FieldValue.serverTimestamp(), updated_at: admin.firestore.FieldValue.serverTimestamp() });
+      return true;
+    });
+    if (!won) continue;
+    dropAssignment(d.id);
+    dropLists(a.subject_id, a.course_id);
+    posted++;
+    await announcePosted(a);
+  }
+  return posted;
+}
+const publisher = setInterval(() => publishDue().catch((e) => console.error("ASSIGNMENT PUBLISH ERROR:", e.message)), 30_000);
+if (publisher.unref) publisher.unref();
+setTimeout(() => publishDue().catch(() => {}), 5_000).unref?.();
+
 // ─────────────────────────────────────────────────────────────────
 // 📌 POST /api/assignments
 // Teacher creates an assignment.
@@ -574,6 +782,10 @@ router.delete("/announcements/:id", guard.teacher(fromQuery("teacher_id")), asyn
 //   allow_late          boolean  (default false)
 //   attachments         array    [{ url, key, name, size, type }]  pre-uploaded
 //   links               array    [{ url, label }]
+//   kind                "assignment" (lecture work, default) | "lab_work" | "tutorial_work"
+//   status              "published" (default) | "draft" | "scheduled"
+//   publish_at          ISO str  (required when status is "scheduled")
+//   A draft only needs teacher_id, course_id and subject_id.
 // ─────────────────────────────────────────────────────────────────
 router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
@@ -581,46 +793,69 @@ router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
       teacher_id, course_id, subject_id,
       title, instructions, questions,
       marks, due_date, allow_late = false,
-      attachments, links,
+      attachments, links, publish_at,
     } = req.body;
-    const kind = req.body.kind === undefined || req.body.kind === null || req.body.kind === "" ? "assignment" : req.body.kind;
-    if (kind !== "assignment" && kind !== "lab_work") {
-      return res.status(400).json({ success: false, error: "kind must be assignment or lab_work" });
+    const blank = (v) => v === undefined || v === null || v === "";
+    const kind = blank(req.body.kind) ? "assignment" : req.body.kind;
+    if (!KINDS.includes(kind)) {
+      return res.status(400).json({ success: false, error: "kind must be assignment, lab_work or tutorial_work" });
     }
+    const status = blank(req.body.status) ? "published" : req.body.status;
+    if (status !== "published" && status !== "draft" && status !== "scheduled") {
+      return res.status(400).json({ success: false, error: "status must be published, draft or scheduled" });
+    }
+    const draft = status === "draft";
 
-    if (!teacher_id || !course_id || !subject_id || !title || !marks || !due_date) {
+    if (!teacher_id || !course_id || !subject_id || (!draft && (!title || !marks || !due_date))) {
       return res.status(400).json({
         success: false,
-        error: "teacher_id, course_id, subject_id, title, marks and due_date are required",
+        error: draft
+          ? "teacher_id, course_id and subject_id are required"
+          : "teacher_id, course_id, subject_id, title, marks and due_date are required",
       });
     }
-    if (typeof title !== "string" || typeof subject_id !== "string" || typeof course_id !== "string"
+    if ((!blank(title) && typeof title !== "string") || typeof subject_id !== "string" || typeof course_id !== "string"
         || (instructions != null && typeof instructions !== "string")
         || (questions != null && typeof questions !== "string")) {
       return res.status(400).json({ success: false, error: "title, instructions, questions, subject_id and course_id must be text" });
     }
-    if (title.length > 300 || (instructions || "").length > 20000 || (questions || "").length > 50000) {
+    if ((title || "").length > 300 || (instructions || "").length > 20000 || (questions || "").length > 50000) {
       return res.status(400).json({ success: false, error: "Title, instructions or questions are too long" });
     }
 
-    const marksNum = Number(marks);
-    if (isNaN(marksNum) || marksNum < 1) {
-      return res.status(400).json({ success: false, error: "marks must be a positive number" });
+    let marksNum = null;
+    if (!blank(marks)) {
+      marksNum = Number(marks);
+      if (isNaN(marksNum) || marksNum < 1) {
+        return res.status(400).json({ success: false, error: "marks must be a positive number" });
+      }
     }
-
-    const dueDateObj = new Date(due_date);
-    if (isNaN(dueDateObj.getTime())) {
-      return res.status(400).json({ success: false, error: "due_date must be a valid ISO date string" });
+    let dueDateObj = null;
+    if (!blank(due_date)) {
+      dueDateObj = new Date(due_date);
+      if (isNaN(dueDateObj.getTime())) {
+        return res.status(400).json({ success: false, error: "due_date must be a valid ISO date string" });
+      }
+    }
+    let publishObj = null;
+    if (!blank(publish_at)) {
+      publishObj = new Date(publish_at);
+      if (isNaN(publishObj.getTime())) {
+        return res.status(400).json({ success: false, error: "publish_at must be a valid ISO date string" });
+      }
+    }
+    if (status === "scheduled") {
+      if (!publishObj) return res.status(400).json({ success: false, error: "publish_at is required to schedule an assignment" });
+      if (publishObj.getTime() <= Date.now()) return res.status(400).json({ success: false, error: "Choose a posting time in the future." });
+      if (dueDateObj.getTime() <= publishObj.getTime()) return res.status(400).json({ success: false, error: "The due date must be after the posting time." });
     }
 
     if (!allow(req, res, await teacherOwnsSubject(teacher_id, subject_id), "assignment-subject")) return;
-    if (kind === "lab_work") {
-      // lab work lives in a lab's classroom: a lab subject, or a subject that has a lab
-      const sd = await db.collection("subjects").doc(subject_id).get();
-      const sj = sd.exists ? sd.data() : {};
-      if (sj.kind !== "lab" && sj.has_lab !== true) {
-        return res.status(400).json({ success: false, error: "This subject has no lab, so it can't have lab work" });
-      }
+    const tg = await resolveTag(req.body.tag_id, subject_id, course_id);
+    if (tg.error) return res.status(400).json({ success: false, error: tg.error });
+    if (!draft) {
+      const ke = await kindError(kind, subject_id);
+      if (ke) return res.status(400).json({ success: false, error: ke });
     }
 
     const parsedAttachments = parseAttachmentsLoose(attachments) || [];
@@ -628,44 +863,39 @@ router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
 
     const ref = db.collection("assignments").doc();
     const now = admin.firestore.FieldValue.serverTimestamp();
-
-    await ref.set({
+    const doc = {
       assignment_id:    ref.id,
       teacher_id,
       course_id,
       subject_id,
       kind,
-      title:            title.trim(),
+      status,
+      tag_id:           tg.value ?? null,
+      title:            (title || "").trim(),
       instructions:     instructions?.trim() || null,
       questions:        questions?.trim()    || null,
       marks:            marksNum,
-      due_date:         admin.firestore.Timestamp.fromDate(dueDateObj),
+      due_date:         dueDateObj ? admin.firestore.Timestamp.fromDate(dueDateObj) : null,
       allow_late:       Boolean(allow_late),
       attachments:      parsedAttachments,
       links:            parsedLinks,
+      publish_at:       publishObj && status !== "published" ? admin.firestore.Timestamp.fromDate(publishObj) : null,   // a draft remembers the time it was meant for
+      published_at:     status === "published" ? now : null,
       submissions_count: 0,
       created_at:       now,
       updated_at:       now,
-    });
+    };
+    await ref.set(doc);
     dropLists(subject_id, course_id);
 
     res.status(201).json({
       success:       true,
       assignment_id: ref.id,
-      message:       "Assignment created",
+      status,
+      message:       draft ? "Draft saved" : status === "scheduled" ? "Assignment scheduled" : "Assignment created",
     });
 
-    try {
-      const ids = await getStudentUidsForSubject(subject_id);
-      notify({
-        userIds: ids,
-        title: kind === "lab_work" ? "🧪 New Lab Work" : "📝 New Assignment",
-        body: `${title.trim()} — Due ${new Date(due_date).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric", timeZone: "Asia/Kolkata" })}`,
-        data: { screen: "StudentWork", params: { subject_id, course_id } },
-      });
-    } catch (e) {
-      console.error("ASSIGNMENT NOTIFY ERROR:", e.message);
-    }
+    if (status === "published") announcePosted({ ...doc, due_date: dueDateObj });
   } catch (error) {
     console.error("CREATE ASSIGNMENT ERROR:", error);
     if (!res.headersSent) return res.status(500).json({ success: false, error: "Failed to create assignment" });
@@ -680,10 +910,11 @@ router.post("/", guard.teacher(fromBody("teacher_id")), async (req, res) => {
 //   subject_id   string  (required)
 //   course_id    string  (required)
 //   limit        number  (default 30)
+//   teacher_id   string  (optional) include this teacher's drafts and scheduled ones
 // ─────────────────────────────────────────────────────────────────
-router.get("/", async (req, res) => {
+router.get("/", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
   try {
-    const { subject_id, course_id, limit = 30 } = req.query;
+    const { subject_id, course_id, limit = 30, teacher_id } = req.query;
 
     if (!subject_id || !course_id) {
       return res.status(400).json({ success: false, error: "subject_id and course_id are required" });
@@ -703,20 +934,27 @@ router.get("/", async (req, res) => {
         const d = doc.data();
         return {
           ...d,
+          kind:       kindOf(d),
           due_date:   tsISO(d.due_date),
           created_at: tsISO(d.created_at),
           updated_at: tsISO(d.updated_at),
+          publish_at: tsISO(d.publish_at),
+          published_at: tsISO(d.published_at),
         };
       });
 
-      // Sort by due_date desc in memory — avoids composite index
-      items.sort((a, b) =>
-        new Date(b.due_date || 0).getTime() - new Date(a.due_date || 0).getTime()
-      );
+      // Newest due date first (drafts without one go by when they were made); done in memory to avoid a composite index
+      const key = (x) => new Date(x.due_date || x.created_at || 0).getTime();
+      items.sort((a, b) => key(b) - key(a));
       return items;
     });
 
-    const assignments = all.slice(0, wantedLimit(limit));
+    // Students only see what has been posted. A teacher also sees their own drafts and scheduled ones.
+    const nowMs = Date.now();
+    const visible = all
+      .map((a) => ({ ...a, state: stateOf({ status: a.status, publish_at: a.publish_at }, nowMs) }))
+      .filter((a) => a.state === "published" || (teacher_id && a.teacher_id === String(teacher_id)));
+    const assignments = visible.slice(0, wantedLimit(limit));
 
     return res.json({ success: true, count: assignments.length, assignments });
   } catch (error) {
@@ -839,13 +1077,15 @@ router.get("/:id/students", guard.teacher(fromQuery("teacher_id")), assignmentSt
 // IMPORTANT: Registered here (after all static-prefix GET routes)
 // so it does not shadow /my-submissions, /student/:uid, etc.
 // ─────────────────────────────────────────────────────────────────
-router.get("/:id", async (req, res) => {
+router.get("/:id", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
   try {
     const { id } = req.params;
 
     const d = isId(id) ? await getAssignment(id) : null;
+    const state = d ? stateOf(d) : null;
+    const owner = !!d && !!req.query.teacher_id && d.teacher_id === String(req.query.teacher_id);
 
-    if (!d) {
+    if (!d || (state !== "published" && !owner)) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
@@ -853,9 +1093,13 @@ router.get("/:id", async (req, res) => {
       success: true,
       assignment: {
         ...d,
+        kind:       kindOf(d),
+        state,
         due_date:   tsISO(d.due_date),
         created_at: tsISO(d.created_at),
         updated_at: tsISO(d.updated_at),
+        publish_at: tsISO(d.publish_at),
+        published_at: tsISO(d.published_at),
       },
     });
   } catch (error) {
@@ -879,6 +1123,9 @@ router.get("/:id", async (req, res) => {
 //   attachments   array    full replacement
 //   links         array    full replacement
 //   deleted_keys  string[] R2 keys to delete
+//   kind          "assignment" | "lab_work" | "tutorial_work"
+//   status        "draft" | "scheduled" | "published"  (post a draft / schedule it / post it now)
+//   publish_at    ISO str  when status is "scheduled"
 // ─────────────────────────────────────────────────────────────────
 router.put("/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
   try {
@@ -886,7 +1133,7 @@ router.put("/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
     const {
       teacher_id, title, instructions, questions,
       marks, due_date, allow_late,
-      attachments, links, deleted_keys,
+      attachments, links, deleted_keys, publish_at,
     } = req.body;
 
     if (!teacher_id) {
@@ -907,53 +1154,110 @@ router.put("/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
     }
 
     const updates = { updated_at: admin.firestore.FieldValue.serverTimestamp() };
-    if (req.body.kind !== undefined) {
-      if (req.body.kind !== "assignment" && req.body.kind !== "lab_work") {
-        return res.status(400).json({ success: false, error: "kind must be assignment or lab_work" });
-      }
-      if (req.body.kind === "lab_work" && (existing.kind || "assignment") !== "lab_work") {
-        const sd = await db.collection("subjects").doc(existing.subject_id).get();
-        const sj = sd.exists ? sd.data() : {};
-        if (sj.kind !== "lab" && sj.has_lab !== true) return res.status(400).json({ success: false, error: "This subject has no lab, so it can't have lab work" });
-      }
-      updates.kind = req.body.kind;
+    const bad = (error) => res.status(400).json({ success: false, error });
+    const cur = stateOf(existing);
+
+    // ── what it should become ──
+    let target = cur;
+    if (req.body.status !== undefined && req.body.status !== null && req.body.status !== "") {
+      target = req.body.status;
+      if (target !== "published" && target !== "draft" && target !== "scheduled") return bad("status must be published, draft or scheduled");
+      if (cur === "published" && target !== "published") return bad("An assignment that is already posted can't go back to draft or be scheduled.");
     }
+    const kind = req.body.kind !== undefined ? req.body.kind : kindOf(existing);
+    if (!KINDS.includes(kind)) return bad("kind must be assignment, lab_work or tutorial_work");
+    if (req.body.kind !== undefined) updates.kind = kind;
 
     const textOk = (v, max) => v === null || (typeof v === "string" && v.length <= max);
     if (title !== undefined) {
-      if (typeof title !== "string" || title.length > 300) return res.status(400).json({ success: false, error: "Invalid title" });
+      if (typeof title !== "string" || title.length > 300) return bad("Invalid title");
       updates.title = title.trim();
     }
     if (instructions !== undefined) {
-      if (!textOk(instructions, 20000)) return res.status(400).json({ success: false, error: "Invalid instructions" });
+      if (!textOk(instructions, 20000)) return bad("Invalid instructions");
       updates.instructions = instructions?.trim() || null;
     }
     if (questions !== undefined) {
-      if (!textOk(questions, 50000)) return res.status(400).json({ success: false, error: "Invalid questions" });
+      if (!textOk(questions, 50000)) return bad("Invalid questions");
       updates.questions = questions?.trim() || null;
     }
     if (allow_late   !== undefined) updates.allow_late   = Boolean(allow_late);
-
-    if (marks !== undefined) {
-      const marksNum = Number(marks);
-      if (isNaN(marksNum) || marksNum < 1)
-        return res.status(400).json({ success: false, error: "marks must be a positive number" });
-      updates.marks = marksNum;
+    if (req.body.tag_id !== undefined) {
+      const tg = await resolveTag(req.body.tag_id, existing.subject_id, existing.course_id);
+      if (tg.error) return bad(tg.error);
+      updates.tag_id = tg.value;
     }
 
+    let marksNow = existing.marks ?? null;
+    if (marks !== undefined && marks !== null && marks !== "") {
+      const marksNum = Number(marks);
+      if (isNaN(marksNum) || marksNum < 1) return bad("marks must be a positive number");
+      updates.marks = marksNow = marksNum;
+    } else if (marks === null || marks === "") {
+      if (cur !== "draft") return bad("marks must be a positive number");
+      updates.marks = marksNow = null;
+    }
+
+    let dueNow = toMs(existing.due_date);
     if (due_date !== undefined) {
-      const d = new Date(due_date);
-      if (isNaN(d.getTime()))
-        return res.status(400).json({ success: false, error: "due_date must be a valid ISO date string" });
-      updates.due_date = admin.firestore.Timestamp.fromDate(d);
+      if (due_date === null || due_date === "") {
+        if (cur !== "draft") return bad("due_date must be a valid ISO date string");
+        updates.due_date = null; dueNow = null;
+      } else {
+        const d = new Date(due_date);
+        if (isNaN(d.getTime())) return bad("due_date must be a valid ISO date string");
+        updates.due_date = admin.firestore.Timestamp.fromDate(d); dueNow = d.getTime();
+      }
+    }
+
+    let publishNow = toMs(existing.publish_at);
+    if (publish_at !== undefined) {
+      if (publish_at === null || publish_at === "") { publishNow = null; }
+      else {
+        const d = new Date(publish_at);
+        if (isNaN(d.getTime())) return bad("publish_at must be a valid ISO date string");
+        publishNow = d.getTime();
+      }
     }
 
     if (attachments !== undefined) {
       const parsed = parseAttachmentsLoose(attachments);
-      if (parsed === null) return res.status(400).json({ success: false, error: "attachments must be valid JSON" });
+      if (parsed === null) return bad("attachments must be valid JSON");
       updates.attachments = parsed;
     }
     if (links !== undefined) updates.links = parseLinks(links);
+
+    // ── checks for the state it ends up in ──
+    const titleNow = updates.title !== undefined ? updates.title : existing.title;
+    if (target !== "draft") {
+      if (!titleNow) return bad("title, marks and due_date are required");
+      if (marksNow == null) return bad("title, marks and due_date are required");
+      if (dueNow == null) return bad("title, marks and due_date are required");
+      if (kind !== kindOf(existing) || cur === "draft") {
+        const ke = await kindError(kind, existing.subject_id);
+        if (ke) return bad(ke);
+      }
+    }
+    if (target === "scheduled") {
+      const changed = cur !== "scheduled" || publish_at !== undefined;
+      if (publishNow == null) return bad("publish_at is required to schedule an assignment");
+      if (changed && publishNow <= Date.now()) return bad("Choose a posting time in the future.");
+      if (dueNow <= publishNow) return bad("The due date must be after the posting time.");
+    }
+
+    let postedNow = false;
+    if (target === "draft") {
+      updates.status = "draft"; updates.published_at = null;
+      if (publish_at !== undefined) updates.publish_at = publishNow == null ? null : admin.firestore.Timestamp.fromMillis(publishNow);
+    } else if (target === "scheduled") {
+      updates.status = "scheduled";
+      updates.publish_at = admin.firestore.Timestamp.fromMillis(publishNow);
+    } else if (cur !== "published") {
+      // draft or still-scheduled -> posted now
+      updates.status = "published"; updates.publish_at = null;
+      updates.published_at = admin.firestore.FieldValue.serverTimestamp();
+      postedNow = true;
+    }
 
     await ref.update(updates);
     dropAssignment(id);
@@ -964,10 +1268,23 @@ router.put("/:id", guard.teacher(fromBody("teacher_id")), async (req, res) => {
       cleanupKeys(deleted_keys.filter((k) => own.has(k)));
     }
 
-    return res.json({ success: true, message: "Assignment updated" });
+    res.json({
+      success: true,
+      status: updates.status || existing.status || "published",
+      message: postedNow ? "Assignment posted" : "Assignment updated",
+    });
+
+    if (postedNow) {
+      announcePosted({
+        ...existing,
+        title: titleNow, kind,
+        due_date: dueNow ? new Date(dueNow) : null,
+      });
+    }
+    return;
   } catch (error) {
     console.error("UPDATE ASSIGNMENT ERROR:", error);
-    return res.status(500).json({ success: false, error: "Failed to update assignment" });
+    if (!res.headersSent) return res.status(500).json({ success: false, error: "Failed to update assignment" });
   }
 });
 
@@ -1080,7 +1397,7 @@ router.post("/:id/submit", submitLimit, guard.student(fromBody("student_uid")), 
     // ── 1. Fetch assignment ──────────────────────────────────────
     const assignment = isId(assignment_id) ? await getAssignment(assignment_id) : null;
 
-    if (!assignment) {
+    if (!assignment || !isLive(assignment)) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
@@ -1205,7 +1522,7 @@ router.put("/:id/resubmit", submitLimit, guard.student(fromBody("student_uid")),
 
     // ── 2. Fetch assignment for late check ───────────────────────
     const assignment = await getAssignment(assignment_id);
-    if (!assignment) {
+    if (!assignment || !isLive(assignment)) {
       return res.status(404).json({ success: false, error: "Assignment not found" });
     }
 
@@ -1639,5 +1956,6 @@ router.post("/:id/unsubmit", submitLimit, guard.student(fromBody("student_uid"))
 
 // Let the process flush pending counter updates when it is asked to stop.
 router.flushPending = () => counter.flushAll();
+router.publishDue = publishDue;
 
 module.exports = router;

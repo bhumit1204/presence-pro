@@ -6,6 +6,7 @@ import {
   StudentShell, useFeed, refreshFeed, Skeleton, Empty, ErrorBox, StatePill, Pill, Attachments, FileIcon, Modal,
   subjectColor, assignmentState, dueLabel, fmtDateTime, fmtSize, toast, useNow,
 } from "./ui";
+import { KindPill, TagPill, kindOf } from "./workKind";
 
 const MAX_FILES = 10;
 const MAX_BYTES = 10 * 1024 * 1024;
@@ -160,7 +161,7 @@ export default function AssignmentDetail() {
                   {a.marks != null && <span>{a.marks} marks</span>}
                   <span style={{ color: overdue && !sub ? "#DC2626" : undefined }}>{sub && a.due_date ? `Due ${fmtDateTime(a.due_date)}` : dueLabel(a.due_date, now)}</span>
                   <span>Posted {fmtDateTime(a.created_at)}</span>
-                  {a.kind === "lab_work" && <Pill tone="purple">Lab work</Pill>}
+                  <KindPill a={a} long /><TagPill tags={feed.data?.tags} id={a.tag_id} />
                   {a.allow_late && <Pill tone="amber">Late submissions allowed</Pill>}
                 </div>
               </div>

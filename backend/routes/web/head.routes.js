@@ -29,10 +29,12 @@
  *   GET    /semesters?course_id=
  *   PUT    /semesters/:course_id/:semester          { start: "MM-DD", end: "MM-DD", also_semesters?: [3] }   (no year — repeats every year)
  *   GET    /subjects?course_id=&semester=
- *   POST   /subjects                                { course_id, subject_name, subject_code, semester, compulsary?, elective_group? }
+ *   POST   /subjects                                { course_id, subject_name, subject_code, semester, compulsary?, elective_group?, with_tutorial?, with_lab? }
+ *                                                   with_tutorial / with_lab tick the Tutorial and Lab boxes: the subject is created with them in one call.
+ *                                                   { type:"attach", parent_subject_id, with_tutorial?, with_lab? } adds a tutorial and/or lab to an existing subject in one call.
  *   PUT    /subjects/:id                            { subject_name?, subject_code?, semester?, compulsary?, elective_group? }
  *   DELETE /subjects/:id
- *   POST   /subjects/elective-group                 { course_id, semester, group, group_code?, subjects: [{ subject_name, subject_code? }, ...] }   one choice of n subjects
+ *   POST   /subjects/elective-group                 { course_id, semester, group, group_code?, with_tutorial?, with_lab?, subjects: [{ subject_name, subject_code?, with_tutorial?, with_lab? }, ...] }   one choice of n subjects
  *   POST   /elective-groups/rename                  { course_id, semester, from, to }
  *   GET    /subjects/:id/students                   enrolled students (+ for an elective: sibling options and students who have not chosen yet)
  *   POST   /subjects/:id/unenroll                   { student_ids }  elective only: the student chooses again
@@ -48,6 +50,7 @@
  *   POST   /timetable                               { course_id, subject_id, day, start_time, end_time, room?, teacher_id?, replaces?: [lectureId], force? }
  *   PUT    /timetable/:id                           { day?, start_time?, end_time?, room?, teacher_id?, force? }
  *   DELETE /timetable/:id                           (a lab split into batches is deleted as a whole)
+ *   POST   /timetable/generate/preview|apply, GET /timetable/generations, DELETE /timetable/generations/:id   (auto-generate a semester)
  *   GET    /timetable/batch-plan?course_id=&semester=&division_id=&count=2|3&cuts=   how the roll numbers split into lab batches
  *   POST   /timetable/batches                       { course_id, semester, division_id?, day, start_time, end_time, cuts?, batches: [{ subject_id, room?, teacher_id? }] }  one lab slot, 2 or 3 batches
  *   POST   /timetable/overrides                     one-date change: { course_id, kind: "modify"|"cancel"|"special", date, lecture_id?, changes?, special?, replaces?, note?, force? }
@@ -85,6 +88,7 @@ const { TTLCache } = require("../../utils/cache");
 const { queueConcurrent, rateLimit } = require("../../utils/limiter");
 const { isAlreadyExists } = require("../../utils/firestore");
 const labBatches = require("../../utils/batches");
+const subjT = require("../../utils/subjectTeachers");
 let sharedVerify = null;
 try { sharedVerify = require("../../middleware/auth").verifyToken; } catch { /* optional: falls back to admin.auth() */ }
 
@@ -345,7 +349,7 @@ const AREAS = [
   { key: "calendar",  label: "Academic Calendar" },
   { key: "reports",   label: "Student Reports" },
 ];
-const SUBJECT_TYPES = ["compulsory", "elective", "lab", "tutorial"];
+const SUBJECT_TYPES = ["compulsory", "elective", "lab", "tutorial", "attach"];
 const AREA_KEYS = new Set(AREAS.map((a) => a.key));
 const areaLabel = (k) => (AREAS.find((a) => a.key === k) || {}).label || k;
 const MAX_DELEGATES = 5;   // per course + area
@@ -431,9 +435,12 @@ function lecturePatch(l, subject, teacherName) {
   const ownTeacher = l.teacher_pinned === true || !!l.override_id;
   if (ownTeacher) {
     // teacher untouched
-  } else if (subject.teacher_assigned) {
-    if (l.teacher_id !== subject.teacher_assigned) p.teacher_id = subject.teacher_assigned;
-    if (teacherName && "teacher_name" in l && l.teacher_name !== teacherName) p.teacher_name = teacherName;
+  } else if (subjT.effectiveTeacher(subject, l.division_id)) {
+    const eff = subjT.effectiveTeacher(subject, l.division_id);
+    // teacherName is one name (the default teacher) or a { teacher_id: name } map
+    const nm = teacherName && typeof teacherName === "object" ? teacherName[eff] : (eff === subject.teacher_assigned ? teacherName : undefined);
+    if (l.teacher_id !== eff) p.teacher_id = eff;
+    if (nm && "teacher_name" in l && l.teacher_name !== nm) p.teacher_name = nm;
   } else if (subject.__unassigning) {
     // teacher removed on purpose: the slots stay in the timetable but belong to nobody
     if (l.teacher_id) p.teacher_id = null;
@@ -694,7 +701,7 @@ router.get("/teachers", wrap(async (req, res) => {
   const [teacherSnap, lectureSnap, subjectSnap] = await Promise.all([
     db.collection("teachers").where("aishe_code", "==", aishe_code).get(),
     db.collection("lectures").where("aishe_code", "==", aishe_code).select("teacher_id", "start_time", "end_time").get(),
-    db.collection("subjects").where("aishe_code", "==", aishe_code).select("teacher_assigned").get(),
+    db.collection("subjects").where("aishe_code", "==", aishe_code).select("teacher_assigned", "division_teachers").get(),
   ]);
 
   const lectureCount = {}, minutes = {}, subjectCount = {};
@@ -705,8 +712,7 @@ router.get("/teachers", wrap(async (req, res) => {
     minutes[l.teacher_id] = (minutes[l.teacher_id] || 0) + Math.max(0, toMin(l.end_time) - toMin(l.start_time));
   });
   subjectSnap.docs.forEach((d) => {
-    const t = d.data().teacher_assigned;
-    if (t) subjectCount[t] = (subjectCount[t] || 0) + 1;
+    subjT.allTeacherIds(d.data()).forEach((t) => { subjectCount[t] = (subjectCount[t] || 0) + 1; });
   });
 
   const teachers = teacherSnap.docs
@@ -885,7 +891,7 @@ router.get("/subjects", wrap(async (req, res) => {
     if (l.subject_id) (bySubject[l.subject_id] = bySubject[l.subject_id] || []).push(l);
   });
 
-  const teacherIds = new Set(subjects.map((s) => s.teacher_assigned).filter(Boolean));
+  const teacherIds = new Set(subjects.flatMap((s) => subjT.allTeacherIds(s)));
   subjects.forEach((s) => (bySubject[s.subject_id] || []).forEach((l) => l.teacher_id && teacherIds.add(l.teacher_id)));
   const teacherDocs = await getAllDocs([...teacherIds].map((id) => db.collection("teachers").doc(id)));
   const names = {};
@@ -895,7 +901,7 @@ router.get("/subjects", wrap(async (req, res) => {
   try {
     const ops = [];
     subjects.forEach((s) => {
-      ops.push(...lectureSyncOps(bySubject[s.subject_id] || [], s, names[s.teacher_assigned]));
+      ops.push(...lectureSyncOps(bySubject[s.subject_id] || [], s, names));
     });
     if (ops.length) await commitInBatches(ops);
   } catch (err) {
@@ -955,6 +961,7 @@ router.get("/subjects", wrap(async (req, res) => {
         student_count: enrolledCount[s.subject_id] || 0,
         teacher_assigned: s.teacher_assigned || null,
         teacher_name: s.teacher_assigned ? (names[s.teacher_assigned] || "Unknown") : null,
+        division_teachers: Object.fromEntries(Object.entries(s.division_teachers || {}).filter(([, t]) => t).map(([d, t]) => [d, { teacher_id: t, teacher_name: names[t] || "Unknown" }])),
         created_by_role: s.created_by_role || "institute",
         kind: s.kind || null,
         has_tutorial: s.has_tutorial === true,
@@ -978,6 +985,23 @@ router.post("/subjects", wrap(async (req, res) => {
   //   lab without a parent     a new lab subject with its own classroom
   const type = String(body.type || (body.compulsary === false ? "elective" : "compulsory"));
   if (!SUBJECT_TYPES.includes(type)) fail(400, `type must be one of ${SUBJECT_TYPES.join(", ")}`);
+  if (type === "attach") {
+    // Tutorial and/or Lab ticked for a subject that already exists: both are added in one call.
+    const wantT = body.with_tutorial === true, wantL = body.with_lab === true;
+    if (!wantT && !wantL) fail(400, "Tick Tutorial, Lab or both");
+    if (!body.parent_subject_id) fail(400, "Pick the subject to add them to");
+    const { ref: pref, subject: parent } = await loadHeadSubject(req, body.parent_subject_id);
+    if (parent.course_id !== course.course_id) fail(400, "That subject belongs to another course");
+    if (parent.kind === "lab") fail(400, "A lab subject can't have its own tutorial or lab. Pick the theory subject.");
+    const add = {};
+    if (wantT && parent.has_tutorial !== true) add.has_tutorial = true;
+    if (wantL && parent.has_lab !== true) add.has_lab = true;
+    if (!Object.keys(add).length) fail(409, `${parent.subject_name} already has ${wantT && wantL ? "a tutorial and a lab" : wantT ? "a tutorial" : "a lab"}`);
+    await pref.update({ ...add, updated_at: ts() });
+    dropProfileCaches();
+    await audit(req, "subject.add_extras", "subjects", parent.subject_id, { subject_code: parent.subject_code, ...add });
+    return res.status(201).json({ success: true, subject_id: parent.subject_id, linked: true, added: Object.keys(add) });
+  }
   if (type === "tutorial" || (type === "lab" && body.parent_subject_id)) {
     if (!body.parent_subject_id) fail(400, "Pick the subject this tutorial belongs to");
     const { ref: pref, subject: parent } = await loadHeadSubject(req, body.parent_subject_id);
@@ -1017,6 +1041,9 @@ router.post("/subjects", wrap(async (req, res) => {
     elective_group,
     elective_code,
     kind: type === "lab" ? "lab" : undefined,
+    // Tutorial / Lab boxes ticked together with Lecture: the theory subject is created with them (a lab-only subject has neither)
+    has_tutorial: type !== "lab" && body.with_tutorial === true ? true : undefined,
+    has_lab: type !== "lab" && body.with_lab === true ? true : undefined,
     teacher_assigned: null,
     department: req.head.department,
     created_by: req.head.teacher_id,
@@ -1194,7 +1221,9 @@ router.post("/subjects/elective-group", wrap(async (req, res) => {
     if (!subject_code && groupCode) subject_code = `${groupCode}-${i + 1}`;
     if (!subject_name) fail(400, `Subject ${i + 1}: enter a name`);
     if (!subject_code) fail(400, `Subject ${i + 1}: enter a subject code`);
-    return { subject_name, subject_code };
+    const wantT = it && it.with_tutorial !== undefined ? it.with_tutorial === true : body.with_tutorial === true;
+    const wantL = it && it.with_lab !== undefined ? it.with_lab === true : body.with_lab === true;
+    return { subject_name, subject_code, has_tutorial: wantT || undefined, has_lab: wantL || undefined };
   });
   const inBatch = new Set();
   rows.forEach((r) => {
@@ -1210,6 +1239,7 @@ router.post("/subjects/elective-group", wrap(async (req, res) => {
       subject_id: ref.id, aishe_code: req.head.aishe_code, course_id: course.course_id,
       subject_name: r.subject_name, subject_code: r.subject_code, semester: semLabel(n),
       compulsary: false, elective_group: group, elective_code: groupCode || undefined,
+      has_tutorial: r.has_tutorial, has_lab: r.has_lab,
       teacher_assigned: null, department: req.head.department,
       created_by: req.head.teacher_id, created_by_role: "head", created_at: ts(),
     })));
@@ -1349,38 +1379,61 @@ router.put("/subjects/:id/assign", wrap(async (req, res) => {
   const { ref, subject } = await loadHeadSubject(req, req.params.id);
   const body = req.body || {};
   const newId = body.teacher_id || null;
-  const oldId = subject.teacher_assigned || null;
+  // with division_id the change is for that division only; without it, for the whole subject
+  let division = null;
+  if (body.division_id) {
+    const dd = await db.collection("divisions").doc(String(body.division_id)).get();
+    if (!dd.exists || dd.data().course_id !== subject.course_id) fail(400, "That division is not in this subject's course");
+    if (parseSem(dd.data().semester) !== parseSem(subject.semester)) fail(400, "That division is not in this subject's semester");
+    division = { id: dd.id, name: dd.data().name };
+  }
+  const oldId = division ? (subject.division_teachers || {})[division.id] || null : (subject.teacher_assigned || null);
 
   const lecSnap = await db.collection("lectures").where("subject_id", "==", subject.subject_id).get();
-  const lectures = lecSnap.docs.map((d) => ({ ...d.data(), lecture_id: d.id }));
+  const allLectures = lecSnap.docs.map((d) => ({ ...d.data(), lecture_id: d.id }));
+  // only the slots this change can reach: one division's, or all of them
+  const lectures = division ? allLectures.filter((l) => l.division_id === division.id) : allLectures;
   // slots with their own teacher (pinned) or a change running today keep their teacher
   const movable = lectures.filter((l) => l.teacher_pinned !== true && !l.override_id);
 
+  // the subject as it will look after this change
+  const after = (teacherId) => {
+    if (division) {
+      const map = subjT.withDivisionTeacher(subject, division.id, teacherId);
+      return { ...subject, division_teachers: map, teacher_ids: subjT.idsFor(subject.teacher_assigned, map) };
+    }
+    return { ...subject, teacher_assigned: teacherId, teacher_ids: subjT.idsFor(teacherId, subject.division_teachers) };
+  };
+  const storeFields = (sub) => ({ teacher_assigned: sub.teacher_assigned || null, division_teachers: sub.division_teachers || {}, teacher_ids: sub.teacher_ids, updated_at: ts() });
+
   // ── Unassign ──
   if (!newId) {
-    // Timetable slots stay, but lose their teacher (so the old teacher no longer sees them)
-    const released = movable.filter((l) => l.teacher_id).length;
+    const sub = after(null);
+    // a division with no teacher of its own falls back to the subject's default teacher
+    const fallback = division ? subjT.effectiveTeacher(sub, division.id) : null;
+    const fbName = fallback ? (await activeTeacherOrFail(req, fallback).catch(() => null)) : null;
+    const released = fallback ? 0 : movable.filter((l) => l.teacher_id).length;
     await commitInBatches([
-      (b) => b.update(ref, { teacher_assigned: null, updated_at: ts() }),
-      ...lectureSyncOps(lectures, { ...subject, teacher_assigned: null, __unassigning: true }),
+      (b) => b.update(ref, storeFields(sub)),
+      ...lectureSyncOps(lectures, fallback ? sub : { ...sub, __unassigning: true }, fbName ? fbName.name : undefined),
     ]);
     await db.collection("allocation_history").add(clean({
-      aishe_code: req.head.aishe_code, subject_id: subject.subject_id,
+      aishe_code: req.head.aishe_code, subject_id: subject.subject_id, division_id: division ? division.id : undefined,
       from_teacher_id: oldId, to_teacher_id: null, changed_by: req.head.teacher_id, created_at: ts(),
     }));
-    await audit(req, "allocation.unassign", "subjects", subject.subject_id, { from_teacher_id: oldId, released_lectures: released });
-    return res.json({ success: true, teacher_assigned: null, released_lectures: released });
+    await audit(req, "allocation.unassign", "subjects", subject.subject_id, { from_teacher_id: oldId, division: division ? division.name : undefined, released_lectures: released });
+    return res.json({ success: true, teacher_assigned: sub.teacher_assigned || null, division_teachers: sub.division_teachers || {}, released_lectures: released });
   }
 
   // ── Assign / change ──
   const teacher = await activeTeacherOrFail(req, newId);
   if (newId === oldId) {
     // same teacher: still make sure the timetable slots agree with the subject
-    await commitInBatches(lectureSyncOps(lectures, subject, teacher.name));
-    return res.json({ success: true, teacher_assigned: newId, teacher_name: teacher.name, unchanged: true });
+    await commitInBatches(lectureSyncOps(lectures, subject, { [newId]: teacher.name }));
+    return res.json({ success: true, teacher_assigned: subject.teacher_assigned || null, division_teachers: subject.division_teachers || {}, teacher_name: teacher.name, unchanged: true });
   }
 
-  // Would the new teacher be double-booked by this subject's slots?
+  // Would the new teacher be double-booked by these slots?
   const conflicts = [];
   if (movable.length) {
     const theirs = await db.collection("lectures")
@@ -1404,22 +1457,24 @@ router.put("/subjects/:id/assign", wrap(async (req, res) => {
     fail(409, "This teacher has clashing lectures. Resolve them or confirm to assign anyway.", { conflicts });
   }
 
+  const sub = after(newId);
   const ops = [];
-  ops.push((b) => b.update(ref, { teacher_assigned: newId, updated_at: ts() }));
-  ops.push(...lectureSyncOps(lectures, { ...subject, teacher_assigned: newId }, teacher.name));
+  ops.push((b) => b.update(ref, storeFields(sub)));
+  ops.push(...lectureSyncOps(lectures, sub, { [newId]: teacher.name }));
   await commitInBatches(ops);
 
   await db.collection("allocation_history").add(clean({
-    aishe_code: req.head.aishe_code, subject_id: subject.subject_id,
+    aishe_code: req.head.aishe_code, subject_id: subject.subject_id, division_id: division ? division.id : undefined,
     from_teacher_id: oldId, to_teacher_id: newId, changed_by: req.head.teacher_id, created_at: ts(),
   }));
   await audit(req, "allocation.assign", "subjects", subject.subject_id, {
-    from_teacher_id: oldId, to_teacher_id: newId, moved_lectures: movable.length, forced: conflicts.length > 0,
+    from_teacher_id: oldId, to_teacher_id: newId, division: division ? division.name : undefined, moved_lectures: movable.length, forced: conflicts.length > 0,
   });
 
   return res.json({
     success: true,
-    teacher_assigned: newId,
+    teacher_assigned: sub.teacher_assigned || null,
+    division_teachers: sub.division_teachers || {},
     teacher_name: teacher.name,
     moved_lectures: movable.length,
     conflicts,
@@ -1894,7 +1949,7 @@ router.get("/timetable", wrap(async (req, res) => {
 
   // teacher names (lectures of real data only carry teacher_id)
   const tIds = new Set();
-  subjects.forEach((s) => s.teacher_assigned && tIds.add(s.teacher_assigned));
+  subjects.forEach((s) => subjT.allTeacherIds(s).forEach((t) => tIds.add(t)));
   lectures.forEach((l) => l.teacher_id && tIds.add(l.teacher_id));
   allOverrides.forEach((o) => {
     if (o.changes && o.changes.teacher_id) tIds.add(o.changes.teacher_id);
@@ -1943,6 +1998,7 @@ router.get("/timetable", wrap(async (req, res) => {
         has_lab: s.has_lab === true,
         teacher_assigned: s.teacher_assigned || null,
         teacher_name: s.teacher_assigned ? (names[s.teacher_assigned] || "") : "",
+        division_teachers: Object.fromEntries(Object.entries(s.division_teachers || {}).filter(([, t]) => t).map(([d, t]) => [d, { teacher_id: t, teacher_name: names[t] || "" }])),
       })),
     lectures: lectures.map((l) => ({ ...lectureView(l, names, subjectsById), pending_changes: changesFor[l.lecture_id] || 0 })),
     overrides: upcoming.map((o) => overrideView(o, lectureById, names)),
@@ -2000,8 +2056,9 @@ router.post("/timetable", wrap(async (req, res) => {
     subject = (await loadHeadSubject(req, body.subject_id)).subject;
     if (subject.course_id !== course.course_id) fail(400, "Subject does not belong to this course");
     kind = slotKind(subject, body.kind);
-    if (kind === "tutorial" && body.teacher_id && body.teacher_id !== subject.teacher_assigned) fail(400, "A tutorial is taught by the subject's own teacher");
-    const teacherId = body.teacher_id || subject.teacher_assigned;
+    const ownTeacher = subjT.effectiveTeacher(subject, body.division_id);
+    if (kind === "tutorial" && body.teacher_id && !subjT.teachesSubject(subject, body.teacher_id)) fail(400, "A tutorial is taught by the subject's own teacher");
+    const teacherId = body.teacher_id || ownTeacher;
     if (!teacherId) fail(400, "Allocate a teacher to this subject before scheduling it");
     teacher = await activeTeacherOrFail(req, teacherId);
     sem = parseSem(subject.semester);
@@ -2049,7 +2106,7 @@ router.post("/timetable", wrap(async (req, res) => {
     kind: kind || undefined,
     teacher_id: teacher ? teacher.id : undefined,
     teacher_name: teacher ? teacher.name : guest,
-    teacher_pinned: subject && teacher.id !== subject.teacher_assigned ? true : undefined,
+    teacher_pinned: subject && teacher.id !== subjT.effectiveTeacher(subject, body.division_id) ? true : undefined,
     division_id: division ? division.division_id : undefined,
     division_name: division ? division.name : undefined,
     day: slot.day,
@@ -2072,7 +2129,9 @@ router.post("/timetable", wrap(async (req, res) => {
 
 // One slot for a whole elective group: every subject of the group gets its own lecture at the same time,
 // each with its own room (and, optionally, its own teacher). Students only ever see the one they chose.
-//   { course_id, semester, group, day, start_time, end_time, division_id?, options: [{ subject_id, room?, teacher_id? }], force? }
+//   { course_id, semester, group, day, start_time, end_time, division_id?, kind?, options: [{ subject_id, room?, teacher_id?, kind? }], force? }
+// kind: "" / "lecture" (default), "tutorial" or "lab" for the whole slot; an option may carry its own kind. A tutorial or lab of an elective
+// is its own slot (shown separately in the timetable); attendance in it is still marked as lecture attendance.
 router.post("/timetable/group", wrap(async (req, res) => {
   const body = req.body || {};
   const course = courseOrFail(req, body.course_id);
@@ -2095,20 +2154,25 @@ router.post("/timetable/group", wrap(async (req, res) => {
     if (seen.has(o.subject_id)) fail(400, "A subject is listed twice");
     seen.add(o.subject_id);
   });
+  // "" (lecture) | "tutorial" | "lab" per option; the slot-wide kind is the default
+  const kindOfOption = (o) => slotKind(byId[o.subject_id], o.kind !== undefined && o.kind !== null && o.kind !== "" ? o.kind : body.kind);
+  const kinds = options.map(kindOfOption);
 
   const slot = readSlotFields(body);
   const division = await divisionOrFail(req, course, sem, body.division_id);
 
   // resolve each option's teacher + room
   const rows = [];
-  for (const o of options) {
+  for (const [oi, o] of options.entries()) {
     const subject = byId[o.subject_id];
-    const teacherId = o.teacher_id || subject.teacher_assigned;
+    const kind = kinds[oi];
+    if (kind === "tutorial" && o.teacher_id && !subjT.teachesSubject(subject, o.teacher_id)) fail(400, `${subject.subject_name}: a tutorial is taught by the subject's own teacher`);
+    const teacherId = o.teacher_id || subjT.effectiveTeacher(subject, division && division.division_id);
     if (!teacherId) fail(400, `${subject.subject_name}: allocate a teacher to this subject before scheduling it`);
     const teacher = await activeTeacherOrFail(req, teacherId);
-    const rr = await resolveRoom(req, o.room, "classroom");
+    const rr = await resolveRoom(req, o.room, roomTypeFor(kind));
     if (rr.foreign) fail(400, `${rr.name} belongs to ${rr.owner.course_abbr || "another course"}. Pick one of your own rooms for an elective slot, or set that subject's room later.`);
-    rows.push({ subject, teacher, room: rr.name, rr });
+    rows.push({ subject, teacher, room: rr.name, rr, kind });
   }
 
   // the options run at the same time, so they can't share a teacher or a room
@@ -2148,9 +2212,10 @@ router.post("/timetable/group", wrap(async (req, res) => {
       subject_id: r.subject.subject_id,
       subject_name: r.subject.subject_name || "",
       subject_code: r.subject.subject_code || "",
+      kind: r.kind || undefined,
       teacher_id: r.teacher.id,
       teacher_name: r.teacher.name,
-      teacher_pinned: r.teacher.id !== r.subject.teacher_assigned ? true : undefined,
+      teacher_pinned: r.teacher.id !== subjT.effectiveTeacher(r.subject, division && division.division_id) ? true : undefined,
       division_id: division ? division.division_id : undefined,
       division_name: division ? division.name : undefined,
       elective_group: group,
@@ -2166,8 +2231,363 @@ router.post("/timetable/group", wrap(async (req, res) => {
   });
   await commitInBatches(ops);
 
-  await audit(req, "timetable.create_group", "lectures", slot_id, { group, subjects: rows.map((r) => r.subject.subject_code), ...slot });
+  await audit(req, "timetable.create_group", "lectures", slot_id, { group, kind: rows.some((r) => r.kind) ? [...new Set(rows.map((r) => r.kind || "lecture"))].join("+") : "lecture", subjects: rows.map((r) => r.subject.subject_code), ...slot });
   return res.status(201).json({ success: true, slot_id, lecture_ids: ids, created: ids.length });
+}));
+
+// ─────────────────────────────────────────────────────────────────────────────
+// AUTO-GENERATE A SEMESTER'S TIMETABLE (one semester at a time, once per semester)
+//   POST   /timetable/generate/preview   { course_id, semester, grid, subjects:[{subject_id, lecture, tutorial, lab_sessions, lab_periods, teacher_id?}],
+//                                          groups:[{group, periods}], seed?, replace_existing? }   -> a proposal, nothing is saved yet
+//   POST   /timetable/generate/apply     { proposal_id }                                           -> writes the lectures
+//   GET    /timetable/generations?course_id=&semester=                                             -> runs that can still be undone
+//   DELETE /timetable/generations/:id                                                              -> removes that run (and restores what it replaced)
+// Uses only the course's own saved rooms; teachers and rooms already used by other semesters or courses are respected.
+// ─────────────────────────────────────────────────────────────────────────────
+const gen = require("../../utils/timetableGen");
+// the semester of a lecture: its own field, or its subject's (older documents have no semester)
+async function semesterLectures(course_id, sem) {
+  const subs = Object.fromEntries((await subjectsOfCourse(course_id)).map((x) => [x.subject_id, x]));
+  const snap = await db.collection("lectures").where("course_id", "==", course_id).get();
+  return snap.docs.map((d) => ({ ...d.data(), lecture_id: d.id })).filter((l) => {
+    const n = parseSem(l.semester);
+    return (n !== null ? n : parseSem((subs[l.subject_id] || {}).semester)) === sem;
+  });
+}
+const PROPOSAL_TTL_MS = 2 * 60 * 60 * 1000;
+
+function readGrid(raw) {
+  const g = raw || {};
+  const days = (Array.isArray(g.days) ? g.days : []).filter((d) => DAY_ORDER.includes(d));
+  if (!days.length) fail(400, "Pick at least one working day");
+  const start = normTime(g.start), end = normTime(g.end);
+  if (!start || !end || toMin(start) >= toMin(end)) fail(400, "The day must start before it ends (HH:MM)");
+  const slot = Number(g.slot_minutes);
+  if (!Number.isInteger(slot) || slot < 30 || slot > 180) fail(400, "A period is between 30 and 180 minutes");
+  const breaks = (Array.isArray(g.breaks) ? g.breaks : []).map((b) => ({ start: normTime(b && b.start), end: normTime(b && b.end) }));
+  breaks.forEach((b) => { if (!b.start || !b.end || toMin(b.start) >= toMin(b.end)) fail(400, "Each break needs a start and a later end"); });
+  const maxPer = g.max_per_day === undefined || g.max_per_day === "" ? null : Number(g.max_per_day);
+  if (maxPer !== null && (!Number.isInteger(maxPer) || maxPer < 1 || maxPer > 12)) fail(400, "Maximum periods a day must be between 1 and 12");
+  return { days: DAY_ORDER.filter((d) => days.includes(d)), start, end, slot_minutes: slot, breaks, max_per_day: maxPer };
+}
+const nInt = (v, lo, hi, label) => {
+  const n = v === undefined || v === null || v === "" ? 0 : Number(v);
+  if (!Number.isInteger(n) || n < lo || n > hi) fail(400, `${label} must be a whole number from ${lo} to ${hi}`);
+  return n;
+};
+
+// lectures of the whole college except `skipIds`, as busy intervals per teacher / room
+async function externalBusy(req, skipIds) {
+  const snap = await db.collection("lectures").where("aishe_code", "==", req.head.aishe_code).get();
+  const out = { teacher: {}, room: {} };
+  snap.docs.forEach((d) => {
+    if (skipIds.has(d.id)) return;
+    const l = d.data();
+    if (!DAY_ORDER.includes(l.day) || !l.start_time || !l.end_time) return;
+    const iv = { day: l.day, s: toMin(l.start_time), e: toMin(l.end_time) };
+    if (l.teacher_id) (out.teacher[l.teacher_id] = out.teacher[l.teacher_id] || []).push(iv);
+    if (l.room) (out.room[up(l.room)] = out.room[up(l.room)] || []).push(iv);
+  });
+  return out;
+}
+
+async function lecturesWithHistory(ids) {
+  const used = new Set();
+  for (const part of chunks(ids, CHUNK)) {
+    const snap = await db.collection("lecture_sessions").where("lecture_id", "in", part).get();
+    snap.docs.forEach((d) => used.add(d.data().lecture_id));
+  }
+  return used;
+}
+
+router.post("/timetable/generate/preview", wrap(async (req, res) => {
+  const body = req.body || {};
+  const course = courseOrFail(req, body.course_id);
+  const sem = parseSem(body.semester);
+  if (sem === null) fail(400, "semester is required");
+  const grid = readGrid(body.grid);
+
+  // the semester's current timetable
+  const existing = await semesterLectures(course.course_id, sem);
+  if (existing.length) {
+    const hist = await lecturesWithHistory(existing.map((l) => l.lecture_id));
+    if (hist.size) fail(409, `Semester ${sem} already has attendance recorded, so its timetable can't be regenerated. Edit it by hand instead.`);
+    if (body.replace_existing !== true) fail(409, `Semester ${sem} already has ${existing.length} timetable slot${existing.length === 1 ? "" : "s"}. Confirm to replace them.`, { existing: existing.length });
+  }
+
+  const allSubjects = (await subjectsOfCourse(course.course_id)).filter((s) => parseSem(s.semester) === sem);
+  const byId = Object.fromEntries(allSubjects.map((s) => [s.subject_id, s]));
+  const rows = Array.isArray(body.subjects) ? body.subjects : [];
+  const seenSub = new Set();
+  const teacherIds = new Set();
+  const compulsory = [];
+  const warnings = [];
+
+  // students and divisions of this semester
+  const students = (await studentsOfCourse(req.head.aishe_code, course)).filter((st) => isActiveStudent(st) && parseSem(st.semester) === sem);
+  const divs = (await divisionsOfCourse(course.course_id)).filter((d) => parseSem(d.semester) === sem)
+    .sort((a, b) => String(a.name).localeCompare(String(b.name), undefined, { numeric: true }));
+  const divisions = divs.length
+    ? divs.map((d) => ({ id: d.division_id, name: d.name, size: students.filter((st) => st.division_id === d.division_id).length }))
+    : [{ id: null, name: "", size: students.length }];
+  const divRooms = body.division_rooms && typeof body.division_rooms === "object" ? body.division_rooms : {};
+  const WHEN = ["any", "morning", "afternoon"];
+  const whenOf = (v, label) => { const w = v === undefined || v === null || v === "" ? "any" : String(v); if (!WHEN.includes(w)) fail(400, `${label}: pick any time, morning or afternoon`); return w === "any" ? undefined : w; };
+  for (const r of rows) {
+    const s = r && byId[r.subject_id];
+    if (!s) fail(400, "A subject in the list is not in this semester");
+    if (s.compulsary === false) fail(400, `${s.subject_name} is an elective: set its hours under the elective group`);
+    if (seenSub.has(s.subject_id)) fail(400, "A subject is listed twice");
+    seenSub.add(s.subject_id);
+    const isLabOnly = s.kind === "lab";
+    const lecture = nInt(r.lecture, 0, 12, `${s.subject_name}: lectures a week`);
+    const lecturePeriods = lecture ? nInt(r.lecture_periods || 1, 1, 4, `${s.subject_name}: periods in one lecture`) : 1;
+    const when = whenOf(r.when, s.subject_name);
+    const tutorial = nInt(r.tutorial, 0, 6, `${s.subject_name}: tutorial periods a week`);
+    const labSessions = nInt(r.lab_sessions, 0, 4, `${s.subject_name}: lab sessions a week`);
+    const labPeriods = labSessions ? nInt(r.lab_periods || 1, 1, 3, `${s.subject_name}: lab length`) : 0;
+    if (isLabOnly && (lecture || tutorial)) fail(400, `${s.subject_name} is a lab subject: it has lab sessions only`);
+    if (tutorial && s.has_tutorial !== true) fail(400, `${s.subject_name} has no tutorial yet. Add one from Subjects & Faculty first.`);
+    if (labSessions && !(isLabOnly || s.has_lab === true)) fail(400, `${s.subject_name} has no lab yet. Add one from Subjects & Faculty first.`);
+    if (!lecture && !tutorial && !labSessions) continue;
+    // a teacher for every division: the subject's own for that division, or its default
+    const teachers = {};
+    const noTeacher = [];
+    divisions.forEach((dv) => {
+      const t = r.teacher_id || subjT.effectiveTeacher(s, dv.id);
+      if (t) { teachers[String(dv.id)] = t; teacherIds.add(t); } else noTeacher.push(dv.name || "this semester");
+    });
+    if (noTeacher.length) { warnings.push(`${s.subject_name} has no teacher for ${noTeacher.length === divisions.length ? "any division" : "division " + noTeacher.join(", ")}, so it was left out. Pick teachers in Subjects & Faculty and create the preview again.`); continue; }
+    const teacher_id = r.teacher_id || s.teacher_assigned || teachers[String(divisions[0].id)];
+    compulsory.push({ s, lecture, lecturePeriods, tutorial, labSessions, labPeriods, when, teacher_id, teachers, pinned: !!r.teacher_id && r.teacher_id !== s.teacher_assigned });
+  }
+  if (!compulsory.length && !(Array.isArray(body.groups) && body.groups.length) && !(Array.isArray(body.common) && body.common.length)) fail(400, "Give at least one subject some hours");
+
+  // elective groups
+  const groups = [];
+  for (const g of (Array.isArray(body.groups) ? body.groups : [])) {
+    const name = cleanGroup(g && g.group);
+    const periods = nInt(g && g.periods, 0, 12, `Elective group ${name}: periods a week`);
+    const tutorial = nInt(g && g.tutorial, 0, 6, `Elective group ${name}: tutorial periods a week`);
+    const labSessions = nInt(g && g.lab_sessions, 0, 4, `Elective group ${name}: lab sessions a week`);
+    const labPeriods = labSessions ? nInt((g && g.lab_periods) || 1, 1, 4, `Elective group ${name}: lab length`) : 0;
+    const lecturePeriods = periods ? nInt((g && g.lecture_periods) || 1, 1, 4, `Elective group ${name}: periods in one lecture`) : 1;
+    const gwhen = whenOf(g && g.when, `Elective group ${name}`);
+    if (!periods && !tutorial && !labSessions) continue;
+    const opts = allSubjects.filter((x) => x.compulsary === false && groupKey(x) === name);
+    if (!opts.length) fail(400, `Elective group ${name} has no subjects in this semester`);
+    const options = [];
+    for (const o of opts) {
+      if (!o.teacher_assigned) { warnings.push(`${o.subject_name} (elective ${name}) has no teacher yet, so it was left out of the group.`); continue; }
+      teacherIds.add(o.teacher_assigned);
+      options.push({ id: o.subject_id, name: o.subject_name, code: o.subject_code || "", teacher_id: o.teacher_assigned, has_tutorial: o.has_tutorial === true, has_lab: o.has_lab === true,
+        students: students.filter((st) => (st.enrolled_subjects || []).includes(o.subject_id)).length });
+    }
+    if (tutorial && !options.some((o) => o.has_tutorial)) fail(400, `None of the subjects in elective group ${name} has a tutorial. Add one from Subjects & Faculty, or set its tutorial periods to 0.`);
+    if (labSessions && !options.some((o) => o.has_lab)) fail(400, `None of the subjects in elective group ${name} has a lab. Add one from Subjects & Faculty, or set its lab sessions to 0.`);
+    if (options.length) groups.push({ group: name, periods, lecture_periods: lecturePeriods, tutorial, lab: labSessions ? { sessions: labSessions, periods: labPeriods } : undefined, when: gwhen, options });
+  }
+
+  // teachers
+  const tDocs = await getAllDocs([...teacherIds].map((id) => db.collection("teachers").doc(id)));
+  const tName = {};
+  tDocs.forEach((d) => { if (d.exists && d.data().is_active !== false) tName[d.id] = personName(d.data()); });
+  const missingTeacher = [...teacherIds].filter((id) => !tName[id]);
+  if (missingTeacher.length) fail(400, "A chosen teacher was not found or is inactive");
+
+  // sessions every division attends together with no teacher or room (a research project, a seminar hour...)
+  const common = [];
+  (Array.isArray(body.common) ? body.common : []).forEach((c, ci) => {
+    const title = String((c && c.title) || "").trim();
+    if (!title) return;
+    if (title.length > 80) fail(400, "A common session title can be at most 80 characters");
+    const sessions = nInt(c.sessions, 0, 7, `${title}: sessions a week`);
+    if (!sessions) return;
+    const periods = nInt(c.periods || 1, 1, 6, `${title}: periods in one session`);
+    const cdays = Array.isArray(c.days) ? c.days.filter((d) => grid.days.includes(d)) : [];
+    if (sessions > (cdays.length || grid.days.length)) fail(400, `${title}: ${sessions} sessions need ${sessions} different days, but only ${cdays.length || grid.days.length} are open to it`);
+    common.push({ id: "c" + ci, title, sessions, periods, days: cdays.length ? cdays : undefined, when: whenOf(c.when, title), teacher_name: String(c.teacher_name || "").trim().slice(0, 60) });
+  });
+
+  // rooms: this course's own saved rooms only
+  const allRooms = await loadRooms(req);
+  const own = allRooms.filter((r) => r.course_id === course.course_id);
+  const rooms = {
+    saved: allRooms.length > 0,
+    classrooms: own.filter((r) => r.type !== "lab").map((r) => ({ name: r.name, capacity: Number(r.capacity) || 0 })),
+    labs: own.filter((r) => r.type === "lab").map((r) => ({ name: r.name, capacity: Number(r.capacity) || 0 })),
+  };
+  if (rooms.saved && !rooms.classrooms.length) warnings.push("This course has no classrooms saved. Add them with the Rooms button, or lectures can't get a room.");
+  if (rooms.saved && compulsory.some((c) => c.labSessions) && !rooms.labs.length) warnings.push("This course has no lab rooms saved, so labs can't be placed.");
+
+  // each division's own classroom
+  if (rooms.saved) {
+    divisions.forEach((dv) => {
+      const want = String(divRooms[String(dv.id)] || "").trim();
+      if (!want) return;
+      const hit = rooms.classrooms.find((r) => up(r.name) === up(want));
+      if (!hit) fail(400, `${dv.name ? "Division " + dv.name : "The class"}: "${want}" is not one of this course's saved classrooms`);
+      dv.room = hit.name;
+    });
+  }
+
+  const external = await externalBusy(req, new Set(existing.map((l) => l.lecture_id)));
+  const seed = Number.isInteger(Number(body.seed)) ? Number(body.seed) : Math.floor(Math.random() * 1e6);
+  const out = gen.solve({
+    grid: { ...grid, max_per_day: grid.max_per_day || undefined },
+    divisions,
+    subjects: compulsory.map((c) => ({
+      id: c.s.subject_id, name: c.s.subject_name, code: c.s.subject_code || "", teacher_id: c.teacher_id, teacher_name: tName[c.teacher_id] || "",
+      teachers: Object.fromEntries(Object.entries(c.teachers).map(([d, t]) => [d, { id: t, name: tName[t] || "" }])),
+      lecture: c.lecture, lecture_periods: c.lecturePeriods, tutorial: c.tutorial, when: c.when,
+      lab: c.labSessions ? { sessions: c.labSessions, periods: c.labPeriods } : undefined,
+    })),
+    common,
+    groups: groups.map((g) => ({ ...g, options: g.options.map((o) => ({ ...o, teacher_name: tName[o.teacher_id] || "" })) })),
+    rooms, external, seed,
+  });
+
+  const proposalRef = db.collection("timetable_proposals").doc();
+  await proposalRef.set(clean({
+    proposal_id: proposalRef.id, aishe_code: req.head.aishe_code, course_id: course.course_id, semester: sem, created_by: req.head.teacher_id,
+    created_at: ts(), expires_ms: Date.now() + PROPOSAL_TTL_MS, applied: false, seed,
+    items: JSON.parse(JSON.stringify(out.items)), replace_ids: existing.map((l) => l.lecture_id), pinned: compulsory.filter((c) => c.pinned).map((c) => c.s.subject_id),
+    divisions: divisions.map((d) => ({ id: d.id, name: d.name })), stats: JSON.parse(JSON.stringify(out.stats)),
+  }));
+
+  const subName = Object.fromEntries(allSubjects.map((s) => [s.subject_id, { name: s.subject_name, code: s.subject_code || "" }]));
+  const divName = Object.fromEntries(divisions.map((d) => [String(d.id), d.name]));
+  return res.json({
+    success: true, proposal_id: proposalRef.id, seed, complete: out.stats.complete, stats: out.stats,
+    warnings: [...warnings, ...out.warnings], unplaced: out.unplaced, replaces: existing.length,
+    divisions: divisions.map((d) => ({ division_id: d.id, name: d.name, size: d.size, room: d.room || "" })),
+    items: out.items.map((it) => ({
+      ...it, subject_name: it.type === "common" ? it.title : (subName[it.subject_id] || {}).name || "", subject_code: (subName[it.subject_id] || {}).code || "",
+      teacher_name: tName[it.teacher_id] || "", division_name: it.division_id ? divName[String(it.division_id)] || "" : "",
+      batch: it.batch_no ? `B${it.batch_no}` : "",
+    })),
+  });
+}));
+
+router.post("/timetable/generate/apply", wrap(async (req, res) => {
+  const snap = await db.collection("timetable_proposals").doc(String((req.body || {}).proposal_id || "_")).get();
+  if (!snap.exists) fail(404, "This preview was not found. Generate again.");
+  const p = snap.data();
+  const course = courseOrFail(req, p.course_id);
+  if (p.aishe_code !== req.head.aishe_code) fail(403, "Not your preview");
+  if (p.applied) fail(409, "This preview was already saved");
+  if (Date.now() > p.expires_ms) fail(409, "This preview has expired. Generate again.");
+  const sem = parseSem(p.semester);
+
+  // is the world still the one the preview was made in?
+  const existing = await semesterLectures(course.course_id, sem);
+  const sameSet = existing.length === p.replace_ids.length && existing.every((l) => p.replace_ids.includes(l.lecture_id));
+  if (!sameSet) fail(409, "The semester's timetable changed since the preview. Generate again.");
+  if (existing.length && (await lecturesWithHistory(existing.map((l) => l.lecture_id))).size) fail(409, "Attendance has been recorded for this semester, so the timetable can't be replaced.");
+  const external = await externalBusy(req, new Set(p.replace_ids));
+  const hit = (list, it) => (list || []).some((b) => b.day === it.day && overlaps(toMin(it.start_time), toMin(it.end_time), b.s, b.e));
+  const stale = p.items.find((it) => (it.teacher_id && hit(external.teacher[it.teacher_id], it)) || (it.room && hit(external.room[up(it.room)], it)));
+  if (stale) fail(409, "A teacher or room was booked elsewhere since the preview. Generate again.");
+
+  const subs = await subjectsOfCourse(course.course_id);
+  const subById = Object.fromEntries(subs.map((s) => [s.subject_id, s]));
+  const tIds = [...new Set(p.items.map((i) => i.teacher_id).filter(Boolean))];
+  const tName = {};
+  (await getAllDocs(tIds.map((id) => db.collection("teachers").doc(id)))).forEach((d) => { if (d.exists) tName[d.id] = personName(d.data()); });
+  const divName = Object.fromEntries(p.divisions.map((d) => [String(d.id), d.name]));
+
+  // roll-number ranges for the lab batches of each division
+  const plans = {};
+  const students = (await studentsOfCourse(req.head.aishe_code, course)).filter((st) => isActiveStudent(st) && parseSem(st.semester) === sem);
+  for (const dv of p.divisions) {
+    const n = Math.max(0, ...p.items.filter((i) => i.type === "lab" && String(i.division_id) === String(dv.id)).map((i) => i.batch_of || 1));
+    if (n > 1) {
+      const pool = students.filter((st) => !dv.id || st.division_id === dv.id);
+      const plan = labBatches.planBatches(pool.map(labBatches.rollOf), n, null);
+      if (!plan.ok) fail(400, `${dv.name ? "Division " + dv.name : "This semester"}: ${plan.error}`);
+      plans[String(dv.id)] = plan.batches;
+    }
+  }
+
+  const gen_id = db.collection("timetable_generations").doc().id;
+  const slotIds = {};
+  const slotOf = (k) => (slotIds[k] = slotIds[k] || db.collection("lectures").doc().id);
+  const ids = [];
+  const ops = [];
+  existing.forEach((l) => ops.push((b) => b.delete(db.collection("lectures").doc(l.lecture_id))));
+  p.items.forEach((it) => {
+    if (it.type === "common") {
+      // a session for everyone with no subject, teacher or room
+      const cref = db.collection("lectures").doc();
+      ids.push(cref.id);
+      ops.push((b) => b.set(cref, clean({
+        lecture_id: cref.id, aishe_code: req.head.aishe_code, course_id: course.course_id, semester: semLabel(sem),
+        subject_name: it.title, subject_code: "", custom: true, teacher_name: it.teacher_name || "",
+        division_id: it.division_id || undefined, division_name: it.division_id ? divName[String(it.division_id)] || undefined : undefined,
+        day: it.day, start_time: it.start_time, end_time: it.end_time, room: "",
+        department: req.head.department, created_by: req.head.teacher_id, created_at: ts(), generated: true, gen_id,
+      })));
+      return;
+    }
+    const s = subById[it.subject_id];
+    if (!s) return;
+    const ref = db.collection("lectures").doc();
+    ids.push(ref.id);
+    const dvKey = String(it.division_id);
+    const pb = it.batch_no && plans[dvKey] ? plans[dvKey][it.batch_no - 1] : null;
+    ops.push((b) => b.set(ref, clean({
+      lecture_id: ref.id, aishe_code: req.head.aishe_code, course_id: course.course_id,
+      semester: s.semester || semLabel(sem), subject_id: s.subject_id, subject_name: s.subject_name || "", subject_code: s.subject_code || "",
+      kind: it.type === "lab" || it.kind === "lab" ? "lab" : it.type === "tutorial" || it.kind === "tutorial" ? "tutorial" : undefined,
+      teacher_id: it.teacher_id, teacher_name: tName[it.teacher_id] || "",
+      teacher_pinned: it.teacher_id && it.teacher_id !== subjT.effectiveTeacher(s, it.division_id) ? true : undefined,
+      division_id: it.division_id || undefined, division_name: it.division_id ? divName[dvKey] || undefined : undefined,
+      elective_group: it.type === "elective" ? it.group : undefined,
+      slot_id: it.type === "elective" || pb ? slotOf(it.slot_key) : undefined,
+      batch: pb ? pb.name : undefined, batch_no: pb ? pb.batch_no : undefined, batch_of: pb ? it.batch_of : undefined,
+      batch_after: pb ? pb.after : undefined, batch_upto: pb ? pb.upto : undefined,
+      day: it.day, start_time: it.start_time, end_time: it.end_time, room: it.room || "",
+      department: req.head.department, created_by: req.head.teacher_id, created_at: ts(),
+      generated: true, gen_id,
+    })));
+  });
+  ops.push((b) => b.set(db.collection("timetable_generations").doc(gen_id), clean({
+    gen_id, aishe_code: req.head.aishe_code, course_id: course.course_id, semester: sem, created_by: req.head.teacher_id,
+    created_by_name: personName(req.head.teacher), created_at: ts(), lecture_ids: ids, replaced: existing,
+    replaced_count: existing.length, undone: false,
+  })));
+  ops.push((b) => b.update(snap.ref, { applied: true, gen_id }));
+  await commitInBatches(ops);
+  for (const l of existing) await cancelRoomRequests(l.lecture_id, "The timetable was regenerated");
+  await audit(req, "timetable.generate", "timetable_generations", gen_id, { semester: sem, lectures: ids.length, replaced: existing.length });
+  return res.status(201).json({ success: true, gen_id, created: ids.length, replaced: existing.length });
+}));
+
+router.get("/timetable/generations", wrap(async (req, res) => {
+  const course = courseOrFail(req, req.query.course_id);
+  const sem = parseSem(req.query.semester);
+  const snap = await db.collection("timetable_generations").where("course_id", "==", course.course_id).get();
+  const rows = snap.docs.map((d) => d.data()).filter((g) => !g.undone && (sem === null || g.semester === sem))
+    .sort((a, b) => String(toISO(b.created_at) || "").localeCompare(String(toISO(a.created_at) || ""))).slice(0, 5);
+  return res.json({ success: true, generations: rows.map((g) => ({ gen_id: g.gen_id, semester: g.semester, created_by: g.created_by_name || "", created_at: toISO(g.created_at), lectures: (g.lecture_ids || []).length, replaced: g.replaced_count || 0 })) });
+}));
+
+router.delete("/timetable/generations/:id", wrap(async (req, res) => {
+  const ref = db.collection("timetable_generations").doc(String(req.params.id));
+  const snap = await ref.get();
+  if (!snap.exists) fail(404, "That run was not found");
+  const g = snap.data();
+  courseOrFail(req, g.course_id);
+  if (g.undone) fail(409, "That run was already undone");
+  const alive = [];
+  for (const part of chunks(g.lecture_ids || [], CHUNK)) (await getAllDocs(part.map((id) => db.collection("lectures").doc(id)))).forEach((d) => { if (d.exists) alive.push(d.id); });
+  if (alive.length && (await lecturesWithHistory(alive)).size) fail(409, "Attendance has already been recorded on this timetable, so it can't be undone.");
+  const ops = alive.map((id) => (b) => b.delete(db.collection("lectures").doc(id)));
+  (g.replaced || []).forEach((l) => ops.push((b) => b.set(db.collection("lectures").doc(l.lecture_id), l)));
+  ops.push((b) => b.update(ref, { undone: true, undone_at: ts() }));
+  await commitInBatches(ops);
+  await audit(req, "timetable.generate.undo", "timetable_generations", g.gen_id, { removed: alive.length, restored: (g.replaced || []).length });
+  return res.json({ success: true, removed: alive.length, restored: (g.replaced || []).length });
 }));
 
 // ── Lab batches ──────────────────────────────────────────────────────────────
@@ -2237,7 +2657,7 @@ router.post("/timetable/batches", wrap(async (req, res) => {
     if (parseSem(subject.semester) !== sem) fail(400, `${label}: ${subject.subject_name} is not in semester ${sem}`);
     if (subject.compulsary === false) fail(400, `${label}: batches are not available for elective subjects`);
     slotKind(subject, "lab");                                   // a lab subject, or a subject that has a lab
-    const teacherId = o.teacher_id || subject.teacher_assigned;
+    const teacherId = o.teacher_id || subjT.effectiveTeacher(subject, division && division.division_id);
     if (!teacherId) fail(400, `${label}: allocate a teacher to ${subject.subject_name} before scheduling it`);
     const teacher = await activeTeacherOrFail(req, teacherId);
     const rr = await resolveRoom(req, o.room, "lab");
@@ -2298,7 +2718,7 @@ router.post("/timetable/batches", wrap(async (req, res) => {
       kind: "lab",
       teacher_id: r.teacher.id,
       teacher_name: r.teacher.name,
-      teacher_pinned: r.teacher.id !== r.subject.teacher_assigned ? true : undefined,
+      teacher_pinned: r.teacher.id !== subjT.effectiveTeacher(r.subject, division && division.division_id) ? true : undefined,
       division_id: division ? division.division_id : undefined,
       division_name: division ? division.name : undefined,
       slot_id,
@@ -2337,7 +2757,7 @@ router.put("/timetable/:id", wrap(async (req, res) => {
     const sd = await db.collection("subjects").doc(lecture.subject_id).get();
     if (sd.exists) {
       if (sem === null) sem = parseSem(sd.data().semester);
-      subjectTeacher = sd.data().teacher_assigned || null;
+      subjectTeacher = subjT.effectiveTeacher(sd.data(), lecture.division_id);
     }
   }
   if (body.teacher_id !== undefined) {
@@ -2549,7 +2969,7 @@ router.post("/timetable/overrides", wrap(async (req, res) => {
       if (subject.course_id !== course.course_id) fail(400, "Subject does not belong to this course");
       sem = parseSem(subject.semester);
       if (sem === null) fail(400, "This subject has no valid semester");
-      const tId = sp.teacher_id || subject.teacher_assigned;
+      const tId = sp.teacher_id || subjT.effectiveTeacher(subject, sp.division_id || body.division_id);
       if (!tId) fail(400, "Pick a teacher for the special session");
       teacher = await activeTeacherOrFail(req, tId);
     } else {
@@ -3275,7 +3695,7 @@ router.get("/students/:id/report", reportLimit, reportGate, wrap(async (req, res
   const subjectDocs = await getAllDocs(subjectIds.map((id) => db.collection("subjects").doc(id)));
   const subjects = subjectDocs.filter((d) => d.exists).map((d) => ({ ...d.data(), subject_id: d.id }));
 
-  const teacherIds = [...new Set(subjects.map((x) => x.teacher_assigned).filter(Boolean))];
+  const teacherIds = [...new Set(subjects.map((x) => subjT.effectiveTeacher(x, s.division_id)).filter(Boolean))];
   const teacherDocs = await getAllDocs(teacherIds.map((id) => db.collection("teachers").doc(id)));
   const tNames = {};
   teacherDocs.forEach((d) => { if (d.exists) tNames[d.id] = personName(d.data()); });
@@ -3302,7 +3722,7 @@ router.get("/students/:id/report", reportLimit, reportGate, wrap(async (req, res
       subject_id: subj.subject_id,
       subject_name: subj.subject_name || "",
       subject_code: subj.subject_code || "",
-      teacher_name: subj.teacher_assigned ? (tNames[subj.teacher_assigned] || "Unknown") : null,
+      teacher_name: subjT.effectiveTeacher(subj, s.division_id) ? (tNames[subjT.effectiveTeacher(subj, s.division_id)] || "Unknown") : null,
       total_lectures: a.total,
       attended: Math.min(attended, a.total),
       attendance_pct: pct,
@@ -3360,6 +3780,7 @@ async function subjectActivity(subject_id, from, to) {
 
   const aSnap = await db.collection("assignments").where("subject_id", "==", subject_id).get();
   const assignments = aSnap.docs.map((d) => ({ ...d.data(), assignment_id: d.data().assignment_id || d.id }))
+    .filter((a) => require("../../utils/assignmentState").isLive(a))
     .filter((a) => inRange(dateOfIso(a.due_date), from, to));
   const asgSubs = {};    // assignment_id → uid → submission
   for (const ch of chunks(assignments.map((a) => a.assignment_id), CHUNK)) {
@@ -4035,4 +4456,4 @@ router.get("/rollover/preview", wrap(async (req, res) => {
   return res.json({ success: true, mode: rollover.mode(), preview });
 }));
 
-module.exports = router;
+module.exports = router;

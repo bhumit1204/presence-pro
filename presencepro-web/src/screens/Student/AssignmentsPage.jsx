@@ -5,6 +5,7 @@ import {
   StudentShell, PageHeader, useFeed, Tabs, Skeleton, Empty, ErrorBox, StatePill, SubjectDot, Pill,
   assignmentState, isOpenWork, dueLabel, fmtDate, useNow,
 } from "./ui";
+import { KindFilter, KindPill, TagFilter, TagPill, applyTag, groupByTag, kindOf } from "./workKind";
 
 export default function AssignmentsPage() {
   const nav = useNavigate();
@@ -13,12 +14,15 @@ export default function AssignmentsPage() {
   const [tab, setTab] = useState("all");
   const [subject, setSubject] = useState("all");
   const [q, setQ] = useState("");
+  const [kind, setKind] = useState("all");
+  const [tagSel, setTagSel] = useState("all");
 
   const subjects = feed.data?.subjects || [];
+  const tags = (feed.data?.tags || []).filter((t) => subject === "all" || t.subject_id === subject);
   const all = feed.data?.assignments || [];
 
   const decorated = useMemo(() => all.map((a) => ({ a, st: assignmentState(a, now) })), [all, now]);
-  const inSubject = decorated.filter(({ a }) => (subject === "all" || a.subject_id === subject) && (!q || a.title.toLowerCase().includes(q.toLowerCase())));
+  const inSubject = decorated.filter(({ a }) => (subject === "all" || a.subject_id === subject) && (kind === "all" || kindOf(a).key === kind) && (tagSel === "all" || (tagSel === "none" ? !a.tag_id : a.tag_id === tagSel)) && (!q || a.title.toLowerCase().includes(q.toLowerCase())));
 
   const buckets = {
     todo: inSubject.filter(({ st }) => isOpenWork(st)).sort((x, y) => new Date(x.a.due_date || 8e15) - new Date(y.a.due_date || 8e15)),
@@ -58,6 +62,9 @@ export default function AssignmentsPage() {
         <input className="st-input" style={{ maxWidth: 240 }} placeholder="Search assignments" value={q} onChange={(e) => setQ(e.target.value)} />
       </div>
 
+      <TagFilter tags={tags} items={all.filter((a) => subject === "all" || a.subject_id === subject)} value={tagSel} onChange={setTagSel} />
+      <KindFilter items={all.filter((a) => subject === "all" || a.subject_id === subject)} value={kind} onChange={setKind} />
+
       {feed.loading ? <Skeleton rows={5} /> : list.length === 0 ? (
         <Empty
           icon={tab === "todo" ? "🎉" : "📭"}
@@ -65,16 +72,19 @@ export default function AssignmentsPage() {
           text={tab === "todo" ? "No pending assignments in this view." : "Assignments in this state will appear here."}
         />
       ) : (
+        groupByTag(list.map((x) => ({ ...x, tag_id: x.a.tag_id })), feed.data?.tags).map((g) => (
+        <section key={g.key}>
+          {!!g.label && <div className="st-section-head"><h2 className="st-h2">🏷 {g.label} · {g.items.length}</h2></div>}
         <div className="st-card st-card--flat">
-          {list.map(({ a, st }) => (
+          {g.items.map(({ a, st }) => (
             <button key={a.assignment_id} className="st-row" onClick={() => nav(`/dashboard/student/assignments/${a.assignment_id}`)}>
-              <span className="st-row-icon" style={{ background: "#6B7280" }}>📝</span>
+              <span className="st-row-icon" style={{ background: "#6B7280" }}>{kindOf(a).icon}</span>
               <span className="st-row-body">
                 <div className="st-row-title">{a.title}</div>
                 <div className="st-row-meta">
                   <SubjectDot id={a.subject_id} size={8} /> <span>{a.subject_name}</span>
                   {a.marks != null && <span>· {a.marks} marks</span>}
-                  {a.kind === "lab_work" && <Pill tone="purple">Lab work</Pill>}
+                  <KindPill a={a} /><TagPill tags={feed.data?.tags} id={a.tag_id} />
                 </div>
               </span>
               <span className="st-row-end">
@@ -90,6 +100,8 @@ export default function AssignmentsPage() {
             </button>
           ))}
         </div>
+        </section>
+        ))
       )}
     </StudentShell>
   );

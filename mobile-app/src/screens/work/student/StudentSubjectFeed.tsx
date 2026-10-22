@@ -4,14 +4,14 @@ import { Ionicons } from "@expo/vector-icons";
 import { useFocusEffect, useNavigation, useRoute } from "@react-navigation/native";
 import { auth } from "../../../services/firebase";
 import { Banner, Button, Card, Chip, EmptyState, Header, IconBadge, R, SP, Screen, SectionLabel, T, Tone, font } from "../../../components/ui";
-import { ItemCard, ResourceList, api, fmtDateTime, fmtDay, isPastDue, isPinActive, openUrl, ts } from "../WorkShared";
+import { ItemCard, KIND_ICON, KIND_SHORT, KIND_TONE, KindFilter, ResourceList, TagFilter, TagSel, WorkKind, api, applyTagFilter, groupByTag, tagNameOf, useTags, fmtDateTime, fmtDay, isPastDue, isPinActive, kindOf, openUrl, ts } from "../WorkShared";
 
 type Tab = "stream" | "assigned" | "submitted" | "missing";
 
 const isImage = (t?: string | null) => (t || "").toLowerCase().includes("image");
 
 /* ───────────── announcement sheet ───────────── */
-function AnnouncementSheet({ item, onClose }: { item: any | null; onClose: () => void }) {
+function AnnouncementSheet({ item, tagName, onClose }: { item: any | null; tagName?: string | null; onClose: () => void }) {
   if (!item) return null;
   const pinned = isPinActive(item);
   const images = (item.attachments || []).filter((a: any) => isImage(a.type) && a.url);
@@ -35,6 +35,7 @@ function AnnouncementSheet({ item, onClose }: { item: any | null; onClose: () =>
               <View style={{ flexDirection: "row", alignItems: "center", gap: SP.sm, marginTop: SP.xs }}>
                 <Text style={font.small}>{fmtDateTime(item.created_at)}</Text>
                 {pinned && <Chip label="Pinned" tone="primary" />}
+                {!!tagName && <Chip label={tagName} icon="pricetag-outline" tone="neutral" />}
               </View>
             </View>
           </View>
@@ -79,13 +80,16 @@ export default function StudentSubjectFeed() {
   const uid: string | undefined = student_uid || auth.currentUser?.uid;
 
   const [tab, setTab] = useState<Tab>("stream");
-  const [announcements, setAnnouncements] = useState<any[]>([]);
-  const [assignments, setAssignments] = useState<any[]>([]);
+  const [allAnnouncements, setAnnouncements] = useState<any[]>([]);
+  const [allAssignments, setAssignments] = useState<any[]>([]);
   const [subs, setSubs] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [open, setOpen] = useState<any | null>(null);
+  const [kindFilter, setKindFilter] = useState<WorkKind | "all">("all");
+  const [tagSel, setTagSel] = useState<TagSel>("all");
+  const { tags, reload: reloadTags } = useTags(subject?.subject_id, course?.course_id);
   const loadedOnce = useRef(false);
 
   const load = useCallback(
@@ -116,9 +120,11 @@ export default function StudentSubjectFeed() {
     },
     [subject?.subject_id, course?.course_id, uid]
   );
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => { load(); reloadTags(); }, [load, reloadTags]));
 
   const lists = useMemo(() => {
+    const assignments = applyTagFilter(allAssignments, tagSel).filter((a) => kindFilter === "all" || kindOf(a) === kindFilter);
+    const announcements = kindFilter === "all" ? applyTagFilter(allAnnouncements, tagSel) : [];
     const byCreated = (x: any, y: any) => ts(y.created_at) - ts(x.created_at);
     const pinned = announcements.filter(isPinActive).sort(byCreated);
     const rest = [
@@ -130,7 +136,7 @@ export default function StudentSubjectFeed() {
     const submitted = assignments.filter((a) => !!subs[a.assignment_id]).sort((x, y) => ts(subs[y.assignment_id]?.submitted_at) - ts(subs[x.assignment_id]?.submitted_at));
     const missing = assignments.filter((a) => !subs[a.assignment_id] && isPastDue(a.due_date)).sort((x, y) => ts(y.due_date) - ts(x.due_date));
     return { stream, assigned, submitted, missing };
-  }, [announcements, assignments, subs]);
+  }, [allAnnouncements, allAssignments, subs, kindFilter, tagSel]);
 
   if (!subject || !course || !uid) {
     return (
@@ -152,6 +158,7 @@ export default function StudentSubjectFeed() {
       meta={fmtDay(n.created_at)}
       chips={[
         ...(n._pin ? [{ label: "Pinned", tone: "primary" as Tone }] : []),
+        ...(tagNameOf(tags, n.tag_id) ? [{ label: tagNameOf(tags, n.tag_id) as string }] : []),
         ...((n.attachments?.length ?? 0) > 0 ? [{ label: `${n.attachments.length} file${n.attachments.length > 1 ? "s" : ""}` }] : []),
       ]}
       pinned={!!n._pin}
@@ -162,8 +169,10 @@ export default function StudentSubjectFeed() {
   const assignmentCard = (a: any, missing = false) => {
     const sub = subs[a.assignment_id];
     const overdue = isPastDue(a.due_date);
+    const kind = kindOf(a);
     const hidden = sub?.grade_hidden === true;
-    const chips: { label: string; tone?: Tone }[] = [{ label: `${a.marks} marks`, tone: "primary" }];
+    const chips: { label: string; tone?: Tone }[] = [{ label: KIND_SHORT[kind], tone: KIND_TONE[kind] }, { label: `${a.marks} marks`, tone: "primary" }];
+    if (tagNameOf(tags, a.tag_id)) chips.push({ label: tagNameOf(tags, a.tag_id) as string });
     if (sub) {
       if (sub.status === "graded" && !hidden) chips.push({ label: `${sub.marks_obtained}/${a.marks}`, tone: "success" });
       else if (sub.status === "graded") chips.push({ label: "Under review", tone: "info" });
@@ -172,15 +181,24 @@ export default function StudentSubjectFeed() {
     return (
       <ItemCard
         key={`a-${a.assignment_id}`}
-        icon={missing ? "alert-circle-outline" : "document-text-outline"}
+        icon={missing ? "alert-circle-outline" : (KIND_ICON[kind] as any)}
         tone={sub ? "success" : overdue ? "danger" : "primary"}
         title={a.title}
         meta={`${overdue && !sub ? "Was due" : "Due"} ${fmtDateTime(a.due_date)}`}
         chips={chips}
-        onPress={() => openAssignment(a)}
+        onPress={() => openAssignment({ ...a, tag_name: tagNameOf(tags, a.tag_id) })}
       />
     );
   };
+
+  // sections per tag (in the teacher's order) once anything is tagged
+  const grouped = (list: any[], missing = false) =>
+    groupByTag(list, tags).map((g) => (
+      <View key={g.key}>
+        {!!g.label && <SectionLabel>{g.label}</SectionLabel>}
+        {g.items.map((a) => assignmentCard(a, missing))}
+      </View>
+    ));
 
   const TABS: { key: Tab; label: string; count?: number }[] = [
     { key: "stream", label: "Stream" },
@@ -196,14 +214,14 @@ export default function StudentSubjectFeed() {
     }
     if (tab === "assigned") {
       if (!lists.assigned.length) return <EmptyState icon="checkmark-circle-outline" title="All caught up" text="No pending assignments." />;
-      return lists.assigned.map((a) => assignmentCard(a));
+      return grouped(lists.assigned);
     }
     if (tab === "submitted") {
       if (!lists.submitted.length) return <EmptyState icon="cloud-upload-outline" title="No submissions yet" text="Work you turn in appears here." />;
-      return lists.submitted.map((a) => assignmentCard(a));
+      return grouped(lists.submitted);
     }
     if (!lists.missing.length) return <EmptyState icon="ribbon-outline" title="Nothing missing" text="You have not missed any assignment." />;
-    return lists.missing.map((a) => assignmentCard(a, true));
+    return grouped(lists.missing, true);
   };
 
   return (
@@ -262,12 +280,14 @@ export default function StudentSubjectFeed() {
                 {error}
               </Banner>
             )}
+            <TagFilter tags={tags} items={[...allAssignments, ...allAnnouncements]} value={tagSel} onChange={setTagSel} />
+            <KindFilter value={kindFilter} onChange={setKindFilter} items={allAssignments} />
             {body()}
           </>
         )}
       </ScrollView>
 
-      <AnnouncementSheet item={open} onClose={() => setOpen(null)} />
+      <AnnouncementSheet item={open} tagName={tagNameOf(tags, open?.tag_id)} onClose={() => setOpen(null)} />
     </Screen>
   );
 }

@@ -8,7 +8,8 @@
  *   GET  /subjects?course_id=
  *   GET  /teachers
  *   POST /subjects                 PUT /subjects/:id          DELETE /subjects/:id
- *   PUT  /subjects/:id/assign      { teacher_id | null, force? }
+ *   PUT  /subjects/:id/assign      { teacher_id | null, division_id?, force? }   (division_id = the teacher of one division only)
+ *   GET  /divisions?course_id=
  *   POST /subjects/elective-group  { course_id, semester, group, group_code?, subjects: [{ subject_name, subject_code? }] }
  *   POST /elective-groups/rename   { course_id, semester, from, to }
  *   GET  /subjects/:id/students    POST /subjects/:id/unenroll   POST /subjects/:id/move
@@ -23,9 +24,10 @@ const plural = (n, w) => `${n} ${w}${n === 1 ? "" : "s"}`;
 const semName = (n) => `Semester ${n}`;
 
 // ── Assign / change teacher ──────────────────────────────────────────────────
-function AssignModal({ subject, teachers, department, onClose, onDone }) {
+function AssignModal({ subject, division, teachers, department, onClose, onDone }) {
+  const current = division ? (subject.division_teachers?.[division.division_id]?.teacher_id || null) : (subject.teacher_assigned || null);
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState(subject.teacher_assigned || null);
+  const [picked, setPicked] = useState(current || (division ? subject.teacher_assigned : null) || null);
   const [conflicts, setConflicts] = useState([]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -45,14 +47,14 @@ function AssignModal({ subject, teachers, department, onClose, onDone }) {
       .sort((a, b) => Number(b.in_department) - Number(a.in_department) || a.name.localeCompare(b.name));
   }, [teachers, query]);
 
-  const unchanged = picked === subject.teacher_assigned;
+  const unchanged = picked === current;
 
   const submit = async (force = false) => {
     if (!picked || saving || unchanged) return;
     setSaving(true);
     setError("");
     try {
-      const res = await headApi.put(`/subjects/${subject.subject_id}/assign`, { teacher_id: picked, force: force || undefined });
+      const res = await headApi.put(`/subjects/${subject.subject_id}/assign`, { teacher_id: picked, division_id: division ? division.division_id : undefined, force: force || undefined });
       onDone(res);
     } catch (err) {
       if (err.status === 409 && err.data?.conflicts?.length) {
@@ -72,9 +74,9 @@ function AssignModal({ subject, teachers, department, onClose, onDone }) {
         <div className="mg-modal-header">
           <div>
             <h3 className="mg-modal-title" id="sf-assign-title">
-              {subject.teacher_assigned ? "Change teacher" : "Assign teacher"}
+              {division ? `Teacher for division ${division.name}` : current ? "Change teacher" : "Assign teacher"}
             </h3>
-            <p className="mg-modal-sub">{subject.subject_code} · {subject.subject_name}</p>
+            <p className="mg-modal-sub">{subject.subject_code} · {subject.subject_name}{division ? ` · Division ${division.name}` : ""}</p>
           </div>
           <button type="button" className="mg-modal-close" onClick={onClose} disabled={saving} aria-label="Close">✕</button>
         </div>
@@ -108,7 +110,7 @@ function AssignModal({ subject, teachers, department, onClose, onDone }) {
                   <span className="sf-teacher-main">
                     <span className="sf-teacher-name">
                       {t.name}
-                      {t.teacher_id === subject.teacher_assigned && <span className="sf-tag sf-tag--cur">Current</span>}
+                      {t.teacher_id === current && <span className="sf-tag sf-tag--cur">Current</span>}
                       {!t.in_department && <span className="sf-tag">Other dept</span>}
                     </span>
                     <span className="sf-teacher-meta">
@@ -149,7 +151,7 @@ function AssignModal({ subject, teachers, department, onClose, onDone }) {
             </button>
           ) : (
             <button type="button" className="mg-btn mg-btn--primary" onClick={() => submit(false)} disabled={!picked || unchanged || saving}>
-              {saving ? "Saving…" : subject.teacher_assigned ? "Change teacher" : "Assign teacher"}
+              {saving ? "Saving…" : current ? "Change teacher" : "Assign teacher"}
             </button>
           )}
         </div>
@@ -159,7 +161,7 @@ function AssignModal({ subject, teachers, department, onClose, onDone }) {
 }
 
 // ── Add / edit subject ───────────────────────────────────────────────────────
-function SubjectModal({ course, subject, defaultSemester, groups = [], subjects = [], onClose, onSaved }) {
+function SubjectModal({ course, subject, defaultSemester, groups = [], subjects = [], teachers = [], divisions = [], onClose, onSaved }) {
   const editing = !!subject;
   const total = course.total_semesters || 1;
   const [name, setName] = useState(subject?.subject_name || "");
@@ -167,11 +169,16 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
   const [sem, setSem] = useState(subject?.semester_number || defaultSemester || 1);
   const [compulsory, setCompulsory] = useState(subject ? subject.compulsary : true);
   const [group, setGroup] = useState(subject?.elective_group || "");
-  // new subjects can also be a Lab or a Tutorial; both can hang off an existing subject (same classroom)
-  const [kind, setKind] = useState("subject");        // subject | lab | tutorial  (new subjects only)
-  const [labOf, setLabOf] = useState("new");          // new | existing
+  // New subjects: tick Lecture, Tutorial and/or Lab. Lecture creates the subject itself and the other two ride along with it.
+  // Without Lecture, Tutorial and/or Lab are added to a subject that already exists (or Lab alone can be its own lab subject).
+  const [wantLecture, setWantLecture] = useState(true);
+  const [wantTut, setWantTut] = useState(false);
+  const [wantLab, setWantLab] = useState(false);
+  const [labOf, setLabOf] = useState("new");          // new | existing   (Lab alone)
   const [parentId, setParentId] = useState("");
   const [enroll, setEnroll] = useState(true);
+  const [defTeacher, setDefTeacher] = useState("");     // teacher of everyone (new subjects)
+  const [divTeacher, setDivTeacher] = useState({});     // { division_id: teacher_id } when a division has its own
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const firstRef = useRef(null);
@@ -183,11 +190,15 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
     return () => window.removeEventListener("keydown", onKey);
   }, [saving, onClose]);
 
-  const linked = !editing && (kind === "tutorial" || (kind === "lab" && labOf === "existing"));
+  // subject: a new theory subject (with the ticked extras) | lab: a new lab-only subject | attach: add extras to an existing subject
+  const kind = editing || wantLecture ? "subject" : wantLab && !wantTut && labOf === "new" ? "lab" : "attach";
+  const nothingTicked = !editing && !wantLecture && !wantTut && !wantLab;
+  const linked = !editing && kind === "attach" && !nothingTicked;
   const parents = subjects.filter((x) => x.kind !== "lab" && x.semester_number === Number(sem) &&
-    !(kind === "tutorial" ? x.has_tutorial : x.has_lab));
-  useEffect(() => { if (parentId && !parents.some((x) => x.subject_id === parentId)) setParentId(""); }, [sem, kind, labOf]); // eslint-disable-line
-  const valid = linked ? !!parentId : name.trim() && code.trim();
+    ((wantTut && !x.has_tutorial) || (wantLab && !x.has_lab)));
+  useEffect(() => { if (parentId && !parents.some((x) => x.subject_id === parentId)) setParentId(""); }, [sem, wantTut, wantLab, wantLecture, labOf]); // eslint-disable-line
+  const extrasText = [wantTut && "Tutorial", wantLab && "Lab"].filter(Boolean).join(" and ");
+  const valid = !nothingTicked && (linked ? !!parentId : name.trim() && code.trim());
   const dirty =
     !editing ||
     name.trim() !== subject.subject_name ||
@@ -195,6 +206,9 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
     Number(sem) !== subject.semester_number ||
     compulsory !== subject.compulsary ||
     (!compulsory && group.trim() !== (subject.elective_group || ""));
+  const semDivs = divisions.filter((d) => d.semester === Number(sem));
+  const teacherOpts = [...teachers].sort((a, b) => Number(b.in_department) - Number(a.in_department) || a.name.localeCompare(b.name));
+  const askTeachers = !editing && !linked;
   const groupNames = [...new Set(groups.filter((g) => g.semester_number === Number(sem)).map((g) => g.group))];
 
   const submit = async (assignNext) => {
@@ -215,8 +229,10 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
       } else {
         res = await headApi.post("/subjects", {
           course_id: course.course_id,
-          type: kind === "subject" ? (compulsory ? "compulsory" : "elective") : kind,
+          type: kind === "subject" ? (compulsory ? "compulsory" : "elective") : kind === "lab" ? "lab" : "attach",
           parent_subject_id: linked ? parentId : undefined,
+          with_tutorial: wantTut || undefined,
+          with_lab: kind === "subject" || kind === "attach" ? wantLab || undefined : undefined,
           subject_name: name.trim(),
           subject_code: code.trim(),
           semester: Number(sem),
@@ -225,8 +241,20 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
           enroll_students: compulsory ? enroll : false,
         });
       }
+      // teachers picked while creating: the subject's own, then one per division
+      let teacherNote = "";
+      if (!editing && !linked && res.subject_id) {
+        const jobs = [];
+        if (defTeacher) jobs.push({ teacher_id: defTeacher });
+        if (compulsory) semDivs.forEach((dv) => { if (divTeacher[dv.division_id] && divTeacher[dv.division_id] !== defTeacher) jobs.push({ teacher_id: divTeacher[dv.division_id], division_id: dv.division_id }); });
+        let failed = 0;
+        for (const j of jobs) {
+          try { await headApi.put(`/subjects/${res.subject_id}/assign`, { ...j, force: true }); } catch { failed++; }
+        }
+        if (jobs.length) teacherNote = failed ? ` ${failed} teacher${failed === 1 ? "" : "s"} could not be assigned: do it from the list.` : ` ${jobs.length === 1 ? "Teacher" : "Teachers"} assigned.`;
+      }
       const parent = linked ? subjects.find((x) => x.subject_id === parentId) : null;
-      onSaved(res, { created: !editing, assignNext: linked ? false : assignNext, name: linked ? `${kind === "tutorial" ? "Tutorial" : "Lab"} of ${parent?.subject_code || "the subject"}` : name.trim(), semester: Number(sem), linked });
+      onSaved(res, { created: !editing, assignNext: linked ? false : assignNext, name: linked ? `${extrasText} of ${parent?.subject_code || "the subject"}` : name.trim() + (kind === "subject" && (wantTut || wantLab) ? ` (+ ${extrasText})` : ""), semester: Number(sem), linked, teacherNote });
     } catch (err) {
       setError(err.message);
       setSaving(false);
@@ -249,21 +277,29 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
           {!editing && (
             <div className="mg-field">
               <span className="mg-label" id="sf-kind-label">What are you adding?</span>
-              <div className="sf-seg" role="radiogroup" aria-labelledby="sf-kind-label">
-                {[["subject", "Subject"], ["lab", "Lab"], ["tutorial", "Tutorial"]].map(([k, l]) => (
-                  <button key={k} type="button" role="radio" aria-checked={kind === k} disabled={saving}
-                          className={`sf-seg-btn${kind === k ? " sf-seg-btn--on" : ""}`} onClick={() => setKind(k)}>{l}</button>
+              <div className="sf-checks" role="group" aria-labelledby="sf-kind-label">
+                {[
+                  ["Lecture", wantLecture, setWantLecture, "The subject itself"],
+                  ["Tutorial", wantTut, setWantTut, "Shares the subject's classroom and teacher"],
+                  ["Lab", wantLab, setWantLab, "Practical sessions, with lab work"],
+                ].map(([l, on, set, hint]) => (
+                  <label key={l} className={`sf-checkcard${on ? " sf-checkcard--on" : ""}`}>
+                    <input type="checkbox" checked={on} disabled={saving} onChange={(e) => set(e.target.checked)} />
+                    <span><strong>{l}</strong><small>{hint}</small></span>
+                  </label>
                 ))}
               </div>
               <span className="mg-help">
-                {kind === "tutorial" && "A tutorial always belongs to an existing subject: same classroom, same teacher, and its attendance counts for that subject."}
-                {kind === "lab" && "A lab can be a new subject with its own classroom, or belong to an existing subject and share its classroom."}
-                {kind === "subject" && "Compulsory subjects are taken by everyone; for electives students choose."}
+                {nothingTicked && "Tick at least one."}
+                {!nothingTicked && wantLecture && (wantTut || wantLab) && `Creates the subject together with its ${extrasText.toLowerCase()}. You schedule them from the Timetable.`}
+                {!nothingTicked && wantLecture && !wantTut && !wantLab && "Compulsory subjects are taken by everyone; for electives students choose."}
+                {!nothingTicked && !wantLecture && kind === "lab" && "A lab can be a new lab subject with its own classroom, or belong to an existing subject."}
+                {!nothingTicked && !wantLecture && kind === "attach" && `${extrasText} always belong${extrasText.includes(" and ") ? "" : "s"} to an existing subject: same classroom, and attendance counts for that subject.`}
               </span>
             </div>
           )}
 
-          {!editing && kind === "lab" && (
+          {!editing && !wantLecture && wantLab && !wantTut && (
             <div className="mg-field">
               <span className="mg-label" id="sf-labof-label">Lab of</span>
               <div className="sf-seg" role="radiogroup" aria-labelledby="sf-labof-label">
@@ -277,15 +313,15 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
 
           {linked && (
             <div className="mg-field">
-              <label className="mg-label" htmlFor="sf-parent">{kind === "tutorial" ? "Tutorial for which subject?" : "Lab of which subject?"}</label>
+              <label className="mg-label" htmlFor="sf-parent">{extrasText} for which subject?</label>
               <select id="sf-parent" className="mg-input" value={parentId} disabled={saving} onChange={(e) => setParentId(e.target.value)}>
                 <option value="">Pick a subject</option>
                 {parents.map((x) => <option key={x.subject_id} value={x.subject_id}>{x.subject_code} · {x.subject_name}</option>)}
               </select>
-              {parents.length === 0 && <span className="mg-help">No subject in {semName(sem)} can take a {kind} right now.</span>}
+              {parents.length === 0 && <span className="mg-help">No subject in {semName(sem)} can take {extrasText.toLowerCase()} right now.</span>}
               <span className="mg-help">
-                {kind === "tutorial"
-                  ? "Tutorial sessions use this subject's classroom and teacher. You schedule them from the Timetable."
+                {wantTut && wantLab ? "Both are added in one go. Sessions use this subject's classroom and teacher, and the teacher can post lab work next to assignments."
+                  : wantTut ? "Tutorial sessions use this subject's classroom and teacher. You schedule them from the Timetable."
                   : "Lab sessions share this subject's classroom, where the teacher can post lab work next to assignments. You schedule them from the Timetable."}
               </span>
             </div>
@@ -358,6 +394,32 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
               <span>Enrol the current students of {semName(sem)} now</span>
             </label>
           )}
+          {askTeachers && teacherOpts.length > 0 && (
+            <div className="mg-field sf-tpick">
+              <label className="mg-label" htmlFor="sf-def-teacher">{compulsory && semDivs.length > 1 ? "Teacher (all divisions)" : "Teacher"} <span className="sf-opt">optional</span></label>
+              <select id="sf-def-teacher" className="mg-input" value={defTeacher} disabled={saving} onChange={(e) => setDefTeacher(e.target.value)}>
+                <option value="">Choose later</option>
+                {teacherOpts.map((t) => <option key={t.teacher_id} value={t.teacher_id}>{t.name}{t.in_department ? "" : " (other dept)"}</option>)}
+              </select>
+              {compulsory && semDivs.length > 1 && (
+                <>
+                  <span className="mg-help">Different teacher for a division? Pick them below. Otherwise the division uses the teacher above.</span>
+                  <div className="sf-tpick-divs">
+                    {semDivs.map((dv) => (
+                      <label key={dv.division_id} className="sf-tpick-row">
+                        <span className="sf-tpick-name">Division {dv.name}</span>
+                        <select className="mg-input" value={divTeacher[dv.division_id] || ""} disabled={saving}
+                                onChange={(e) => setDivTeacher((m) => ({ ...m, [dv.division_id]: e.target.value }))}>
+                          <option value="">Same as above</option>
+                          {teacherOpts.map((t) => <option key={t.teacher_id} value={t.teacher_id}>{t.name}</option>)}
+                        </select>
+                      </label>
+                    ))}
+                  </div>
+                </>
+              )}
+            </div>
+          )}
           {editing && (Number(sem) !== subject.semester_number || compulsory !== subject.compulsary) && (
             <span className="mg-help">Student enrolment is updated to match this change.</span>
           )}
@@ -377,7 +439,7 @@ function SubjectModal({ course, subject, defaultSemester, groups = [], subjects 
             </button>
           )}
           <button type="submit" className="mg-btn mg-btn--primary" disabled={!valid || saving}>
-            {saving ? "Saving…" : editing ? "Save changes" : kind === "tutorial" ? "Add tutorial" : kind === "lab" ? "Add lab" : "Add subject"}
+            {saving ? "Saving…" : editing ? "Save changes" : kind === "attach" ? `Add ${extrasText.toLowerCase()}` : kind === "lab" ? "Add lab" : wantTut || wantLab ? `Add subject + ${extrasText.toLowerCase()}` : "Add subject"}
           </button>
         </div>
       </form>
@@ -393,7 +455,7 @@ function ElectiveGroupModal({ course, defaultSemester, groups, onClose, onSaved 
   const suggest = () => { let i = 1; while (taken.includes(`elective ${i}`)) i++; return `Elective ${i}`; };
   const [group, setGroup] = useState("");
   const [groupCode, setGroupCode] = useState("");
-  const [rows, setRows] = useState([{ name: "", code: "" }, { name: "", code: "" }, { name: "", code: "" }]);
+  const [rows, setRows] = useState([{ name: "", code: "", tut: false, lab: false }, { name: "", code: "", tut: false, lab: false }, { name: "", code: "", tut: false, lab: false }]);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const firstRef = useRef(null);
@@ -418,7 +480,7 @@ function ElectiveGroupModal({ course, defaultSemester, groups, onClose, onSaved 
     try {
       const res = await headApi.post("/subjects/elective-group", {
         course_id: course.course_id, semester: Number(sem), group: groupName, group_code: groupCode.trim() || undefined,
-        subjects: filled.map((r) => ({ subject_name: r.name.trim(), subject_code: r.code.trim() || undefined })),
+        subjects: filled.map((r) => ({ subject_name: r.name.trim(), subject_code: r.code.trim() || undefined, with_tutorial: r.tut, with_lab: r.lab })),
       });
       onSaved({ created: res.subjects.length, group: groupName, semester: Number(sem), notified: res.notified });
     } catch (err) { setError(err.message); setSaving(false); }
@@ -467,6 +529,12 @@ function ElectiveGroupModal({ course, defaultSemester, groups, onClose, onSaved 
                   <input className="mg-input sf-eg-code" aria-label={`Subject ${i + 1} code`} value={r.code} maxLength={30} disabled={saving}
                          style={{ textTransform: "uppercase" }} placeholder={groupCode.trim() ? `${groupCode.trim().toUpperCase()}-${i + 1}` : "Code"}
                          onChange={(e) => setRow(i, { code: e.target.value })} />
+                  <label className="sf-check sf-check--inline" title="This elective has a tutorial">
+                    <input type="checkbox" checked={r.tut} disabled={saving} onChange={(e) => setRow(i, { tut: e.target.checked })} /><span>Tutorial</span>
+                  </label>
+                  <label className="sf-check sf-check--inline" title="This elective has a lab">
+                    <input type="checkbox" checked={r.lab} disabled={saving} onChange={(e) => setRow(i, { lab: e.target.checked })} /><span>Lab</span>
+                  </label>
                   <button type="button" className="sf-link sf-link--danger" disabled={saving || rows.length <= 2}
                           onClick={() => setRows((x) => x.filter((_, k) => k !== i))} aria-label={`Remove subject ${i + 1}`}>Remove</button>
                 </div>
@@ -474,7 +542,7 @@ function ElectiveGroupModal({ course, defaultSemester, groups, onClose, onSaved 
             </div>
             <div>
               <button type="button" className="mg-btn mg-btn--sm" disabled={saving || rows.length >= 20}
-                      onClick={() => setRows((x) => [...x, { name: "", code: "" }])}>+ Add another subject</button>
+                      onClick={() => setRows((x) => [...x, { name: "", code: "", tut: false, lab: false }])}>+ Add another subject</button>
             </div>
             {missingCode && <span className="sf-stale">Every subject needs a code, or give the group a code above.</span>}
             {!missingCode && filled.length < 2 && <span className="mg-help">Add at least two subjects — otherwise there is nothing to choose.</span>}
@@ -737,7 +805,7 @@ function ConfirmModal({ title, body, confirmLabel, busyLabel, onConfirm, onClose
 }
 
 // ── Subject row ──────────────────────────────────────────────────────────────
-function SubjectRow({ s, onAssign, onRemove, onEdit, onDelete, onStudents, onUnlink }) {
+function SubjectRow({ s, divs = [], onAssign, onAssignDiv, onResetDiv, onRemove, onEdit, onDelete, onStudents, onUnlink }) {
   return (
     <div className="sf-row cm-hover" role="listitem">
       <div className="sf-row-main">
@@ -783,6 +851,24 @@ function SubjectRow({ s, onAssign, onRemove, onEdit, onDelete, onStudents, onUnl
             <span className="mg-badge mg-badge--amber">No teacher</span>
           )}
         </div>
+        {divs.length > 1 && (
+          <div className="sf-divt" aria-label={`Teacher of ${s.subject_code} by division`}>
+            <span className="sf-divt-title">By division</span>
+            {divs.map((dv) => {
+              const own = s.division_teachers?.[dv.division_id];
+              return (
+                <div key={dv.division_id} className="sf-divt-row">
+                  <span className="sf-divt-div">{dv.name}</span>
+                  <span className={`sf-divt-who${own || s.teacher_assigned ? "" : " sf-divt-who--none"}`}>
+                    {own ? own.teacher_name : s.teacher_assigned ? `${s.teacher_name} (same)` : "No teacher"}
+                  </span>
+                  <button type="button" className="sf-link" onClick={() => onAssignDiv(s, dv)} aria-label={`Teacher of ${s.subject_code} for division ${dv.name}`}>{own ? "Change" : "Set"}</button>
+                  {own && <button type="button" className="sf-link sf-link--danger" onClick={() => onResetDiv(s, dv)} aria-label={`Use the default teacher for division ${dv.name}`}>Reset</button>}
+                </div>
+              );
+            })}
+          </div>
+        )}
         {!s.teacher_assigned && s.timetable_teacher_name && (
           <span className="sf-stale">Timetable still lists {s.timetable_teacher_name} — assign a teacher to fix it.</span>
         )}
@@ -817,6 +903,7 @@ export default function SubjectsPage() {
   const [subjects, setSubjects] = useState([]);
   const [egroups, setEgroups] = useState([]);
   const [teachers, setTeachers] = useState([]);
+  const [divisions, setDivisions] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState(null);
@@ -876,7 +963,9 @@ export default function SubjectsPage() {
     setSemFilter(0);
     setQuery("");
     setOnlyUnassigned(false);
+    setDivisions([]);
     loadSubjects(courseId);
+    headApi.get(`/divisions?course_id=${encodeURIComponent(courseId)}`).then((d) => setDivisions(d.divisions || [])).catch(() => {});
   }, [courseId, loadSubjects]);
 
   useEffect(() => {
@@ -893,7 +982,15 @@ export default function SubjectsPage() {
   const patchSubject = (id, patch) =>
     setSubjects((list) => list.map((s) => (s.subject_id === id ? { ...s, ...patch } : s)));
 
-  const onAssigned = (subject, res) => {
+  const onAssigned = (subject, res, division) => {
+    if (division) {
+      setModal(null);
+      loadTeachers();
+      loadSubjects(courseId);
+      const moved = res.moved_lectures ? ` ${plural(res.moved_lectures, "timetable slot")} moved.` : "";
+      setNotice({ type: res.conflicts?.length ? "warn" : "success", text: `${res.teacher_name} now teaches ${subject.subject_code} to division ${division.name}.${moved}${res.conflicts?.length ? " Note: they have clashing lectures." : ""}` });
+      return;
+    }
     patchSubject(subject.subject_id, { teacher_assigned: res.teacher_assigned, teacher_name: res.teacher_name || null });
     setModal(null);
     loadTeachers(); // refresh workload numbers
@@ -905,6 +1002,22 @@ export default function SubjectsPage() {
       text: `${subject.subject_code} is now taught by ${res.teacher_name}.${moved}${forced}`,
     });
   };
+
+  const resetDivTeacher = (s, dv) =>
+    setModal({
+      type: "confirm",
+      title: "Use the default teacher",
+      body: `Division ${dv.name} of ${s.subject_code} · ${s.subject_name} will go back to ${s.teacher_name || "having no teacher"}.`,
+      confirmLabel: "Use default",
+      busyLabel: "Saving…",
+      run: async () => {
+        await headApi.put(`/subjects/${s.subject_id}/assign`, { teacher_id: null, division_id: dv.division_id });
+        setModal(null);
+        loadTeachers();
+        await loadSubjects(courseId);
+        setNotice({ type: "success", text: `Division ${dv.name} of ${s.subject_code} now follows the subject's teacher.` });
+      },
+    });
 
   const removeTeacher = (s) =>
     setModal({
@@ -969,7 +1082,7 @@ export default function SubjectsPage() {
     setModal(null);
     const list = await loadSubjects(courseId);
     const enr = res.enrolled_students ? ` ${plural(res.enrolled_students, "student")} enrolled.` : "";
-    setNotice({ type: "success", text: info.created ? `${info.name} added to ${semName(info.semester)}.${enr}${info.linked ? " Schedule it from the Timetable." : ""}` : `Subject updated.${enr}` });
+    setNotice({ type: "success", text: info.created ? `${info.name} added to ${semName(info.semester)}.${enr}${info.teacherNote || ""}${info.linked ? " Schedule it from the Timetable." : ""}` : `Subject updated.${enr}` });
     if (info.created) setSemFilter((f) => (f && f !== info.semester ? 0 : f));
     if (info.created && info.assignNext && list) {
       const created = list.find((x) => x.subject_id === res.subject_id);
@@ -1152,7 +1265,10 @@ export default function SubjectsPage() {
                   </div>
                   {list.map((s) => (
                     <SubjectRow key={s.subject_id} s={s}
+                                divs={s.compulsary !== false ? divisions.filter((d) => d.semester === s.semester_number) : []}
                                 onAssign={(x) => setModal({ type: "assign", subject: x })}
+                                onAssignDiv={(x, dv) => setModal({ type: "assign", subject: x, division: dv })}
+                                onResetDiv={resetDivTeacher}
                                 onRemove={removeTeacher}
                                 onEdit={(x) => setModal({ type: "subject", subject: x })}
                                 onStudents={(x) => setModal({ type: "students", subject: x })}
@@ -1177,11 +1293,11 @@ export default function SubjectsPage() {
       {!ctx && loading && !ctxError && <div className="mg-loading">Loading…</div>}
 
       {modal?.type === "assign" && (
-        <AssignModal subject={modal.subject} teachers={teachers} department={dept}
-                     onClose={closeModal} onDone={(res) => onAssigned(modal.subject, res)} />
+        <AssignModal subject={modal.subject} division={modal.division} teachers={teachers} department={dept}
+                     onClose={closeModal} onDone={(res) => onAssigned(modal.subject, res, modal.division)} />
       )}
       {modal?.type === "subject" && course && (
-        <SubjectModal course={course} subject={modal.subject} defaultSemester={semFilter || 1} groups={egroups} subjects={subjects}
+        <SubjectModal course={course} subject={modal.subject} defaultSemester={semFilter || 1} groups={egroups} subjects={subjects} teachers={teachers} divisions={divisions}
                       onClose={closeModal} onSaved={onSubjectSaved} />
       )}
       {modal?.type === "egroup" && course && (

@@ -7,6 +7,7 @@ const { admin, db } = require("../config/firebase");
 const { guard, fromQuery, fromBody } = require("../middleware/auth");
 const { TTLCache } = require("../utils/cache");
 const { getSubject } = require("../utils/ownership");
+const { isLive } = require("../utils/assignmentState");
 const { chunk, commitInBatches } = require("../utils/firestore");
 const { inBatch, rollOf, batchFields } = require("../utils/batches");
 
@@ -83,7 +84,7 @@ const classCache      = new TTLCache({ max: 300, ttlMs: 5_000 });   // "teacher|
 async function ownsSubject(teacher_id, subject_id) {
   if (typeof subject_id !== "string" || !subject_id || subject_id.includes("/")) return false;
   const s = await getSubject(subject_id);
-  return !!s && s.teacher_assigned === teacher_id;
+  return !!s && (s.teacher_assigned === teacher_id || (Array.isArray(s.teacher_ids) && s.teacher_ids.includes(teacher_id)));
 }
 
 const nameOf = (d) => d.name || `${d.first_name || ""} ${d.last_name || ""}`.trim();
@@ -269,7 +270,7 @@ router.get("/student/:student_uid/assignments", guard.teacher(fromQuery("teacher
       .where("teacher_id", "==", teacher_id)
       .get();
 
-    const assignments = assignmentsSnap.docs.map((doc) => {
+    const assignments = assignmentsSnap.docs.filter((doc) => isLive(doc.data())).map((doc) => {
       const d = doc.data();
       return { assignment_id: d.assignment_id, title: d.title, marks: d.marks, due_date: toISO(d.due_date), allow_late: d.allow_late || false, created_at: toISO(d.created_at) };
     });
@@ -791,13 +792,13 @@ router.get("/student/:student_uid/full", guard.teacher(fromQuery("teacher_id")),
 
     const [quizzesSnap, assignmentsSnap, sessions] = await Promise.all([
       db.collection("quizzes").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("quiz_id").get(),
-      db.collection("assignments").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("assignment_id").get(),
+      db.collection("assignments").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("assignment_id", "status", "publish_at").get(),
       getLectureSessionsForSubject(subject_id).then((all) => sessionsForDivision(all, s.division_id || null, s)),
     ]);
     const sessionIds = sessions.map((x) => x.sessionId);
 
     const quizIds       = quizzesSnap.docs.map((d) => d.data().quiz_id);
-    const assignmentIds = assignmentsSnap.docs.map((d) => d.data().assignment_id);
+    const assignmentIds = assignmentsSnap.docs.filter((d) => isLive(d.data())).map((d) => d.data().assignment_id);
 
     const [quizSubsSnap, assSubsSnap, attRecords] = await Promise.all([
       quizIds.length
@@ -885,7 +886,7 @@ async function buildClassReport(teacher_id, subject_id, divisionFilter = "") {
   const [sessions, quizzesSnap, assignmentsSnap, manualSnap, odSnap] = await Promise.all([
     getLectureSessionsForSubject(subject_id),
     db.collection("quizzes").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("quiz_id").get(),
-    db.collection("assignments").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("assignment_id").get(),
+    db.collection("assignments").where("subject_id", "==", subject_id).where("teacher_id", "==", teacher_id).select("assignment_id", "status", "publish_at").get(),
     db.collection("attendance_records").where("subject_id", "==", subject_id).where("source", "==", "manual").get(),
     db.collection("attendance_records").where("subject_id", "==", subject_id).where("source", "==", "od").get(),
   ]);
@@ -894,7 +895,7 @@ async function buildClassReport(teacher_id, subject_id, divisionFilter = "") {
   const totalLectures = sessionIds.length;
   const quizzes = quizzesSnap.docs.map((d) => ({ quiz_id: d.data().quiz_id }));
   const totalQuizzes = quizzes.length;
-  const assignments = assignmentsSnap.docs.map((d) => ({ assignment_id: d.data().assignment_id }));
+  const assignments = assignmentsSnap.docs.filter((d) => isLive(d.data())).map((d) => ({ assignment_id: d.data().assignment_id }));
   const totalAssignments = assignments.length;
 
   const sessionDateMap = {};

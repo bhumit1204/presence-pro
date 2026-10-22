@@ -28,6 +28,7 @@ const { guard, allow, fromAny, fromQuery } = require("../../middleware/auth");
 const { TTLCache } = require("../../utils/cache");
 const { chunk, commitInBatches } = require("../../utils/firestore");
 const { assignmentStudentsHandler } = require("../../utils/assignmentStudents");
+const { isLive } = require("../../utils/assignmentState");
 const { inBatch, rollOf } = require("../../utils/batches");
 
 // ─── Timezone helpers (IST = UTC+5:30) ───────────────────────────────────────
@@ -100,7 +101,7 @@ async function resolveTeacher(uid) {
 
 function subjectsOf(teacher_id) {
   return subjectsCache.memo(teacher_id, 15_000, async () => {
-    const snap = await db.collection("subjects").where("teacher_assigned", "==", teacher_id).get();
+    const snaps = await Promise.all([db.collection("subjects").where("teacher_assigned", "==", teacher_id).get(), db.collection("subjects").where("teacher_ids", "array-contains", teacher_id).get()]); const snap = { empty: snaps.every((x) => x.empty), docs: [...new Map(snaps.flatMap((x) => x.docs).map((d) => [d.id, d])).values()] };
     return snap.docs.map((doc) => ({ id: doc.id, data: doc.data() }));
   });
 }
@@ -344,7 +345,7 @@ async function buildClassReport(teacher_id, subject_id, subjData) {
     db.collection("assignments")
       .where("subject_id",  "==", subject_id)
       .where("teacher_id",  "==", teacher_id)
-      .select("assignment_id")
+      .select("assignment_id", "status", "publish_at")
       .get(),
   ]);
 
@@ -364,7 +365,7 @@ async function buildClassReport(teacher_id, subject_id, subjData) {
 
   const lectureIds  = lecturesSnap.docs.map((d) => d.id);
   const quizzes     = quizzesSnap.docs.map((d) => ({ quiz_id: d.data().quiz_id || d.id }));
-  const assignments = assignmentsSnap.docs.map((d) => ({ assignment_id: d.data().assignment_id || d.id }));
+  const assignments = assignmentsSnap.docs.filter((d) => isLive(d.data())).map((d) => ({ assignment_id: d.data().assignment_id || d.id }));
 
   // Empty class
   if (students.length === 0) {
@@ -588,7 +589,7 @@ router.get("/class-report", guard.self(fromAny("uid")), async (req, res) => {
       return res.status(404).json({ success: false, error: "Subject not found" });
 
     const subjData = subjectDoc.data();
-    if (subjData.teacher_assigned !== teacher_id)
+    if (!(subjData.teacher_assigned === teacher_id || (Array.isArray(subjData.teacher_ids) && subjData.teacher_ids.includes(teacher_id))))
       return res.status(403).json({ success: false, error: "Access denied — you are not assigned to this subject" });
 
     // Refresh-happy users / the same teacher on two tabs share one computation for a few seconds.

@@ -2,7 +2,7 @@ import React, { useCallback, useMemo, useRef, useState } from "react";
 import { ActivityIndicator, RefreshControl, ScrollView, View } from "react-native";
 import { useFocusEffect, useNavigation, useRoute } from "@react-navigation/native";
 import { Banner, Button, EmptyState, Header, SP, Screen, T, Tone } from "../../../components/ui";
-import { ItemCard, api, fmtDateTime, fmtDay, isPastDue, isPinActive, ts } from "../WorkShared";
+import { ItemCard, KIND_ICON, KIND_SHORT, KIND_TONE, KindFilter, TagFilter, TagSel, WorkKind, api, applyTagFilter, tagNameOf, useTags, fmtDateTime, fmtDay, isPastDue, isPinActive, kindOf, stateOf, ts } from "../WorkShared";
 
 export default function TeacherSubjectFeed() {
   const navigation = useNavigation<any>();
@@ -14,6 +14,9 @@ export default function TeacherSubjectFeed() {
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [kindFilter, setKindFilter] = useState<WorkKind | "all">("all");
+  const [tagSel, setTagSel] = useState<TagSel>("all");
+  const { tags, reload: reloadTags } = useTags(subject?.subject_id, course?.course_id);
   const loadedOnce = useRef(false);
 
   const load = useCallback(
@@ -22,8 +25,9 @@ export default function TeacherSubjectFeed() {
       try {
         if (!silent && !loadedOnce.current) setLoading(true);
         const q = `subject_id=${encodeURIComponent(subject.subject_id)}&course_id=${encodeURIComponent(course.course_id)}`;
+        const qa = `${q}&teacher_id=${encodeURIComponent(teacher_id || "")}`;   // the teacher also gets their drafts and scheduled posts
         const [a, n] = await Promise.all([
-          api<{ assignments: any[] }>(`/api/assignments?${q}`),
+          api<{ assignments: any[] }>(`/api/assignments?${qa}`),
           api<{ announcements: any[] }>(`/api/assignments/announcements?${q}`),
         ]);
         setAssignments(a.assignments || []);
@@ -37,22 +41,25 @@ export default function TeacherSubjectFeed() {
         setRefreshing(false);
       }
     },
-    [subject?.subject_id, course?.course_id]
+    [subject?.subject_id, course?.course_id, teacher_id]
   );
-  useFocusEffect(useCallback(() => { load(); }, [load]));
+  useFocusEffect(useCallback(() => { load(); reloadTags(); }, [load, reloadTags]));
 
   const feed = useMemo(() => {
     const all = [
-      ...assignments.map((x) => ({ ...x, _t: "a" as const })),
-      ...announcements.map((x) => ({ ...x, _t: "n" as const })),
+      ...applyTagFilter(assignments, tagSel).filter((x) => kindFilter === "all" || kindOf(x) === kindFilter).map((x) => ({ ...x, _t: "a" as const })),
+      ...(kindFilter === "all" ? applyTagFilter(announcements, tagSel) : []).map((x) => ({ ...x, _t: "n" as const })),
     ];
+    // drafts and scheduled posts first (they need the teacher's attention), then pinned notes, then newest
+    const rank = (x: any) => (x._t === "a" && stateOf(x) !== "published" ? 0 : x._t === "n" && isPinActive(x) ? 1 : 2);
     return all.sort((x, y) => {
+      if (rank(x) !== rank(y)) return rank(x) - rank(y);
       const xp = x._t === "n" && isPinActive(x);
       const yp = y._t === "n" && isPinActive(y);
       if (xp !== yp) return xp ? -1 : 1;
       return ts(y.created_at) - ts(x.created_at);
     });
-  }, [assignments, announcements]);
+  }, [assignments, announcements, kindFilter, tagSel]);
 
   if (!subject || !course) {
     return (
@@ -90,6 +97,8 @@ export default function TeacherSubjectFeed() {
                 {error}
               </Banner>
             )}
+            <TagFilter tags={tags} items={[...assignments, ...announcements]} value={tagSel} onChange={setTagSel} />
+            <KindFilter value={kindFilter} onChange={setKindFilter} items={assignments} />
             {feed.length === 0 ? (
               <EmptyState icon="folder-open-outline" title="Nothing posted yet" text="Post an assignment or an announcement with the buttons below." />
             ) : (
@@ -107,25 +116,41 @@ export default function TeacherSubjectFeed() {
                       pinned={pinned}
                       chips={[
                         ...(pinned ? [{ label: "Pinned", tone: "primary" as Tone }] : []),
+                        ...(tagNameOf(tags, item.tag_id) ? [{ label: tagNameOf(tags, item.tag_id) as string }] : []),
                         ...(files > 0 ? [{ label: `${files} file${files > 1 ? "s" : ""}` }] : []),
                       ]}
                       onPress={() => navigation.navigate("AnnouncementDetail", { announcement: item, teacher_id })}
                     />
                   );
                 }
-                const overdue = isPastDue(item.due_date);
-                const chips: { label: string; tone?: Tone }[] = [{ label: `${item.marks} marks`, tone: "primary" }];
+                const state = stateOf(item);
+                const kind = kindOf(item);
+                const overdue = state === "published" && isPastDue(item.due_date);
+                const chips: { label: string; tone?: Tone }[] = [];
+                if (state === "draft") chips.push({ label: "Draft", tone: "warning" });
+                if (state === "scheduled") chips.push({ label: "Scheduled", tone: "info" });
+                chips.push({ label: KIND_SHORT[kind], tone: KIND_TONE[kind] });
+                if (tagNameOf(tags, item.tag_id)) chips.push({ label: tagNameOf(tags, item.tag_id) as string });
+                if (item.marks != null) chips.push({ label: `${item.marks} marks`, tone: "primary" });
                 if (item.submissions_count > 0) chips.push({ label: `${item.submissions_count} turned in`, tone: "success" });
                 if (item.allow_late) chips.push({ label: "Late allowed", tone: "warning" });
                 return (
                   <ItemCard
                     key={`a-${item.assignment_id}`}
-                    icon="document-text-outline"
-                    tone={overdue ? "danger" : "success"}
-                    title={item.title}
-                    meta={`${overdue ? "Was due" : "Due"} ${fmtDateTime(item.due_date)}`}
+                    icon={KIND_ICON[kind] as any}
+                    tone={state === "draft" ? "warning" : state === "scheduled" ? "info" : overdue ? "danger" : "success"}
+                    title={item.title || "Untitled draft"}
+                    meta={
+                      state === "scheduled" ? `Posts ${fmtDateTime(item.publish_at)}`
+                      : state === "draft" ? (item.due_date ? `Due ${fmtDateTime(item.due_date)}` : "Not posted yet")
+                      : `${overdue ? "Was due" : "Due"} ${fmtDateTime(item.due_date)}`
+                    }
                     chips={chips}
-                    onPress={() => navigation.navigate("TeacherAssignmentDetail", { assignment: item, teacher_id, subject, course })}
+                    onPress={() =>
+                      state === "draft"
+                        ? navigation.navigate("CreateAssignment", { subject, course, teacher_id, draft: item })
+                        : navigation.navigate("TeacherAssignmentDetail", { assignment: item, teacher_id, subject, course })
+                    }
                   />
                 );
               })

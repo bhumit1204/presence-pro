@@ -72,6 +72,7 @@ function view(l, subj, teacherNames) {
     teacher_name: l.teacher_name || teacherNames[l.teacher_id] || "",
     division_name: l.division_name || "",
     elective: s.compulsary === false,
+    elective_group: s.compulsary === false ? (l.elective_group || s.elective_group || "") : "",
     day: l.day,
     start_time: l.start_time,
     end_time: l.end_time,

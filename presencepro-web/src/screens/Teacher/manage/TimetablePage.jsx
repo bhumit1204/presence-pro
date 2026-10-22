@@ -202,7 +202,14 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
   const group = !editing && String(subjectId).startsWith("g:") ? groups.find((g) => g.name === String(subjectId).slice(2)) : null;
   const pick = (id) => picks[id] || { teacher: "", room: "" };
   const setPick = (id, patch) => { setPicks((p) => ({ ...p, [id]: { ...(p[id] || { teacher: "", room: "" }), ...patch } })); sub.setConflicts([]); };
-  const groupReady = !group || group.subjects.every((s) => pick(s.subject_id).teacher || s.teacher_assigned);
+  // An elective's tutorial (or lab) is its own slot: only the subjects that have one take part, and it shows separately in the timetable.
+  // Attendance in it is still marked as lecture attendance.
+  const groupKinds = group
+    ? [["", "Lecture"], ...(group.subjects.some((s) => s.has_tutorial) ? [["tutorial", "Tutorial"]] : []), ...(group.subjects.some((s) => s.has_lab) ? [["lab", "Lab"]] : [])]
+    : [["", "Lecture"]];
+  const gKind = group && groupKinds.some(([k]) => k === kind) ? kind : "";
+  const groupSubjects = group ? group.subjects.filter((s) => gKind === "tutorial" ? s.has_tutorial : gKind === "lab" ? s.has_lab : true) : [];
+  const groupReady = !group || groupSubjects.every((s) => (gKind !== "tutorial" && pick(s.subject_id).teacher) || s.teacher_assigned);
 
   const subject = data.subjects.find((s) => s.subject_id === subjectId);
   const custom = editing && !lecture.subject_id;
@@ -235,10 +242,10 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
     } else if (group) {
       const res = await headApi.post("/timetable/group", {
         course_id: course.course_id, semester, group: group.name, day, start_time: start, end_time: end,
-        division_id: division || undefined, force: force || undefined,
-        options: group.subjects.map((s) => ({ subject_id: s.subject_id, room: pick(s.subject_id).room, teacher_id: pick(s.subject_id).teacher || undefined })),
+        division_id: division || undefined, force: force || undefined, kind: gKind || undefined,
+        options: groupSubjects.map((s) => ({ subject_id: s.subject_id, room: pick(s.subject_id).room, teacher_id: gKind === "tutorial" ? undefined : pick(s.subject_id).teacher || undefined })),
       });
-      onSaved(`${group.name} added to ${day}: ${plural(res.created, "subject")}, each in its own room.`);
+      onSaved(`${group.name}${gKind ? ` ${gKind}` : ""} added to ${day}: ${plural(res.created, "subject")}, each in its own room.`);
     } else {
       const res = await headApi.post("/timetable", {
         course_id: course.course_id, subject_id: subjectId, day, start_time: start, end_time: end, room,
@@ -276,7 +283,7 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
             <button type="button" className="mg-btn mg-btn--danger" onClick={() => save(true)} disabled={sub.busy}>Save anyway</button>
           ) : (
             <button type="button" className="mg-btn mg-btn--primary" onClick={() => save(false)} disabled={!valid || sub.busy}>
-              {sub.busy ? "Saving…" : editing ? "Save changes" : group ? `Add ${plural(group.subjects.length, "lecture")}` : "Add lecture"}
+              {sub.busy ? "Saving…" : editing ? "Save changes" : group ? `Add ${plural(groupSubjects.length, gKind === "tutorial" ? "tutorial" : gKind === "lab" ? "lab" : "lecture")}` : "Add lecture"}
             </button>
           )}
         </>
@@ -296,6 +303,23 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
           </optgroup>
         </select>
       </div>
+      {group && groupKinds.length > 1 && (
+        <div className="mg-field">
+          <span className="mg-label" id="tt-gkind-label">Session type</span>
+          <div className="tt-seg" role="radiogroup" aria-labelledby="tt-gkind-label">
+            {groupKinds.map(([k, l]) => (
+              <button key={k || "lecture"} type="button" role="radio" aria-checked={gKind === k} disabled={sub.busy}
+                      className={`tt-seg-btn${gKind === k ? " tt-seg-btn--on" : ""}`}
+                      onClick={() => { setKind(k); setPicks({}); sub.setConflicts([]); }}>{l}</button>
+            ))}
+          </div>
+          <span className="mg-help">
+            {gKind === "tutorial" ? "The elective's tutorial is its own slot, shown separately from its lectures. Only the subjects that have a tutorial are included; each is taught by its own teacher. Attendance is marked as lecture attendance."
+              : gKind === "lab" ? "A lab slot for the subjects of this elective that have a lab. Attendance is marked as lecture attendance."
+              : "Add the elective's lectures here, and its tutorial as a separate slot."}
+          </span>
+        </div>
+      )}
       {!editing && !group && subject && (kinds.length > 1 || subject.kind === "lab") && (
         <div className="mg-field">
           <span className="mg-label" id="tt-kind-label">Session type</span>
@@ -356,23 +380,28 @@ function LectureDialog({ mode, lecture, defaults, data, teachers, course, semest
 
       {group ? (
         <fieldset className="tt-group">
-          <legend>{group.name}: room and teacher for each subject</legend>
-          {group.subjects.map((s) => {
+          <legend>{group.name}{gKind ? ` ${gKind}` : ""}: room{gKind === "tutorial" ? "" : " and teacher"} for each subject</legend>
+          {groupSubjects.map((s) => {
             const p = pick(s.subject_id);
             return (
               <div className="tt-group-row" key={s.subject_id}>
                 <div className="tt-group-name"><strong>{s.subject_code}</strong><span>{s.subject_name}</span></div>
-                <RoomSelect rooms={roomList.rooms} value={p.room} disabled={sub.busy} ownOnly onlyType="classroom" ariaLabel={`Room for ${s.subject_name}`}
-                            taken={group.subjects.filter((x) => x.subject_id !== s.subject_id).map((x) => pick(x.subject_id).room).filter(Boolean)}
+                <RoomSelect rooms={roomList.rooms} value={p.room} disabled={sub.busy} ownOnly onlyType={gKind === "lab" ? "lab" : "classroom"} ariaLabel={`Room for ${s.subject_name}`}
+                            taken={groupSubjects.filter((x) => x.subject_id !== s.subject_id).map((x) => pick(x.subject_id).room).filter(Boolean)}
                             onChange={(v) => setPick(s.subject_id, { room: v })} />
-                <TeacherSelect id={`tt-t-${s.subject_id}`} teachers={teachers} value={p.teacher} disabled={sub.busy} onChange={(v) => setPick(s.subject_id, { teacher: v })}
-                               defaultLabel={s.teacher_name ? s.teacher_name : "Pick a teacher"} />
+                {gKind === "tutorial" ? (
+                  <span className="mg-help">{s.teacher_name ? `${s.teacher_name} (the subject's teacher)` : "No teacher assigned yet"}</span>
+                ) : (
+                  <TeacherSelect id={`tt-t-${s.subject_id}`} teachers={teachers} value={p.teacher} disabled={sub.busy} onChange={(v) => setPick(s.subject_id, { teacher: v })}
+                                 defaultLabel={s.teacher_name ? s.teacher_name : "Pick a teacher"} />
+                )}
               </div>
             );
           })}
           <span className="mg-help">
             {groupReady
               ? "Every student sees only the subject they chose, with its own room. Each subject needs its own room and teacher."
+              : gKind === "tutorial" ? "Assign a teacher to every subject first (Subjects & Faculty): a tutorial is taught by the subject's own teacher."
               : "Pick a teacher for every subject (some have none assigned yet)."}
           </span>
         </fieldset>
@@ -750,7 +779,9 @@ function SpecialDialog({ data, teachers, course, semester, defaultDivision, onCl
         division_id: division || undefined,
         replaces: picked, force: force || undefined,
       });
-      onSaved(`Special session added on ${fmtShort(date)}.${res.status === "applied" ? " It is live now." : " The timetable returns to normal afterwards."}`);
+      onSaved(res.status === "awaiting_approval"
+        ? `Request sent for ${fmtShort(date)}. The timetable changes only when the teacher whose lecture it takes over approves.`
+        : `Special session added on ${fmtShort(date)}.${res.status === "applied" ? " It is live now." : " The timetable returns to normal afterwards."}`);
     } else {
       const res = await headApi.post("/timetable", {
         course_id: course.course_id, subject_id: subjectId || undefined, day, start_time: start, end_time: end, room,
@@ -931,7 +962,7 @@ function Grid({ lectures, colorOf, onSlot, onEmpty, courseId }) {
                     >
                     <button
                       type="button"
-                      className="tt-slot"
+                      className={`tt-slot${l.kind === "tutorial" ? " tt-slot--tutorial" : l.kind === "lab" ? " tt-slot--lab" : ""}`}
                       style={{ background: bg, color: fg, borderColor: fg }}
                       onClick={() => onSlot(l)}
                       title={`${l.subject_name}${l.batch ? ` · ${l.batch}${batchRange(l) ? ` (${batchRange(l)})` : ""}` : ""} · ${l.start_time}–${l.end_time}${l.teacher_name ? ` · ${l.teacher_name}` : ""}${l.room ? ` · ${l.room}` : ""}`}
@@ -1021,16 +1052,39 @@ function describe(o) {
   return { tag: "Special", text: `${sp.subject_code || ""} ${sp.subject_name || ""} ${sp.start_time}–${sp.end_time}${sp.teacher_name ? ` · ${sp.teacher_name}` : ""}${rep}` };
 }
 
-function Changes({ overrides, today, onUndo }) {
+function Changes({ overrides, requests = [], today, onUndo, onChanged }) {
   return (
     <section className="tt-changes tt-noprint" aria-label="Temporary changes">
       <div className="tt-changes-head">
         <h3>Temporary changes</h3>
         <span>Each one applies on its date only; the timetable then returns to normal automatically.</span>
       </div>
-      {overrides.length === 0 ? (
+      {requests.length > 0 && (
+        <div className="tt-changes-list" role="list" aria-label="Special sessions waiting for approval">
+          {requests.map((r) => (
+            <div className="tt-change" role="listitem" key={r.override_id}>
+              <div className="tt-change-date">
+                <strong>{fmtShort(r.date)}</strong>
+                {r.status === "rejected"
+                  ? <span className="mg-badge" style={{ background: "#FEE2E2", color: "#B91C1C" }}>Rejected</span>
+                  : <span className="mg-badge mg-badge--amber">Waiting for approval</span>}
+              </div>
+              <div className="tt-change-body">
+                <span className="tt-tag tt-tag--special">Special</span> {r.title} {r.start_time}–{r.end_time}
+                {r.status === "rejected"
+                  ? <span className="tt-change-note"> — rejected by {r.rejected_by || "the teacher"}{r.reject_reason ? `: ${r.reject_reason}` : " (no reason given)"}</span>
+                  : <span className="tt-change-note"> — waiting for {r.approvals.filter((a) => a.status === "pending").map((a) => a.name || "a teacher").join(", ")}; the timetable stays as it is until then</span>}
+              </div>
+              <button type="button" className="mg-btn mg-btn--sm" onClick={async () => { try { await headApi.del(`/timetable/overrides/${r.override_id}`); } catch { /* shown on reload */ } onChanged && onChanged(); }}>
+                {r.status === "rejected" ? "Dismiss" : "Withdraw"}
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {overrides.length === 0 && requests.length === 0 ? (
         <div className="tt-changes-empty">No one-day changes coming up.</div>
-      ) : (
+      ) : overrides.length === 0 ? null : (
         <div className="tt-changes-list" role="list">
           {overrides.map((o) => {
             const d = describe(o);
@@ -1289,7 +1343,7 @@ export default function TimetablePage() {
             {divisions.length > 0 && " Lectures without a division are common to everyone; pick a division above to see exactly what its students get, and add a lecture “for Division X only” to give a division its own teacher or time."}
           </p>
 
-          <Changes overrides={data.overrides} today={data.today} onUndo={undo} />
+          <Changes overrides={data.overrides} requests={data.session_requests || []} today={data.today} onUndo={undo} onChanged={() => reloadRef.current && reloadRef.current()} />
         </>
       )}
 

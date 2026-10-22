@@ -3,7 +3,7 @@ import { Alert, KeyboardAvoidingView, Platform, ScrollView, View } from "react-n
 import { useNavigation, useRoute } from "@react-navigation/native";
 import * as DocumentPicker from "expo-document-picker";
 import { Button, Card, EmptyState, Header, SP, Screen, SectionLabel, TextField, ToggleRow } from "../../../components/ui";
-import { AttachmentEditor, DateTimeField, LinkItem, api, jsonInit, startOfToday, uploadFiles } from "../WorkShared";
+import { AttachmentEditor, DateTimeField, LinkItem, TagPicker, api, jsonInit, startOfToday, uploadFiles } from "../WorkShared";
 
 const WEEK = 7 * 24 * 60 * 60 * 1000;
 
@@ -12,6 +12,7 @@ export default function CreateAnnouncement() {
   const route = useRoute<any>();
   const { subject, course, teacher_id } = route.params ?? {};
 
+  const [tagId, setTagId] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [text, setText] = useState("");
   const [pinned, setPinned] = useState(false);
@@ -72,6 +73,7 @@ export default function CreateAnnouncement() {
           title: title.trim(),
           text: text.trim(),
           is_pinned: pinned,
+          tag_id: tagId,
           links: JSON.stringify(links),
           attachments: "[]",
         };
@@ -105,6 +107,7 @@ export default function CreateAnnouncement() {
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
         <ScrollView contentContainerStyle={{ padding: SP.lg, paddingBottom: SP.xxl }} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <Card style={{ marginBottom: SP.md, gap: SP.lg }}>
+            <TagPicker subject_id={subject.subject_id} course_id={course.course_id} teacher_id={teacher_id} value={tagId} onChange={setTagId} disabled={busy || !!createdId.current} />
             <TextField
               label="Title"
               value={title}

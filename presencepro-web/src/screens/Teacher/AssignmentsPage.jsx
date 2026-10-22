@@ -8,8 +8,8 @@
  *  3. Create — new assignment with file upload to R2 via /api/assignments/upload
  *
  * API used (existing backend):
- *  GET    /api/assignments?subject_id=&course_id=
- *  POST   /api/assignments                         { teacher_id, course_id, subject_id, title, instructions, questions, marks, due_date, allow_late, attachments, links }
+ *  GET    /api/assignments?subject_id=&course_id=&teacher_id=   (teacher also gets drafts + scheduled)
+ *  POST   /api/assignments                         { status: published|draft|scheduled, kind, publish_at, teacher_id, course_id, subject_id, title, instructions, questions, marks, due_date, allow_late, attachments, links }
  *  PUT    /api/assignments/:id                     { teacher_id, ...fields, deleted_keys }
  *  DELETE /api/assignments/:id?teacher_id=
  *  GET    /api/assignments/:id/submissions?teacher_id=
@@ -87,7 +87,41 @@ function FileIcon({ type }) {
   return "📎";
 }
 
-const isLabWork = (a) => a?.kind === "lab_work";
+const KINDS = [
+  { key: "assignment",    label: "Lecture work",  short: "Lecture",  noun: "Assignment" },
+  { key: "lab_work",      label: "Lab work",      short: "Lab",      noun: "Lab Work" },
+  { key: "tutorial_work", label: "Tutorial work", short: "Tutorial", noun: "Tutorial Work" },
+];
+const kindOf = (a) => (KINDS.some((k) => k.key === a?.kind) ? a.kind : "assignment");
+const kindMeta = (a) => KINDS.find((k) => k.key === kindOf(a));
+const KIND_CHIP = { assignment: "", lab_work: " ap-info-chip--green", tutorial_work: " ap-info-chip--purple" };
+// a teacher's list includes drafts and scheduled posts; `state` comes from the server
+const stateOf = (a) => a?.state || a?.status || "published";
+const isLabWork = (a) => kindOf(a) === "lab_work";
+
+// which kinds a subject can have (a lab subject is lab-only work; others need the flag)
+function kindAllowed(subject) {
+  if (!subject) return { assignment: true, lab_work: true, tutorial_work: true };
+  const slim = subject.has_lab === undefined && subject.has_tutorial === undefined && subject.kind === undefined;
+  if (slim) return { assignment: true, lab_work: true, tutorial_work: true };
+  return {
+    assignment: true,
+    lab_work: !!subject.has_lab || subject.kind === "lab",
+    tutorial_work: !!subject.has_tutorial,
+  };
+}
+
+// <input type="datetime-local"> works in local time without a zone
+const pad2 = (n) => String(n).padStart(2, "0");
+function toLocalInput(d) {
+  const x = d instanceof Date ? d : new Date(d);
+  return `${x.getFullYear()}-${pad2(x.getMonth() + 1)}-${pad2(x.getDate())}T${pad2(x.getHours())}:${pad2(x.getMinutes())}`;
+}
+function nextFullHour() {
+  const d = new Date(Date.now() + 3600e3);
+  d.setMinutes(0, 0, 0);
+  return toLocalInput(d);
+}
 
 function StatusBadge({ sub }) {
   if (!sub)                    return <span className="ap-badge ap-badge--missing">Not submitted</span>;
@@ -96,11 +130,97 @@ function StatusBadge({ sub }) {
   return                              <span className="ap-badge ap-badge--submitted">Submitted</span>;
 }
 
+
+// ── Tags (topics) of a subject: "CA Assignment", "Syllabus", ... ─────────────
+function useTags(subject) {
+  const [tags, setTags] = useState([]);
+  const sid = subject?.subject_id, cid = subject?.course_id;
+  const reload = useCallback(async () => {
+    if (!sid || !cid) { setTags([]); return []; }
+    try {
+      const r = await get(`/api/assignments/tags?subject_id=${encodeURIComponent(sid)}&course_id=${encodeURIComponent(cid)}`);
+      setTags(r.tags || []);
+      return r.tags || [];
+    } catch { return []; }
+  }, [sid, cid]);
+  useEffect(() => { reload(); }, [reload]);
+  return { tags, reload };
+}
+const tagNameOf = (tags, id) => (id ? tags.find((t) => t.tag_id === id)?.name || null : null);
+
+function TagPicker({ subject, teacherId, value, onChange, disabled }) {
+  const { tags, reload } = useTags(subject);
+  const [adding, setAdding] = useState(false);
+  const [name, setName]     = useState("");
+  const [busy, setBusy]     = useState(false);
+  const [manage, setManage] = useState(false);
+  const [err, setErr]       = useState("");
+
+  const add = async () => {
+    const n = name.trim();
+    if (!n || busy) return;
+    setBusy(true); setErr("");
+    try {
+      const r = await post("/api/assignments/tags", { teacher_id: teacherId, subject_id: subject.subject_id, course_id: subject.course_id, name: n });
+      await reload(); onChange(r.tag.tag_id); setName(""); setAdding(false);
+    } catch (e) { setErr(e.message); } finally { setBusy(false); }
+  };
+  const rename = async (t) => {
+    const n = window.prompt("Rename tag", t.name);
+    if (n == null || !n.trim() || n.trim() === t.name) return;
+    try { await put(`/api/assignments/tags/${t.tag_id}`, { teacher_id: teacherId, name: n.trim() }); await reload(); } catch (e) { setErr(e.message); }
+  };
+  const remove = async (t) => {
+    if (!window.confirm(`Delete the tag "${t.name}"? Work with this tag stays, it just loses the tag.`)) return;
+    try {
+      await del(`/api/assignments/tags/${t.tag_id}?teacher_id=${encodeURIComponent(teacherId)}`);
+      const fresh = await reload();
+      if (value && !fresh.some((x) => x.tag_id === value)) onChange(null);
+    } catch (e) { setErr(e.message); }
+  };
+
+  return (
+    <div className="ap-card">
+      <label className="ap-label">
+        Tag <span className="ap-optional">(optional)</span>
+        {tags.length > 0 && <button type="button" className="ap-back-btn" style={{ float: "right" }} onClick={() => setManage((v) => !v)}>{manage ? "Done" : "Manage"}</button>}
+      </label>
+      <div className="ap-subject-pills">
+        <button type="button" disabled={disabled} className={`ap-pill${value == null ? " ap-pill--active" : ""}`} onClick={() => onChange(null)}>No tag</button>
+        {tags.map((t) => (
+          <span key={t.tag_id} style={{ display: "inline-flex", alignItems: "center", gap: 4 }}>
+            <button type="button" disabled={disabled} className={`ap-pill${value === t.tag_id ? " ap-pill--active" : ""}`} onClick={() => onChange(t.tag_id)}>🏷 {t.name}</button>
+            {manage && <>
+              <button type="button" onClick={() => rename(t)} title={`Rename ${t.name}`} aria-label={`Rename ${t.name}`}
+                style={{ width: 28, height: 28, borderRadius: 8, border: "1px solid #E5E7EB", background: "#fff", color: "#4834D4", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>✎</button>
+              <button type="button" onClick={() => remove(t)} title={`Delete ${t.name}`} aria-label={`Delete ${t.name}`}
+                style={{ width: 28, height: 28, borderRadius: 8, border: "1px solid #FECACA", background: "#FEF2F2", color: "#DC2626", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: 0 }}>✕</button>
+            </>}
+          </span>
+        ))}
+        <button type="button" disabled={disabled} className={`ap-pill${adding ? " ap-pill--active" : ""}`} onClick={() => setAdding((v) => !v)}>+ New tag</button>
+      </div>
+      {adding && (
+        <div className="ap-link-row" style={{ marginTop: 10 }}>
+          <input className="ap-input ap-link-input" placeholder="e.g. CA Assignment, Syllabus" maxLength={40}
+            value={name} onChange={(e) => setName(e.target.value)} onKeyDown={(e) => e.key === "Enter" && add()} />
+          <button type="button" className="ap-link-add" disabled={busy || !name.trim()} onClick={add}>Add</button>
+        </div>
+      )}
+      {err && <div className="ap-error" style={{ marginTop: 8 }}>{err}</div>}
+    </div>
+  );
+}
+
 // ════════════════════════════════════════════════════════════════════
 // CREATE / EDIT PANEL
 // ════════════════════════════════════════════════════════════════════
 function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel }) {
   const isEdit = !!editAssignment;
+  const editState = editAssignment ? stateOf(editAssignment) : "new";
+  const isDraft = editState === "draft";
+  const isScheduledEdit = editState === "scheduled";
+  const isPostedEdit = isEdit && !isDraft && !isScheduledEdit;
 
   const [activeSubj,    setActiveSubj]    = useState(editAssignment ? null : (subjects[0] || null));
   const [title,         setTitle]         = useState(editAssignment?.title         || "");
@@ -111,7 +231,14 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
     editAssignment?.due_date ? editAssignment.due_date.slice(0, 16) : ""
   );
   const [allowLate,     setAllowLate]     = useState(editAssignment?.allow_late ?? false);
-  const [kind,          setKind]          = useState(editAssignment?.kind || "assignment"); // "assignment" | "lab_work"
+  const [tagId,         setTagId]         = useState(editAssignment?.tag_id ?? null);
+  const [kind,          setKind]          = useState(kindOf(editAssignment));   // assignment | lab_work | tutorial_work
+  const [scheduleOn,    setScheduleOn]    = useState(isScheduledEdit || (isDraft && !!editAssignment?.publish_at && new Date(editAssignment.publish_at) > new Date()));
+  const [publishAt,     setPublishAt]     = useState(
+    editAssignment?.publish_at && new Date(editAssignment.publish_at) > new Date() ? toLocalInput(editAssignment.publish_at) : nextFullHour()
+  );
+  const [saveState,     setSaveState]     = useState(isDraft ? "saved" : "idle");   // idle | saving | saved | failed
+  const [savedAt,       setSavedAt]       = useState(isDraft && editAssignment?.updated_at ? new Date(editAssignment.updated_at) : null);
 
   // Files: existing (already uploaded) + new (picked by user)
   const [existingFiles, setExistingFiles] = useState(editAssignment?.attachments || []);
@@ -123,6 +250,13 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
   const [uploading,  setUploading]  = useState(false);
   const [error,      setError]      = useState("");
   const fileRef = useRef();
+  const draftId   = useRef(isDraft ? editAssignment.assignment_id : null);
+  const savedSig  = useRef("");
+  const uploaded  = useRef(new Map());     // File -> stored attachment
+  const removed   = useRef([]);            // stored files taken out again
+  const queue     = useRef(Promise.resolve());
+  const closing   = useRef(false);
+  const autosave  = !isEdit || isDraft;    // posted and scheduled items are edited with an explicit Save
 
   // For edit, resolve the subject from the assignment
   useEffect(() => {
@@ -151,23 +285,19 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
     setError("");
   };
 
-  const uploadNewFiles = async () => {
-    if (!newFiles.length) return [];
-    setUploading(true);
-    try {
-      const fd = new FormData();
-      fd.append("folder", "assignments");
-      if (isEdit) fd.append("entity_id", editAssignment.assignment_id);
-      newFiles.forEach((f) => fd.append("files", f.file, f.name));
-      const data = await apiFetch("/api/assignments/upload", { method: "POST", body: fd });
-      if (!data.success) throw new Error(data.error);
-      return data.files || [];
-    } finally { setUploading(false); }
-  };
+  const allowed = kindAllowed(activeSubj);
+  // a kind the subject cannot have falls back to lecture work (an existing item keeps its own kind)
+  const effectiveKind = allowed[kind] || kind === kindOf(editAssignment) ? kind : "assignment";
+  const kindMetaNow = KINDS.find((k) => k.key === effectiveKind);
 
-  // lab work is offered only for a subject that has a lab
-  const canLabWork   = !!activeSubj?.has_lab || kind === "lab_work";
-  const effectiveKind = canLabWork ? kind : "assignment";
+  const marksOk = !!marks && !isNaN(Number(marks)) && Number(marks) >= 1 && Number(marks) <= 1000;
+  const hasContent = !!(title.trim() || marks || instructions.trim() || questions.trim() || newFiles.length || existingFiles.length || links.length);
+  const sig = JSON.stringify([
+    activeSubj?.subject_id || editAssignment?.subject_id, effectiveKind, tagId, title.trim(), marksOk ? Number(marks) : null, dueDate, instructions.trim(), questions.trim(), allowLate,
+    scheduleOn ? publishAt : null, existingFiles.map((f) => f.key || f.url), newFiles.map((f) => f.name + f.size), links.map((l) => l.url),
+  ]);
+  const sigRef = useRef(sig); sigRef.current = sig;
+  if (isDraft && savedSig.current === "") savedSig.current = sig;   // an opened draft starts out saved
 
   const validate = () => {
     if (!activeSubj)            { setError("Select a subject"); return false; }
@@ -175,43 +305,149 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
     if (!marks || isNaN(Number(marks)) || Number(marks) < 1) { setError("Marks must be a positive number"); return false; }
     if (!dueDate)               { setError("Due date is required"); return false; }
     if (!instructions.trim() && !questions.trim()) { setError("At least instructions or questions required"); return false; }
+    if (!allowed[effectiveKind] && !(isEdit && effectiveKind === kindOf(editAssignment))) {
+      setError(effectiveKind === "lab_work" ? "This subject has no lab" : "This subject has no tutorial"); return false;
+    }
+    if (scheduleOn && !isPostedEdit) {
+      if (!publishAt || new Date(publishAt) <= new Date()) { setError("Choose a posting time in the future"); return false; }
+      if (new Date(dueDate) <= new Date(publishAt)) { setError("The due date must be after the posting time"); return false; }
+    }
+    if (!scheduleOn && new Date(dueDate) <= new Date() && !isPostedEdit) { setError("The due date must be in the future"); return false; }
     return true;
+  };
+
+  // Upload picked files that are not stored yet; returns every attachment of the form.
+  const collectAttachments = async () => {
+    for (const [f, att] of [...uploaded.current.entries()]) {
+      if (!newFiles.some((n) => n.file === f)) {            // picked, uploaded, then removed again
+        if (att?.key) removed.current.push(att.key);
+        uploaded.current.delete(f);
+      }
+    }
+    const fresh = newFiles.filter((n) => !uploaded.current.has(n.file));
+    if (fresh.length) {
+      setUploading(true);
+      try {
+        const fd = new FormData();
+        fd.append("folder", "assignments");
+        if (draftId.current || isEdit) fd.append("entity_id", draftId.current || editAssignment.assignment_id);
+        fresh.forEach((f) => fd.append("files", f.file, f.name));
+        const data = await apiFetch("/api/assignments/upload", { method: "POST", body: fd });
+        if (!data.success) throw new Error(data.error);
+        fresh.forEach((f, i) => { if (data.files?.[i]) uploaded.current.set(f.file, data.files[i]); });
+      } finally { setUploading(false); }
+    }
+    return [...existingFiles, ...newFiles.map((n) => uploaded.current.get(n.file)).filter(Boolean)];
+  };
+
+  const baseBody = (attachments) => ({
+    teacher_id: teacherId,
+    kind:       effectiveKind,
+    tag_id:     tagId,
+    title:      title.trim(),
+    instructions: instructions.trim() || null,
+    questions:    questions.trim()    || null,
+    allow_late: allowLate,
+    attachments,
+    links,
+  });
+
+  // Save the work in progress as a draft (runs one after another, never two at once).
+  const saveDraft = () => {
+    const run = async () => {
+      if (!autosave || !activeSubj) return;
+      if (draftId.current && sigRef.current === savedSig.current) return;
+      if (!hasContent) return;
+      setSaveState("saving");
+      try {
+        const attachments = await collectAttachments();
+        const body = {
+          ...baseBody(attachments),
+          status: "draft",
+          marks: marksOk ? Number(marks) : null,
+          due_date: dueDate ? new Date(dueDate).toISOString() : null,
+          publish_at: scheduleOn && publishAt ? new Date(publishAt).toISOString() : null,
+        };
+        if (!draftId.current) {
+          const r = await post("/api/assignments", { ...body, course_id: activeSubj.course_id, subject_id: activeSubj.subject_id });
+          draftId.current = r.assignment_id;
+        } else {
+          await put(`/api/assignments/${draftId.current}`, { ...body, deleted_keys: removed.current });
+        }
+        removed.current = [];
+        savedSig.current = sigRef.current;
+        setSavedAt(new Date());
+        setSaveState("saved");
+      } catch (e) { setSaveState("failed"); throw e; }
+    };
+    const next = queue.current.then(run, run);
+    queue.current = next.catch(() => {});
+    return next;
+  };
+  const saveRef = useRef(saveDraft); saveRef.current = saveDraft;
+
+  // autosave a moment after the last change
+  useEffect(() => {
+    if (!autosave || closing.current || saving || !hasContent) return;
+    if (draftId.current && sig === savedSig.current) return;
+    const t = setTimeout(() => { saveRef.current().catch(() => {}); }, 1500);
+    return () => clearTimeout(t);
+  }, [sig, saving]);
+
+  // closing the tab with unsaved changes: warn (the save above normally has already happened)
+  useEffect(() => {
+    if (!autosave) return;
+    const h = (e) => {
+      if (closing.current || !hasContent) return;
+      if (draftId.current && sigRef.current === savedSig.current) return;
+      e.preventDefault(); e.returnValue = "";
+    };
+    window.addEventListener("beforeunload", h);
+    return () => window.removeEventListener("beforeunload", h);
+  }, [autosave, hasContent]);
+
+  const goBack = async () => {
+    if (autosave && hasContent && !(draftId.current && sig === savedSig.current)) {
+      try { await saveRef.current(); }
+      catch (e) { if (!window.confirm("The draft could not be saved. Leave anyway and lose what you typed?")) return; }
+    }
+    closing.current = true;
+    onCancel();
+  };
+
+  const discardDraft = async () => {
+    if (!window.confirm("Delete this draft?")) return;
+    closing.current = true;
+    try {
+      await queue.current;
+      if (draftId.current) await del(`/api/assignments/${draftId.current}?teacher_id=${encodeURIComponent(teacherId)}`);
+    } catch (e) { setError(e.message); closing.current = false; return; }
+    onDone();
   };
 
   const handleSubmit = async () => {
     if (!validate()) return;
     setSaving(true); setError("");
     try {
-      const uploaded = await uploadNewFiles();
-      const allFiles = [...existingFiles, ...uploaded];
-
-      const deletedKeys = isEdit
-        ? (editAssignment.attachments || [])
-            .filter((f) => !existingFiles.find((e) => e.key === f.key))
-            .map((f) => f.key)
-        : [];
-
+      await queue.current;
+      const attachments = await collectAttachments();
       const body = {
-        teacher_id:   teacherId,
-        course_id:    activeSubj.course_id,
-        subject_id:   activeSubj.subject_id,
-        title:        title.trim(),
-        kind:         effectiveKind,
-        instructions: instructions.trim() || undefined,
-        questions:    questions.trim()    || undefined,
-        marks:        Number(marks),
-        due_date:     new Date(dueDate).toISOString(),
-        allow_late:   allowLate,
-        attachments:  allFiles,
-        links,
-        ...(isEdit && { deleted_keys: deletedKeys }),
+        ...baseBody(attachments),
+        marks:    Number(marks),
+        due_date: new Date(dueDate).toISOString(),
       };
-
-      if (isEdit) {
-        await put(`/api/assignments/${editAssignment.assignment_id}`, body);
+      if (isPostedEdit) {
+        await put(`/api/assignments/${editAssignment.assignment_id}`, { ...body, deleted_keys: removed.current });
       } else {
-        await post("/api/assignments", body);
+        const status = scheduleOn ? "scheduled" : "published";
+        const full = { ...body, status, publish_at: scheduleOn ? new Date(publishAt).toISOString() : null };
+        if (draftId.current || isScheduledEdit) {
+          await put(`/api/assignments/${draftId.current || editAssignment.assignment_id}`, { ...full, deleted_keys: removed.current });
+        } else {
+          await post("/api/assignments", { ...full, course_id: activeSubj.course_id, subject_id: activeSubj.subject_id });
+        }
       }
+      closing.current = true;
       onDone();
     } catch (e) { setError(e.message); }
     finally { setSaving(false); }
@@ -220,10 +456,18 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
   return (
     <div className="ap-form-wrap">
       <div className="ap-form-header">
-        <button className="ap-back-btn" onClick={onCancel}>← Back</button>
+        <button className="ap-back-btn" onClick={goBack}>← Back</button>
         <h2 className="ap-form-title">
-          {isEdit ? (effectiveKind === "lab_work" ? "Edit Lab Work" : "Edit Assignment") : (effectiveKind === "lab_work" ? "New Lab Work" : "New Assignment")}
+          {isDraft ? "Edit Draft" : isEdit ? `Edit ${kindMetaNow.noun}` : `New ${kindMetaNow.noun}`}
         </h2>
+        {autosave && (
+          <span style={{ marginLeft: "auto", fontSize: 12.5, color: saveState === "failed" ? "#B91C1C" : "#6B7280" }}>
+            {saveState === "saving" ? "Saving draft…"
+              : saveState === "failed" ? "Could not save the draft. It retries when you change something."
+              : saveState === "saved" && savedAt ? `Draft saved ${savedAt.toLocaleTimeString("en-IN", { hour: "numeric", minute: "2-digit" })}`
+              : hasContent ? "Saves as a draft while you type" : ""}
+          </span>
+        )}
       </div>
 
       {error && <div className="ap-error">{error}</div>}
@@ -248,22 +492,33 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
         <div className="ap-subj-display">Subject: <strong>{subjects[0].subject_name}</strong></div>
       )}
 
-      {canLabWork && (
-        <div className="ap-card">
-          <label className="ap-label">Type</label>
-          <div className="ap-subject-pills">
-            <button type="button" className={`ap-pill${effectiveKind === "assignment" ? " ap-pill--active" : ""}`} onClick={() => setKind("assignment")}>Assignment</button>
-            <button type="button" className={`ap-pill${effectiveKind === "lab_work" ? " ap-pill--active" : ""}`} onClick={() => setKind("lab_work")}>Lab work</button>
-          </div>
-          <div style={{ fontSize: 12, color: "#6B7280", marginTop: 6 }}>
-            Lab work is for practicals of this subject&apos;s lab. Students see it labelled as lab work.
-          </div>
+      <div className="ap-card">
+        <label className="ap-label">Type</label>
+        <div className="ap-subject-pills">
+          {KINDS.map((k) => {
+            const ok = allowed[k.key] || (isEdit && k.key === kindOf(editAssignment));
+            return (
+              <button key={k.key} type="button" disabled={!ok}
+                title={ok ? "" : k.key === "lab_work" ? "This subject has no lab" : "This subject has no tutorial"}
+                style={ok ? undefined : { opacity: 0.4, cursor: "not-allowed" }}
+                className={`ap-pill${effectiveKind === k.key ? " ap-pill--active" : ""}`}
+                onClick={() => ok && setKind(k.key)}>{k.label}</button>
+            );
+          })}
         </div>
-      )}
+        <div style={{ fontSize: 12, color: "#6B7280", marginTop: 6 }}>
+          {effectiveKind === "lab_work" ? "Lab work goes to the whole division, not to one batch."
+            : effectiveKind === "tutorial_work" ? "Tutorial work goes to everyone who takes this subject."
+            : !allowed.lab_work && !allowed.tutorial_work ? "This subject has no lab or tutorial. Tick Lab or Tutorial on the subject (Manage > Subjects) to post that kind of work."
+            : "Students see the type on every assignment."}
+        </div>
+      </div>
+
+      {activeSubj && <TagPicker subject={activeSubj} teacherId={teacherId} value={tagId} onChange={setTagId} disabled={saving} />}
 
       <div className="ap-card">
         <label className="ap-label">Title *</label>
-        <input className="ap-input" placeholder="Assignment title"
+        <input className="ap-input" placeholder={effectiveKind === "lab_work" ? "e.g. Experiment 3: Linked lists" : effectiveKind === "tutorial_work" ? "e.g. Tutorial sheet 2" : "Assignment title"}
           value={title} onChange={(e) => setTitle(e.target.value)} />
 
         <div className="ap-row-2">
@@ -312,7 +567,7 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
             <span className="ap-file-name">{f.name}</span>
             <a href={f.url} target="_blank" rel="noreferrer" className="ap-file-view">Open</a>
             <button className="ap-file-remove"
-              onClick={() => setExistingFiles((prev) => prev.filter((e) => e.key !== f.key))}>✕</button>
+              onClick={() => { setExistingFiles((prev) => prev.filter((e) => e.key !== f.key)); if (f.key) removed.current.push(f.key); }}>✕</button>
           </div>
         ))}
 
@@ -352,12 +607,39 @@ function AssignmentForm({ subjects, teacherId, editAssignment, onDone, onCancel 
         ))}
       </div>
 
+      {!isPostedEdit && (
+        <div className="ap-card">
+          <Toggle
+            on={scheduleOn} onChange={setScheduleOn}
+            label="Schedule for later"
+            sub="It posts by itself at the time you choose and students are notified then. Until then they cannot see it."
+            color="#4834D4"
+          />
+          {scheduleOn && (
+            <>
+              <label className="ap-label" style={{ marginTop: 12 }}>Post at *</label>
+              <input className="ap-input" type="datetime-local" min={toLocalInput(new Date())}
+                value={publishAt} onChange={(e) => setPublishAt(e.target.value)} />
+            </>
+          )}
+        </div>
+      )}
+
       <button
         className="ap-submit-btn"
         disabled={saving || uploading}
         onClick={handleSubmit}>
-        {uploading ? "Uploading files…" : saving ? "Saving…" : isEdit ? "Save Changes" : effectiveKind === "lab_work" ? "Create Lab Work" : "Create Assignment"}
+        {uploading ? "Uploading files…" : saving ? "Saving…"
+          : isPostedEdit ? "Save Changes"
+          : scheduleOn ? (isScheduledEdit ? "Save schedule" : "Schedule")
+          : isDraft ? `Post ${kindMetaNow.noun}` : `Create ${kindMetaNow.noun}`}
       </button>
+      {autosave && (
+        <div style={{ display: "flex", gap: 10, marginTop: 10 }}>
+          <button className="ap-btn-cancel" style={{ flex: 1 }} disabled={saving || !hasContent} onClick={goBack}>Save draft and close</button>
+          {draftId.current && <button className="ap-btn-cancel" style={{ flex: 1, color: "#B91C1C" }} disabled={saving} onClick={discardDraft}>Delete draft</button>}
+        </div>
+      )}
     </div>
   );
 }
@@ -635,17 +917,19 @@ function AssignmentDetail({ assignment: initialAssignment, teacherId, subjects, 
   const [gradeAllOpen, setGradeAllOpen]  = useState(false);
   const [error,        setError]         = useState("");
   const [deleting,     setDeleting]      = useState(false);
+  const { tags: detailTags } = useTags(subjects.find((x) => x.subject_id === initialAssignment.subject_id) || { subject_id: initialAssignment.subject_id, course_id: initialAssignment.course_id });
 
   const load = useCallback(async () => {
     setLoading(true); setError("");
     try {
-      const [subData, assignData, stdData] = await Promise.all([
+      const assignData = await get(`/api/assignments/${assignment.assignment_id}?teacher_id=${encodeURIComponent(teacherId)}`);
+      if (assignData.success) setAssignment(assignData.assignment);
+      if (stateOf(assignData.assignment) !== "published") { setRows([]); return; }   // nothing can be submitted yet
+
+      const [subData, stdData] = await Promise.all([
         get(`/api/assignments/${assignment.assignment_id}/submissions?teacher_id=${encodeURIComponent(teacherId)}`),
-        get(`/api/assignments/${assignment.assignment_id}`),
         get(`/api/assignments/${assignment.assignment_id}/students?teacher_id=${encodeURIComponent(teacherId)}`).catch(() => ({ success: false, students: [] })),
       ]);
-
-      if (assignData.success) setAssignment(assignData.assignment);
 
       const submissions = subData.submissions || [];
       const subMap      = new Map(submissions.map((s) => [s.student_uid, s]));
@@ -691,7 +975,17 @@ function AssignmentDetail({ assignment: initialAssignment, teacherId, subjects, 
   const submitted     = rows.filter((r) => r.submission).length;
   const graded        = rows.filter((r) => r.submission?.status === "graded").length;
   const missing       = totalStudents - submitted;
-  const overdue       = isOverdue(assignment.due_date);
+  const state         = stateOf(assignment);
+  const overdue       = state === "published" && isOverdue(assignment.due_date);
+
+  const setStatus = async (status) => {
+    if (status === "published" && !window.confirm("Post now? Students are notified straight away instead of at the scheduled time.")) return;
+    try {
+      await put(`/api/assignments/${assignment.assignment_id}`, { teacher_id: teacherId, status });
+      if (status === "draft") { onBack(true); return; }
+      load();
+    } catch (e) { alert(e.message); }
+  };
 
   const visibleRows = viewMode === "submitted"
     ? rows.filter((r) => r.submission)
@@ -705,13 +999,27 @@ function AssignmentDetail({ assignment: initialAssignment, teacherId, subjects, 
       <div className="ap-detail-topbar">
         <button className="ap-back-btn" onClick={() => onBack(false)}>← Back</button>
         <h2 className="ap-detail-title">{assignment.title}</h2>
-        {isLabWork(assignment) && <span className="ap-info-chip ap-info-chip--purple" style={{ marginLeft: 8 }}>Lab work</span>}
+        <span className={`ap-info-chip${KIND_CHIP[kindOf(assignment)]}`} style={{ marginLeft: 8 }}>{kindMeta(assignment).label}</span>
+        {tagNameOf(detailTags, assignment.tag_id) && <span className="ap-info-chip" style={{ marginLeft: 6 }}>🏷 {tagNameOf(detailTags, assignment.tag_id)}</span>}
+        {state === "draft" && <span className="ap-info-chip" style={{ marginLeft: 6, background: "#FEF3C7", color: "#92400E" }}>Draft</span>}
+        {state === "scheduled" && <span className="ap-info-chip" style={{ marginLeft: 6, background: "#DBEAFE", color: "#1E40AF" }}>Scheduled</span>}
         <div className="ap-detail-actions">
           <button className="ap-icon-btn" onClick={() => onEdit(assignment)} title="Edit">✏️</button>
           <button className="ap-icon-btn ap-icon-btn--danger"
             onClick={handleDelete} disabled={deleting} title="Delete">🗑</button>
         </div>
       </div>
+
+      {state === "scheduled" && (
+        <div className="ap-content-card" style={{ borderLeft: "4px solid #3B82F6" }}>
+          <div className="ap-content-label">Posts {fmtDate(assignment.publish_at)}</div>
+          <div className="ap-content-text">Students cannot see this yet. They are notified when it posts.</div>
+          <div style={{ display: "flex", gap: 14, marginTop: 8 }}>
+            <button className="ap-back-btn" onClick={() => setStatus("published")}>Post now</button>
+            <button className="ap-back-btn" onClick={() => setStatus("draft")}>Move to drafts</button>
+          </div>
+        </div>
+      )}
 
       {/* Info chips */}
       <div className="ap-info-strip">
@@ -748,6 +1056,7 @@ function AssignmentDetail({ assignment: initialAssignment, teacherId, subjects, 
         </div>
       )}
 
+      {state === "published" && (<>
       {/* Stats */}
       <div className="ap-stats-row">
         <div className="ap-stat"><span className="ap-stat-val ap-stat-val--purple">{submitted}</span><span className="ap-stat-label">Submitted</span></div>
@@ -835,6 +1144,8 @@ function AssignmentDetail({ assignment: initialAssignment, teacherId, subjects, 
         )}
       </div>
 
+      </>)}
+
       {/* Modals */}
       {gradeRow && (
         <GradeModal
@@ -882,6 +1193,9 @@ export default function AssignmentsPage() {
   const [assignments,  setAssignments]  = useState([]);
   const [loading,      setLoading]      = useState(true);
   const [error,        setError]        = useState("");
+  const [kindFilter,   setKindFilter]   = useState("all");
+  const [tagFilter,    setTagFilter]    = useState("all");
+  const { tags: listTags } = useTags(activeSubj);
 
   // view: "list" | "detail" | "create" | "edit"
   const [view,         setView]         = useState("list");
@@ -901,9 +1215,28 @@ export default function AssignmentsPage() {
             subject_code: l.subject_code,
             course_id:    l.course_id,
             has_lab:      !!(map[l.subject_id]?.has_lab || l.kind === "lab"),   // a lab session is scheduled for it
+            has_tutorial: !!(map[l.subject_id]?.has_tutorial || l.kind === "tutorial"),
           };
         });
-        const subjs = Object.values(map);
+        // the dashboard returns the full subject documents (has_tutorial / has_lab / kind); merge them in
+        try {
+          const dash = await get(`/api/web/teacher/dashboard?uid=${encodeURIComponent(uid)}`);
+          (dash.subjects || []).forEach((sd) => {
+            if (!sd.subject_id) return;
+            const prev = map[sd.subject_id] || {};
+            map[sd.subject_id] = {
+              ...prev,
+              subject_id: sd.subject_id,
+              subject_name: sd.subject_name || prev.subject_name,
+              subject_code: sd.subject_code || prev.subject_code,
+              course_id: sd.course_id || prev.course_id,
+              kind: sd.kind,
+              has_lab: !!sd.has_lab || prev.has_lab,
+              has_tutorial: !!sd.has_tutorial,
+            };
+          });
+        } catch { /* the timetable-derived flags still apply */ }
+        const subjs = Object.values(map).filter((x) => x.course_id);
         setSubjects(subjs);
         if (subjs.length) setActiveSubj(subjs[0]);
         else setLoading(false);          // nothing is scheduled for this teacher yet: don't spin forever
@@ -919,7 +1252,7 @@ export default function AssignmentsPage() {
     setLoading(true); setError("");
     try {
       const data = await get(
-        `/api/assignments?subject_id=${encodeURIComponent(activeSubj.subject_id)}&course_id=${encodeURIComponent(activeSubj.course_id)}`
+        `/api/assignments?subject_id=${encodeURIComponent(activeSubj.subject_id)}&course_id=${encodeURIComponent(activeSubj.course_id)}&teacher_id=${encodeURIComponent(teacherId || "")}`
       );
       setAssignments(data.assignments || []);
     } catch (e) { setError(e.message); }
@@ -927,7 +1260,7 @@ export default function AssignmentsPage() {
   }, [activeSubj]);
 
   useEffect(() => { loadSubjects(); }, []);
-  useEffect(() => { if (activeSubj) loadAssignments(); }, [activeSubj]);
+  useEffect(() => { if (activeSubj && teacherId) loadAssignments(); }, [activeSubj, teacherId]);
 
   const handleBack = (refresh) => {
     setView("list");
@@ -957,6 +1290,28 @@ export default function AssignmentsPage() {
         + New Assignment
       </button>
 
+      {listTags.some((t) => assignments.some((a) => a.tag_id === t.tag_id)) && (
+        <div className="ap-subject-pills" style={{ margin: "10px 0" }}>
+          <button className={`ap-pill${tagFilter === "all" ? " ap-pill--active" : ""}`} onClick={() => setTagFilter("all")}>All topics</button>
+          {listTags.filter((t) => assignments.some((a) => a.tag_id === t.tag_id)).map((t) => (
+            <button key={t.tag_id} className={`ap-pill${tagFilter === t.tag_id ? " ap-pill--active" : ""}`} onClick={() => setTagFilter(t.tag_id)}>
+              🏷 {t.name} ({assignments.filter((a) => a.tag_id === t.tag_id).length})
+            </button>
+          ))}
+          <button className={`ap-pill${tagFilter === "none" ? " ap-pill--active" : ""}`} onClick={() => setTagFilter("none")}>Other ({assignments.filter((a) => !a.tag_id || !listTags.some((t) => t.tag_id === a.tag_id)).length})</button>
+        </div>
+      )}
+
+      {KINDS.filter((k) => assignments.some((a) => kindOf(a) === k.key)).length > 1 && (
+        <div className="ap-subject-pills" style={{ margin: "10px 0" }}>
+          {[{ key: "all", label: "All" }, ...KINDS].map((k) => (
+            <button key={k.key} className={`ap-pill${kindFilter === k.key ? " ap-pill--active" : ""}`} onClick={() => setKindFilter(k.key)}>
+              {k.key === "all" ? "All" : k.short} ({k.key === "all" ? assignments.length : assignments.filter((a) => kindOf(a) === k.key).length})
+            </button>
+          ))}
+        </div>
+      )}
+
       {error && <div className="ap-error">{error}</div>}
 
       {loading ? (
@@ -975,19 +1330,27 @@ export default function AssignmentsPage() {
         </div>
       ) : (
         <div className="ap-list">
-          {assignments.map((a) => {
-            const overdue = isOverdue(a.due_date);
+          {[...assignments]
+            .filter((a) => kindFilter === "all" || kindOf(a) === kindFilter)
+            .filter((a) => tagFilter === "all" || (tagFilter === "none" ? !a.tag_id : a.tag_id === tagFilter))
+            .sort((x, y) => (stateOf(x) === "published" ? 1 : 0) - (stateOf(y) === "published" ? 1 : 0))   // drafts and scheduled first
+            .map((a) => {
+            const st = stateOf(a);
+            const overdue = st === "published" && isOverdue(a.due_date);
             return (
               <div key={a.assignment_id} className="ap-list-card"
-                onClick={() => { setSelectedAss(a); setView("detail"); }}>
+                onClick={() => { setSelectedAss(a); setView(st === "draft" ? "edit" : "detail"); }}>
                 <div className="ap-list-card-top">
-                  <div className="ap-list-title">{a.title}</div>
+                  <div className="ap-list-title">{a.title || "Untitled draft"}</div>
                   <div className="ap-list-meta">
-                    {isLabWork(a) && <span className="ap-info-chip ap-info-chip--green">Lab work</span>}
-                    <span className="ap-info-chip ap-info-chip--purple">{a.marks} pts</span>
-                    <span className={`ap-info-chip${overdue ? " ap-info-chip--red" : ""}`}>
+                    {st === "draft" && <span className="ap-info-chip" style={{ background: "#FEF3C7", color: "#92400E" }}>Draft</span>}
+                    {st === "scheduled" && <span className="ap-info-chip" style={{ background: "#DBEAFE", color: "#1E40AF" }}>Posts {fmtDate(a.publish_at)}</span>}
+                    <span className={`ap-info-chip${KIND_CHIP[kindOf(a)]}`}>{kindMeta(a).short}</span>
+                    {tagNameOf(listTags, a.tag_id) && <span className="ap-info-chip">🏷 {tagNameOf(listTags, a.tag_id)}</span>}
+                    {a.marks != null && <span className="ap-info-chip ap-info-chip--purple">{a.marks} pts</span>}
+                    {a.due_date && <span className={`ap-info-chip${overdue ? " ap-info-chip--red" : ""}`}>
                       {overdue ? "Overdue" : "Due"} {fmtShort(a.due_date)}
-                    </span>
+                    </span>}
                     {a.allow_late && <span className="ap-info-chip ap-info-chip--green">Late OK</span>}
                   </div>
                 </div>
@@ -996,7 +1359,7 @@ export default function AssignmentsPage() {
                 )}
                 <div className="ap-list-footer">
                   <span className="ap-list-sub-count">
-                    {a.submissions_count || 0} submission{a.submissions_count !== 1 ? "s" : ""}
+                    {st === "draft" ? "Not posted yet" : st === "scheduled" ? "Not visible to students yet" : `${a.submissions_count || 0} submission${a.submissions_count !== 1 ? "s" : ""}`}
                   </span>
                   <span className="ap-list-arrow">›</span>
                 </div>
@@ -1025,7 +1388,7 @@ export default function AssignmentsPage() {
               teacherId={teacherId}
               editAssignment={null}
               onDone={() => { setView("list"); loadAssignments(); }}
-              onCancel={() => setView("list")}
+              onCancel={() => { setView("list"); loadAssignments(); }}
             />
           )}
           {view === "edit" && selectedAss && (
@@ -1033,8 +1396,8 @@ export default function AssignmentsPage() {
               subjects={subjects}
               teacherId={teacherId}
               editAssignment={selectedAss}
-              onDone={() => { setView("detail"); /* reload from detail */ }}
-              onCancel={() => setView("detail")}
+              onDone={() => { if (stateOf(selectedAss) === "draft") { setView("list"); setSelectedAss(null); loadAssignments(); } else { setView("detail"); } }}
+              onCancel={() => { if (stateOf(selectedAss) === "draft") { setView("list"); setSelectedAss(null); loadAssignments(); } else setView("detail"); }}
             />
           )}
           {view === "detail" && selectedAss && (

@@ -45,13 +45,14 @@ async function post(path, body) {
   return data;
 }
 
-// Lab / tutorial / lab batch / division of a lecture, e.g. ["Lab", "B1", "Div A"]
+// Lab / tutorial / lab batch / division / elective group of a lecture, e.g. ["Lab", "B1", "Div A"]
 const KIND_LABEL = { lab: "Lab", tutorial: "Tutorial" };
 function lecTags(l) {
   const t = [];
   if (l && KIND_LABEL[l.kind]) t.push(KIND_LABEL[l.kind]);
   if (l && l.batch_no) t.push(l.batch || `B${l.batch_no}`);
   if (l && l.division_name) t.push(`Div ${l.division_name}`);
+  if (l && l.elective_group) t.push(l.elective_group);   // an elective slot, e.g. "Elective 1"
   return t;
 }
 
