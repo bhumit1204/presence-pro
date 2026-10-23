@@ -57,6 +57,7 @@ import ElectiveSelection from "../screens/student/tabs/ElectiveSelection";
 import StudentTimetable from "../screens/student/StudentTimetable";
 import StudentCalendar from "../screens/student/StudentCalendar";
 import ODRequestTeacher from "../screens/reports/teacher/ODRequestTeacher";
+import NotificationSettings from "../screens/student/tabs/NotificationSettings";
 
 
 const Stack = createNativeStackNavigator();
@@ -89,6 +90,7 @@ async function resolveTarget(data: any): Promise<{ name: string; params?: any } 
         : session?.teacher_id
           ? { name: "ODRequestsTeacher", params: { teacherId: session.teacher_id } }
           : { name: teacherHome };
+    case "StudentHome":
     case "StudentWork":
     case "StudentQuizzes":
     case "StudentAttendance":
@@ -230,8 +232,9 @@ export default function AppNavigator() {
 
         <Stack.Screen name="StudentTimetable" component={StudentTimetable} />
         <Stack.Screen name="StudentCalendar" component={StudentCalendar} />
+        <Stack.Screen name="NotificationSettings" component={NotificationSettings} />
 
       </Stack.Navigator>
     </NavigationContainer>
   );
-}
+}

@@ -1,6 +1,7 @@
 const { admin, db } = require("../config/firebase");
 const { TTLCache } = require("../utils/cache");
 const { createGate } = require("../utils/limiter");
+const { allows } = require("../utils/notifyPrefs");
 
 // ─── Expo SDK (ESM-only package, loaded lazily, once) ────────────────────────
 let _expoPromise = null;
@@ -24,7 +25,7 @@ const subjectStudentsCache = new TTLCache({ max: 2_000, ttlMs: 30_000 });
 const sendGate = createGate(4); // never hammer the Expo API with more than 4 parallel requests
 
 function invalidateTokenCache(uid) {
-  if (uid) tokenCache.del(`t:${uid}`);
+  if (uid) { tokenCache.del(`t:${uid}`); tokenCache.del(`p:${uid}`); }
 }
 function invalidateSubjectStudents(subject_id) {
   if (subject_id) subjectStudentsCache.del(subject_id);
@@ -79,13 +80,14 @@ async function getTokensForUids(userIds) {
       db
         .collection("students")
         .where("uid", "in", chunk)
-        .select("uid", "pushToken")
+        .select("uid", "pushToken", "notify_prefs")
         .get()
         .then((snap) => {
           snap.docs.forEach((doc) => {
             const d = doc.data();
             const uid = d.uid || doc.id;
             resolvedAsStudent.add(uid);
+            tokenCache.set(`p:${uid}`, d.notify_prefs || null);   // the student's notification settings (see utils/notifyPrefs.js)
             if (d.pushToken && !found.get(uid)) found.set(uid, d.pushToken);
           });
         })
@@ -103,12 +105,13 @@ async function getTokensForUids(userIds) {
       // direct doc lookups in ONE round trip per chunk (was one GET per uid)
       ...restChunks.map((chunk) =>
         db
-          .getAll(...chunk.map((u) => db.collection("students").doc(u)), { fieldMask: ["uid", "pushToken"] })
+          .getAll(...chunk.map((u) => db.collection("students").doc(u)), { fieldMask: ["uid", "pushToken", "notify_prefs"] })
           .then((snaps) => {
             snaps.forEach((s) => {
               if (!s.exists) return;
               const d = s.data();
               const uid = d.uid || s.id;
+              tokenCache.set(`p:${uid}`, d.notify_prefs || null);
               if (d.pushToken && !found.get(uid)) found.set(uid, d.pushToken);
             });
           })
@@ -163,13 +166,16 @@ async function pruneDeadTokens(deadTokens) {
   }
 }
 
-async function notify({ userIds, title, body, data = {}, sound = "default" }) {
+// `category` (optional): lecture_start | lecture_live | low_attendance | assignment | quiz | announcement.
+// A student who switched that kind of notification off is skipped; without a category nothing changes.
+async function notify({ userIds, title, body, data = {}, sound = "default", category }) {
   try {
     if (!userIds || userIds.length === 0) return;
 
     const { expo } = await getExpo();
 
-    const tokenObjs = await getTokensForUids(userIds);
+    let tokenObjs = await getTokensForUids(userIds);
+    if (category) tokenObjs = tokenObjs.filter(({ uid }) => allows(tokenCache.get(`p:${uid}`), category));
     if (tokenObjs.length === 0) return;
 
     const messages = tokenObjs.map(({ token }) => ({

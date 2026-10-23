@@ -2,20 +2,20 @@
 // Endpoints and payload are unchanged. The server must still enforce every rule (role, college, e-mail uniqueness).
 
 import React, { useRef, useState } from "react";
-import { Alert, KeyboardAvoidingView, Platform, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, Pressable, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useNavigation } from "@react-navigation/native";
 import { API_BASE } from "../../services/api";
 import {
   cleanAishe,
-  cleanPhone,
   cleanText,
   fetchJson,
   isAlreadyRegistered,
   isValidName,
   validatePassword,
 } from "../../utils/validation";
-import { Banner, Button, Card, Header, ResultView, Screen, Segmented, SectionLabel, SP, T, TextField, font } from "../../components/ui";
+import { isValidPhone, phoneError, toIntlPhone } from "../../utils/phone";
+import { Banner, Button, Card, Header, KeyboardView, ResultView, Screen, Segmented, SectionLabel, SP, T, TextField, font } from "../../components/ui";
 
 type Errs = Partial<Record<"first" | "last" | "phone" | "aishe" | "depts", string>>;
 
@@ -97,11 +97,11 @@ export default function TeacherRegistration({ route }: any) {
     if (submitLock.current) return;
     const first = cleanText(firstName, 50);
     const last = cleanText(lastName, 50);
-    const ph = cleanPhone(phone);
+    const ph = toIntlPhone(phone);
     const next: Errs = {};
     if (!isValidName(first)) next.first = "Enter your first name (letters only)";
     if (!isValidName(last)) next.last = "Enter your last name (letters only)";
-    if (!ph) next.phone = "Enter a valid mobile number (10 to 13 digits)";
+    if (!ph) next.phone = phoneError(phone) || "Enter a valid mobile number";
     if (!college) next.aishe = "Verify your institute first";
     else if (depts.length === 0) next.depts = "Select at least one department";
     setErrs(next);
@@ -164,7 +164,7 @@ export default function TeacherRegistration({ route }: any) {
   return (
     <Screen>
       <Header title="Teacher registration" subtitle={email} onBack={() => navigation.goBack()} />
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardView>
         <ScrollView contentContainerStyle={st.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <Banner tone="info" icon="information-circle">
             You register as a Teacher. If you are an HOD, an admin will upgrade your role after approval.
@@ -217,12 +217,12 @@ export default function TeacherRegistration({ route }: any) {
                   clear("phone");
                 }}
                 placeholder="10 digit mobile number"
-                keyboardType="phone-pad"
+                phone
                 autoComplete="tel"
                 textContentType="telephoneNumber"
                 inputRef={phoneRef}
                 error={errs.phone}
-                maxLength={16}
+                helper={!errs.phone && phone.length > 0 && !isValidPhone(phone) ? `${phone.length}/10 digits` : undefined}
               />
               <View>
                 <Text style={st.label}>Gender</Text>
@@ -314,7 +314,7 @@ export default function TeacherRegistration({ route }: any) {
             disabled={!college || depts.length === 0}
           />
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardView>
     </Screen>
   );
 }

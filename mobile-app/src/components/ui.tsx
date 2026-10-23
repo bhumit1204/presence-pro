@@ -22,6 +22,7 @@ import {
   ViewStyle,
 } from "react-native";
 import { SafeAreaView, Edge } from "react-native-safe-area-context";
+import { PHONE_PREFIX, sanitizePhoneInput } from "../utils/phone";
 import { Ionicons } from "@expo/vector-icons";
 
 /* ───────────────────────────── theme ───────────────────────────── */
@@ -83,6 +84,19 @@ export const shadow = Platform.select<ViewStyle>({
 type IconName = React.ComponentProps<typeof Ionicons>["name"];
 
 /* ───────────────────────────── layout ───────────────────────────── */
+
+/**
+ * Wrap a form (usually around a ScrollView) so it lifts above the keyboard on Android and iOS.
+ * "padding" works on both: it adds only the part of the keyboard that really covers this view, so it does nothing
+ * extra when Android already resized the window (softwareKeyboardLayoutMode "resize") and fixes it when it did not.
+ */
+export function KeyboardView({ children, style, offset = 0 }: { children: React.ReactNode; style?: StyleProp<ViewStyle>; offset?: number }) {
+  return (
+    <KeyboardAvoidingView style={[{ flex: 1 }, style]} behavior="padding" keyboardVerticalOffset={offset}>
+      {children}
+    </KeyboardAvoidingView>
+  );
+}
 
 /** Page wrapper: safe area + background + status bar. */
 export function Screen({
@@ -503,6 +517,7 @@ export function TextField({
   multiline = false,
   minHeight,
   autoCorrect = false,
+  phone = false,
 }: {
   label?: string;
   value: string;
@@ -527,6 +542,8 @@ export function TextField({
   multiline?: boolean;
   minHeight?: number;
   autoCorrect?: boolean;
+  /** Indian mobile number: shows a fixed +91 and keeps only the 10 digits that follow it. */
+  phone?: boolean;
 }) {
   const [focus, setFocus] = React.useState(false);
   const [shown, setShown] = React.useState(false);
@@ -536,12 +553,13 @@ export function TextField({
       {!!label && <Text style={s.fieldLabel}>{label}</Text>}
       <View style={[s.field, { borderColor: border, backgroundColor: editable ? T.surface : T.lineSoft }, focus && !error && s.fieldFocus, multiline && { alignItems: "flex-start", minHeight: minHeight ?? 96, paddingTop: 2 }]}>
         {icon && <Ionicons name={icon} size={19} color={focus ? T.primary : T.muted} style={multiline ? { marginTop: 15 } : undefined} />}
+        {phone && <Text style={{ fontSize: 16, fontWeight: "700", color: T.ink }}>{PHONE_PREFIX}</Text>}
         <TextInput
           ref={inputRef}
           style={[s.fieldInput, multiline && { textAlignVertical: "top", minHeight: (minHeight ?? 96) - 8 }]}
           multiline={multiline}
           value={value}
-          onChangeText={onChangeText}
+          onChangeText={phone ? (t) => onChangeText(sanitizePhoneInput(t, value)) : onChangeText}
           placeholder={placeholder}
           placeholderTextColor={T.muted}
           secureTextEntry={secure && !shown}
@@ -549,8 +567,8 @@ export function TextField({
           autoCorrect={multiline ? true : autoCorrect}
           autoComplete={autoComplete}
           textContentType={textContentType}
-          keyboardType={keyboardType}
-          maxLength={maxLength}
+          keyboardType={phone ? "number-pad" : keyboardType}
+          maxLength={phone ? 14 : maxLength}
           returnKeyType={returnKeyType}
           onSubmitEditing={onSubmitEditing}
           editable={editable}
@@ -744,7 +762,7 @@ export function Sheet({
 }) {
   return (
     <Modal visible={visible} transparent animationType="slide" onRequestClose={onClose} statusBarTranslucent>
-      <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={{ flex: 1, justifyContent: "flex-end" }}>
+      <KeyboardAvoidingView behavior="padding" style={{ flex: 1, justifyContent: "flex-end" }}>
         <Pressable style={[StyleSheet.absoluteFill, { backgroundColor: "rgba(15,23,42,0.45)" }]} onPress={onClose} accessibilityLabel="Close" />
         <View style={[s.sheet, { maxHeight }]}>
           <View style={s.sheetGrab} />

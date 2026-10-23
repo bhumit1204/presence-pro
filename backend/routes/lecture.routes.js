@@ -1455,6 +1455,9 @@ router.post("/start", guard.teacher(fromBody("teacher_id")), async (req, res) =>
     const docRef = await db.collection("lecture_sessions").add(sessionData);
     dropLectureSession(docRef.id);
 
+    // tell the class the lecture has started (never delays or fails the response)
+    try { require("../services/lectureAlerts").onLectureStarted({ ...sessionData, lecture_id: lecture_id || null, session_id: docRef.id }).catch((e) => console.error("start push failed:", e.message)); } catch (_) {}
+
     res.status(201).json({ success: true, message: "Lecture started successfully", session_id: docRef.id });
   } catch (error) {
     console.error("START LECTURE ERROR:", error);
@@ -1499,6 +1502,9 @@ router.post("/stop", async (req, res) => {
     // students must see "closed" immediately (the original left the 5-minute cache saying "open")
     dropAttendanceSession(sessionData.attendance_session_id);
     dropLectureSession(lecture_session_id);
+
+    // keep the cached attendance figures (used by the low-attendance reminders) current
+    try { require("../services/lectureAlerts").onLectureEnded({ ...sessionData, id: lecture_session_id }); } catch (_) {}
 
     res.json({ success: true, message: "Lecture stopped successfully" });
   } catch (error) {
@@ -1611,9 +1617,11 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
             start_time: session.scheduled_start_time,
             end_time: session.scheduled_end_time,
           },
+          currentLecture: { subject_name: session.subject_name, room: session.room || "", start_time: session.scheduled_start_time, end_time: session.scheduled_end_time, kind: session.kind || null, batch: session.batch || null, state: "live" },
           nextLecture: null,
           lecture_session_id: sessionId,
           lecture_is_live: true,
+          started_at_ms: tsMs(session.started_at) || null,
           marking_method: session.marking_method || null,
           marking_status: session.marking_status || "closed",
           attendance_session_id: session.attendance_session_id || null,
@@ -1625,9 +1633,11 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
       return res.json({
         success: true,
         ongoingLecture: lectureData ? { id: session.lecture_id, ...lectureData } : null,
+        currentLecture: lectureData ? { id: session.lecture_id, ...lectureData, elective: elective.has(lectureData.subject_id), state: "live" } : null,
         nextLecture: null,
         lecture_session_id: sessionId,
         lecture_is_live: true,
+        started_at_ms: tsMs(session.started_at) || null,
         marking_method: session.marking_method || null,
         marking_status: session.marking_status || "closed",
         attendance_session_id: session.attendance_session_id || null,
@@ -1637,7 +1647,7 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
 
     // No live session: the timetable only tells us the NEXT lecture
     if (!course_id) {
-      return res.json({ success: true, ongoingLecture: null, nextLecture: null, lecture_session_id: null, lecture_is_live: false, today });
+      return res.json({ success: true, ongoingLecture: null, currentLecture: null, nextLecture: null, lecture_session_id: null, lecture_is_live: false, today });
     }
 
     const lectures = await timetableCache.memo(`tt:${aishe_code}|${course_id}|${today}`, 30_000, async () => {
@@ -1650,13 +1660,36 @@ router.get("/student/today", readLimit, guard.self(fromQuery("uid")), async (req
       return snap.docs.map((d) => ({ id: d.id, ...d.data() }));
     });
 
-    let nextLecture = null;
-    const sorted = lectures.filter((l) => semesterMatches(l, student) && (!l.division_id || l.division_id === myDivision) && inBatch(l, myRoll) && takesSubject(student, elective, l.subject_id)).sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
+    // lectures cancelled for today (one small read per 30 s for everybody)
+    const todayStr = istDateString(nowIST);
+    const cancelledIds = await timetableCache.memo(`cx:${todayStr}`, 30_000, async () => {
+      const snap = await db.collection("cancelled_lectures").where("date", "==", todayStr).select("lecture_id").get();
+      return snap.docs.map((d) => d.data().lecture_id);
+    });
+    const cancelledSet = new Set(cancelledIds);
+
+    let nextLecture = null, currentLecture = null;
+    const sorted = lectures
+      .filter((l) => semesterMatches(l, student) && (!l.division_id || l.division_id === myDivision) && inBatch(l, myRoll) && takesSubject(student, elective, l.subject_id))
+      .filter((l) => !cancelledSet.has(l.id) && !cancelledSet.has(l.lecture_id) && !(l.is_temporary && l.date && l.date !== todayStr))
+      .sort((a, b) => toMinutes(a.start_time) - toMinutes(b.start_time));
     for (const lecture of sorted) {
-      if (!nextLecture && toMinutes(lecture.start_time) > currentMinutes) nextLecture = lecture;
+      const s = toMinutes(lecture.start_time), e = toMinutes(lecture.end_time);
+      if (!currentLecture && s <= currentMinutes && currentMinutes < e) currentLecture = lecture;   // on right now, the teacher has not started it yet
+      else if (!nextLecture && s > currentMinutes) nextLecture = lecture;
     }
 
-    res.json({ success: true, ongoingLecture: null, nextLecture, lecture_session_id: null, lecture_is_live: false, today });
+    let currentCard = null;
+    if (currentLecture) {
+      let teacher_name = currentLecture.teacher_name || "";
+      if (!teacher_name && currentLecture.teacher_id) {
+        const t = await getTeacherById(currentLecture.teacher_id);
+        teacher_name = (t && (t.name || t.full_name || `${t.first_name || ""} ${t.last_name || ""}`.trim())) || "";
+      }
+      currentCard = { ...currentLecture, teacher_name, elective: elective.has(currentLecture.subject_id), state: "scheduled" };
+    }
+
+    res.json({ success: true, ongoingLecture: null, currentLecture: currentCard, nextLecture, lecture_session_id: null, lecture_is_live: false, today });
   } catch (error) {
     console.error("STUDENT LECTURE ERROR:", error);
     res.status(500).json({ error: "Failed to fetch student lectures" });
@@ -2860,4 +2893,4 @@ router.get("/attendance/iot/session", iotLimit, iotKey, async (req, res) => {
 /** write pending coalesced updates (call on graceful shutdown) */
 router.flushPending = () => Promise.all([presentWriter.flushAll(), pendingWriter.flushAll(), unpendWriter.flushAll()]);
 
-module.exports = router;
+module.exports = router;

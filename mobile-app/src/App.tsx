@@ -1,6 +1,7 @@
 // src/App.tsx
 import React, { useEffect, useRef } from "react";
 import * as Notifications from "expo-notifications";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import AppNavigator from "./navigation/AppNavigator";
 
 export default function App() {
@@ -34,7 +35,12 @@ export default function App() {
     };
   }, []);
 
-  return <AppNavigator />;
+  // SafeAreaProvider gives every screen the real status-bar and navigation-bar sizes (3-button vs gesture)
+  return (
+    <SafeAreaProvider>
+      <AppNavigator />
+    </SafeAreaProvider>
+  );
 }
 
 /**

@@ -2,7 +2,7 @@ import { initializeApp, getApps, getApp } from "firebase/app";
 import { initializeAuth, getAuth } from "firebase/auth";
 // @ts-ignore
 import { getReactNativePersistence } from "firebase/auth";
-import { getFirestore } from "firebase/firestore";
+import { getFirestore, initializeFirestore } from "firebase/firestore";
 import ReactNativeAsyncStorage from "@react-native-async-storage/async-storage";
 
 const firebaseConfig = {
@@ -24,4 +24,9 @@ export const auth = firstInit
     })
   : getAuth(firebaseApp);
 
-export const db = getFirestore(firebaseApp);
+// React Native cannot rely on the streaming connection Firestore tries first: it can stall silently, and then live
+// screens (such as the lecture card) stop updating until the app is reloaded. Long polling is slower to set up
+// but dependable. Only the first initialisation may choose this; a hot reload reuses the existing instance.
+export const db = firstInit
+  ? initializeFirestore(firebaseApp, { experimentalForceLongPolling: true })
+  : getFirestore(firebaseApp);

@@ -37,6 +37,7 @@ app.use("/api/profile",     require("./routes/profile.routes"));
 app.use("/api/reports",     require("./routes/reports.routes"));
 app.use("/api/broadcasts",  require("./routes/broadcast.routes"));
 app.use("/api/od",          require("./routes/od.routes"));
+app.use("/api/notify-prefs", require("./routes/notifyprefs.routes"));
 app.use("/api/web/teacher", require("./routes/web/teacher.routes"));
 app.use("/api/web/head",    require("./routes/web/head.routes"));
 app.use("/api/web/student", require("./routes/web/student.routes"));
@@ -108,6 +109,9 @@ const server = app.listen(PORT, "0.0.0.0", () => {
 server.keepAliveTimeout = 80_000;
 server.headersTimeout   = 85_000;
 
+// lecture notifications: "starting now" + low-attendance reminders (one light check a minute; LECTURE_ALERTS=off disables)
+if (process.env.NODE_ENV !== "test") require("./services/lectureAlerts").start();
+
 // ─── graceful shutdown: write batched counters / read receipts / present_students before exit ───
 const assignments = require("./routes/assignment.routes");
 const lectures    = require("./routes/lecture.routes");
@@ -126,4 +130,4 @@ for (const sig of ["SIGTERM", "SIGINT"]) {
   });
 }
 
-module.exports = app;
+module.exports = app;

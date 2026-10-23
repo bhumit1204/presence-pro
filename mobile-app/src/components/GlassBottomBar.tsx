@@ -9,6 +9,7 @@ import {
 import { BlurView } from "expo-blur";
 import Ionicons from "@expo/vector-icons/Ionicons";
 import { useTab } from "../navigation/TabContext";
+import { useNavBarGap } from "./navInsets";
 
 const PRIMARY = "#4834D4";
 
@@ -38,10 +39,12 @@ export default function GlassBottomBar({
   badges?: Record<string, number>;
 }) {
   const { currentTab, setCurrentTab } = useTab(); //  context
+  // gesture navigation: gap 0, the bar keeps its usual padding. 3-button navigation: lift the bar above the buttons.
+  const navGap = useNavBarGap();
 
   return (
     <View style={styles.wrapper}>
-      <BlurView intensity={70} tint="light" style={styles.container}>
+      <BlurView intensity={70} tint="light" style={[styles.container, navGap > 0 && { paddingBottom: navGap + 12 }]}>
         {tabs.map((tab) => {
           const isActive = currentTab === tab.key;
           const count = badges?.[tab.key] || 0;

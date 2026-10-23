@@ -1042,6 +1042,75 @@ async function buildClassReport(teacher_id, subject_id, divisionFilter = "") {
   };
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Attendance figures of every student of ONE subject, for the lecture reminders (services/lectureAlerts.js).
+// Computed once per subject (the same data and rules as the class report), then kept current by bumpStats()
+// each time a lecture ends, so a reminder never triggers a full re-read. Re-read from scratch every 12 hours.
+// Map(uid -> { held, present, pct, streak })  streak = how many of the last two classes the student attended in a row
+// ─────────────────────────────────────────────────────────────────────────────
+const statsCache = new TTLCache({ max: 500, ttlMs: 12 * 3_600_000 });
+
+async function computeStats(subject_id) {
+  const students = await enrolledStudents(subject_id);
+  const out = new Map();
+  out.sessionIds = new Set();
+  if (!students.length) return out;
+
+  const sessions = await getLectureSessionsForSubject(subject_id);
+  const sessionIds = sessions.map((s) => s.sessionId);
+  sessionIds.forEach((id) => out.sessionIds.add(id));
+  const sessionDateMap = {};
+  for (const s of sessions) sessionDateMap[s.sessionId] = s.date;
+
+  const [attSessions, recordDocs, manualSnap, odSnap] = await Promise.all([
+    getAttendanceSessions(subject_id, sessionIds),
+    sessionIds.length
+      ? inChunks(sessionIds, (c) => db.collection("attendance_records").where("lecture_session_id", "in", c).select(...RECORD_FIELDS))
+      : [],
+    db.collection("attendance_records").where("subject_id", "==", subject_id).where("source", "==", "manual").get(),
+    db.collection("attendance_records").where("subject_id", "==", subject_id).where("source", "==", "od").get(),
+  ]);
+  const manualBy = new Map(), odBy = new Map(), recBy = new Map();
+  const push = (map, uid, v) => { let a = map.get(uid); if (!a) map.set(uid, (a = [])); a.push(v); };
+  manualSnap.docs.forEach((d) => push(manualBy, d.data().student_uid, d));
+  odSnap.docs.forEach((d) => push(odBy, d.data().student_uid, d));
+  recordDocs.forEach((d) => push(recBy, d.data().student_uid, d));
+
+  for (const s of students) {
+    const rows = sourceRows(manualBy.get(s.uid) || [], odBy.get(s.uid) || [], sessionIds.length ? attSessions : [], sessionIds.length ? recBy.get(s.uid) || [] : [], sessionDateMap, s.uid);
+    const presentDates = new Set(rows.filter(isPresentish).map((r) => r.date));
+    const mine = sessionsForDivision(sessions, s.division_id || null, s);
+    const held = mine.length;
+    const present = presentDates.size;
+    const dates = [...new Set(mine.map((x) => x.date).filter(Boolean))].sort().reverse().slice(0, 2);
+    const recent = dates.map((d) => presentDates.has(d));
+    out.set(s.uid, { held, present, pct: held > 0 ? Math.min(100, (present / held) * 100) : null, recent, streak: recent[0] ? (recent[1] ? 2 : 1) : 0, division_id: s.division_id || null, roll_no: s.roll_no, roll_number: s.roll_number });
+  }
+  return out;
+}
+
+router.attendanceStats = (subject_id) => statsCache.memo(subject_id, 12 * 3_600_000, () => computeStats(subject_id));
+
+/** a lecture session of this subject just ended: add it to the cached figures (no re-read). */
+router.bumpStats = (subject_id, session, presentSet) => {
+  const m = statsCache.get(subject_id);
+  if (!m || !session) return;
+  const sid = session.id || session.session_id;
+  if (sid && m.sessionIds.has(sid)) return;                          // a fresh read already counted it
+  if (sid) m.sessionIds.add(sid);
+  const batch = session.batch_no ? batchFields(session) : null;
+  for (const [uid, st] of m) {
+    if (!sessionsForDivision([{ division: session.division_id || null, batch }], st.division_id, st).length) continue;
+    const here = !!presentSet && presentSet.has(uid);
+    st.held += 1;
+    if (here) st.present += 1;
+    st.pct = Math.min(100, (st.present / st.held) * 100);
+    st.recent = [here, st.recent[0]].filter((x) => x !== undefined);
+    st.streak = st.recent[0] ? (st.recent[1] ? 2 : 1) : 0;
+  }
+};
+router.invalidateStats = (subject_id) => statsCache.del(subject_id);
+
 router.get("/class", guard.teacher(fromQuery("teacher_id")), async (req, res) => {
   try {
     const { teacher_id, subject_id } = req.query;

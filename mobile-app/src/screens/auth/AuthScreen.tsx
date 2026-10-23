@@ -7,7 +7,7 @@
 //   - a login that the server refuses (disabled / pending / error) signs the Firebase user back out
 
 import React, { useEffect, useRef, useState } from "react";
-import { KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Platform, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { signInWithEmailAndPassword, signOut } from "firebase/auth";
 import { useNavigation } from "@react-navigation/native";
@@ -24,7 +24,7 @@ import {
   validatePassword,
 } from "../../utils/validation";
 import Logo from "../../components/Logo";
-import { Banner, Button, PasswordMeter, Screen, Segmented, SP, T, TextField, font } from "../../components/ui";
+import { Banner, Button, KeyboardView, PasswordMeter, Screen, Segmented, SP, T, TextField, font } from "../../components/ui";
 
 const MAX_FREE_ATTEMPTS = 5;
 
@@ -157,7 +157,7 @@ export default function AuthScreen() {
 
   return (
     <Screen>
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardView>
         <ScrollView contentContainerStyle={st.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <View style={st.brand}>
             <Logo width={250} />
@@ -281,7 +281,7 @@ export default function AuthScreen() {
             <Text style={font.small}>Your password is never stored on this device.</Text>
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardView>
     </Screen>
   );
 }

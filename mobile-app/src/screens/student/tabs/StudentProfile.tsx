@@ -315,6 +315,21 @@ export default function StudentProfile() {
           </TouchableOpacity>
         </Card>
 
+        {/* Preferences */}
+        <SectionLabel style={S.sectionGap}>Preferences</SectionLabel>
+        <Card flat padded={false} style={S.listCard}>
+          <TouchableOpacity style={[S.infoRow, { borderBottomWidth: 0 }]} activeOpacity={0.7} onPress={() => navigation.navigate("NotificationSettings")}>
+            <View style={S.iconBox}>
+              <Ionicons name="notifications-outline" size={18} color={T.primary} />
+            </View>
+            <View style={{ flex: 1 }}>
+              <Text style={font.label}>Notifications</Text>
+              <Text style={S.infoValue}>Lecture alerts, reminders and more</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={18} color={T.muted} />
+          </TouchableOpacity>
+        </Card>
+
         <Button
           label="Log out"
           icon="log-out-outline"
@@ -394,4 +409,4 @@ const S = StyleSheet.create({
   modalOverlay: { flex: 1, backgroundColor: "rgba(15,23,42,0.88)", justifyContent: "center", alignItems: "center", padding: SP.xl },
   modalContent: { backgroundColor: T.surface, width: "100%", borderRadius: 32, padding: SP.xxl, alignItems: "center" },
   modalQr:      { padding: SP.xl, backgroundColor: "#FFF", borderRadius: 24, borderWidth: 1, borderColor: T.line },
-});
+});

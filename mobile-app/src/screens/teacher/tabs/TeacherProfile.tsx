@@ -8,6 +8,8 @@ import { useNavigation } from "@react-navigation/native";
 import { getUserSession, signOutAndClear, updateSessionProfile } from "../../../services/session";
 import { useOnTabActive, useTab } from "../../../navigation/TabContext";
 import { Avatar, Banner, Button, Card, Chip, SectionLabel, T, SP, font } from "../../../components/ui";
+import { formatPhone } from "../../../utils/phone";
+import { useNavBarGap } from "../../../components/navInsets";
 import { Subject, enc, getJson, groupCourses, useTeacher } from "../teacherShared";
 
 type IconName = React.ComponentProps<typeof Ionicons>["name"];
@@ -38,6 +40,7 @@ export default function TeacherProfile() {
   const navigation = useNavigation<any>();
   const { setCurrentTab } = useTab();
   const teacher = useTeacher();
+  const navGap = useNavBarGap(); // extra room above the bottom bar on 3-button navigation, 0 with gestures
   const [profile, setProfile] = useState<any>(teacher.profile || null);
   const [rawRole, setRawRole] = useState<string | null>(null);
   const [subjects, setSubjects] = useState<Subject[]>([]);
@@ -108,7 +111,7 @@ export default function TeacherProfile() {
   return (
     <ScrollView
       style={{ flex: 1, backgroundColor: T.bg }}
-      contentContainerStyle={{ paddingHorizontal: SP.xl, paddingTop: SP.xxl + 24, paddingBottom: 140 }}
+      contentContainerStyle={{ paddingHorizontal: SP.xl, paddingTop: SP.xxl + 24, paddingBottom: 140 + navGap }}
       showsVerticalScrollIndicator={false}
       refreshControl={<RefreshControl refreshing={refreshing} onRefresh={() => { setRefreshing(true); load(); }} tintColor={T.primary} />}
     >
@@ -168,7 +171,7 @@ export default function TeacherProfile() {
       <Card flat>
         <Row icon="person-outline" label="Full name" value={fullName} />
         <Row icon="mail-outline" label="Email" value={profile?.email} />
-        <Row icon="call-outline" label="Phone" value={profile?.contact_phone} />
+        <Row icon="call-outline" label="Phone" value={formatPhone(profile?.contact_phone)} />
         <Row icon="briefcase-outline" label="Designation" value={profile?.designation} />
         <Row icon="male-female-outline" label="Gender" value={profile?.gender ? profile.gender.charAt(0).toUpperCase() + profile.gender.slice(1) : null} />
         <Row icon="business-outline" label="AISHE code" value={profile?.aishe_code} />

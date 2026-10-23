@@ -2,7 +2,7 @@
   "expo": {
     "name": "PresencePro",
     "slug": "presencepro-rn",
-    "version": "1.1.0",
+    "version": "1.1.1",
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
@@ -20,6 +20,7 @@
       "compileSdkVersion": 34,
       "targetSdkVersion": 34,
       "minSdkVersion": 23,
+      "softwareKeyboardLayoutMode": "resize",
 
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",

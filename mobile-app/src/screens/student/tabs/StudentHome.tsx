@@ -26,7 +26,8 @@ import { db, auth } from "../../../services/firebase";
 import { useFocusEffect, useNavigation } from "@react-navigation/native";
 import { Ionicons } from "@expo/vector-icons";
 import { API_BASE } from "../../../services/api";
-import { Avatar, Banner, Card, Chip, Screen, SP, T, Tone, font, shadow } from "../../../components/ui";
+import * as Notifications from "expo-notifications";
+import { Avatar, Banner, Card, Chip, ProgressBar, Screen, SP, T, Tone, font, shadow } from "../../../components/ui";
 import { lectureTag, meantForStudent, rollOf, withTag } from "../../../utils/batches";
 
 const API_URL = API_BASE;
@@ -49,7 +50,17 @@ interface LectureData {
   batch_of?: number | null;
   batch_after?: string | null;
   batch_upto?: string | null;
+  teacher_name?: string;         // current-lecture card
+  elective?: boolean;
+  elective_group?: string;
+  state?: "scheduled" | "live";
 }
+
+/** "HH:MM" -> minutes since midnight */
+const toMin = (t?: string) => {
+  const [h, m] = String(t || "0:0").split(":").map(Number);
+  return (h || 0) * 60 + (m || 0);
+};
 
 type TodoFilter = "thisWeek" | "nextWeek" | "thisMonth";
 
@@ -103,6 +114,55 @@ const STORAGE_KEYS = [
   "saved_lecture_details",
 ] as const;
 
+// ─── The lecture that is on now, before the teacher taps Start ───────────────
+function ScheduledLectureCard({ lecture, nowMin }: { lecture: LectureData; nowMin: number }) {
+  const start = toMin(lecture.start_time);
+  const end   = toMin(lecture.end_time);
+  const total = Math.max(1, end - start);
+  const done  = Math.min(total, Math.max(0, nowMin - start));
+  const left  = Math.max(0, end - nowMin);
+  const tag   = lectureTag(lecture);
+  return (
+    <View>
+      <Chip label="Scheduled · waiting for your teacher" tone="warning" icon="hourglass-outline" />
+      <Text style={[font.h1, { marginTop: SP.md }]}>{lecture.subject_name}</Text>
+      {!!tag && <Text style={[font.small, { marginTop: 2 }]}>{tag}</Text>}
+
+      <View style={styles.curRows}>
+        {!!lecture.teacher_name && (
+          <View style={styles.curRow}>
+            <Ionicons name="person-outline" size={15} color={T.primary} />
+            <Text style={font.body}>{lecture.teacher_name}</Text>
+          </View>
+        )}
+        <View style={styles.curRow}>
+          <Ionicons name="time-outline" size={15} color={T.primary} />
+          <Text style={font.body}>{lecture.start_time} – {lecture.end_time} · {left} min left</Text>
+        </View>
+        {!!lecture.room && (
+          <View style={styles.curRow}>
+            <Ionicons name="location-outline" size={15} color={T.primary} />
+            <Text style={font.body}>Room {lecture.room}</Text>
+          </View>
+        )}
+      </View>
+
+      {(lecture.elective || lecture.kind) && (
+        <View style={styles.curChips}>
+          {lecture.elective && <Chip label={lecture.elective_group ? `Elective · ${lecture.elective_group}` : "Elective"} tone="info" />}
+        </View>
+      )}
+
+      <View style={{ marginTop: SP.md }}>
+        <ProgressBar value={done / total} tone="warning" height={8} />
+      </View>
+      <Text style={[font.small, { marginTop: SP.sm }]}>
+        Attendance opens when your teacher starts the lecture. This card turns live by itself and you will get a notification.
+      </Text>
+    </View>
+  );
+}
+
 // ─── Main component ───────────────────────────────────────────────────────────
 const StudentHome = () => {
   const navigation = useNavigation<any>();
@@ -112,6 +172,8 @@ const StudentHome = () => {
   const [today, setToday]                   = useState("");
   const [ongoingLecture, setOngoingLecture] = useState<LectureData | null>(null);
   const [nextLecture, setNextLecture]       = useState<LectureData | null>(null);
+  const [currentLecture, setCurrentLecture] = useState<LectureData | null>(null);   // on now, the teacher has not started it yet
+  const [clock, setClock]                   = useState(Date.now());                   // re-renders the card every 30 s
   const [alreadyMarked, setAlreadyMarked]   = useState(false);
   const [markPending, setMarkPending]       = useState(false);   // unverified: waiting for the teacher
   const [attendanceSessionId, setAttendanceSessionId] = useState<string | null>(null);
@@ -126,6 +188,10 @@ const StudentHome = () => {
   const [electivesPending, setElectivesPending] = useState(0); // elective groups the student still has to choose
 
   const appState      = useRef(AppState.currentState);
+  const uidRef        = useRef("");
+  const stateRef      = useRef({ lectureSessionId: null as string | null, ongoing: false, hasCurrent: false, soon: false });
+  const fetchRef      = useRef<((uid: string) => Promise<void>) | null>(null);
+  const recheckRef     = useRef<(() => Promise<void>) | null>(null);
   const studentMeta   = useRef<{ aishe_code: string; course_id: string } | null>(null);
 
   // ── ToDo state ────────────────────────────────────────────────────────────
@@ -317,6 +383,7 @@ const StudentHome = () => {
       const session = await getUserSession();
       if (!session?.uid) { setLoading(false); return; }
 
+      uidRef.current = session.uid;
       const studentSnap = await getDoc(doc(db, "students", session.uid));
       if (!studentSnap.exists()) { setLoading(false); return; }
 
@@ -640,6 +707,9 @@ const StudentHome = () => {
           }
         } catch {}
       }
+    }, (err) => {
+      // a dropped connection must not leave the card stuck: the periodic refresh below keeps it current
+      console.log("LIVE SESSION LISTENER ERROR:", err?.message);
     });
 
     return unsubscribe;
@@ -662,18 +732,71 @@ const StudentHome = () => {
     try {
       const res  = await apiFetch(`${API_URL}/api/lectures/student/today?uid=${uid}`);
       const json = await res.json();
-      if (json.success) {
-        setToday(json.today);
-        setNextLecture(withTag(json.nextLecture) ?? null);
-        // Only set session from API response if we don't already have one from Firestore
-        if (!lectureSessionId && json.lecture_is_live && json.lecture_session_id) {
-          setLectureSessionId(json.lecture_session_id);
-        }
+      if (!json.success) return;
+      setToday(json.today);
+      setNextLecture(withTag(json.nextLecture) ?? null);
+      const cur = json.currentLecture ? withTag<LectureData>(json.currentLecture) : null;
+      setCurrentLecture(cur && cur.state === "scheduled" ? cur : null);
+
+      // The teacher started the lecture. Normally the Firestore listener shows the card within a second;
+      // if it is late (a stalled connection) the server's answer is used, so nobody has to reload the page.
+      if (json.lecture_is_live && json.lecture_session_id && !stateRef.current.lectureSessionId) {
+        setLectureSessionId(json.lecture_session_id);
+        setLectureState("ongoing");
+        setStartTime(json.started_at_ms ? new Date(json.started_at_ms) : new Date());
+        setOngoingLecture(withTag<LectureData>(json.ongoingLecture) ?? withTag<LectureData>(json.currentLecture) ?? null);
+        setMarkingStatus(json.marking_status || "closed");
+        setMarkingMethod(json.marking_method || null);
+        setAttendanceSessionId(json.attendance_session_id || null);
       }
     } catch (e) {
       console.log("FETCH DAILY LECTURES ERROR:", e);
     }
   };
+  fetchRef.current = fetchDailyLectures;
+
+  // is the lecture we think is live still live? (the listener may have missed the end)
+  recheckRef.current = async () => {
+    const id = stateRef.current.lectureSessionId;
+    if (!id) return;
+    try {
+      const sessionDoc = await getDoc(doc(db, "lecture_sessions", id));
+      if (!sessionDoc.exists() || sessionDoc.data()?.is_live !== true) await clearLectureState();
+    } catch {}
+  };
+
+  // ─── Keep the card current without a reload ───────────────────────────────
+  // refresh when: the app comes back, a "lecture started / starting" push arrives, the screen is focused, and
+  // every 30 s while a lecture is on or about to start (otherwise only every 5 minutes: it is a cheap, cached call).
+  useEffect(() => {
+    const refresh = () => {
+      const uid = uidRef.current;
+      if (!uid) return;
+      fetchRef.current?.(uid);
+      recheckRef.current?.();
+    };
+    const appSub = AppState.addEventListener("change", (s) => { if (s === "active") refresh(); });
+    const pushSub = Notifications.addNotificationReceivedListener((n) => {
+      const t = (n.request.content.data as any)?.type;
+      if (t === "lecture_live" || t === "lecture_time") refresh();
+    });
+    let ticks = 0;
+    const iv = setInterval(() => {
+      setClock(Date.now());
+      if (AppState.currentState !== "active") return;
+      ticks += 1;
+      const s = stateRef.current;
+      if (s.hasCurrent || s.ongoing || s.soon || ticks % 10 === 0) refresh();
+    }, 30_000);
+    return () => { appSub.remove(); pushSub.remove(); clearInterval(iv); };
+  }, []);
+
+  useFocusEffect(
+    useCallback(() => {
+      const uid = uidRef.current;
+      if (uid) { fetchRef.current?.(uid); recheckRef.current?.(); }
+    }, [])
+  );
 
   // ─── Mark attendance ──────────────────────────────────────────────────────
   const handleMarkAttendance = async () => {
@@ -728,6 +851,16 @@ const StudentHome = () => {
   // This prevents any brief flash of the card when state is partially cleared.
   const activeLecture =
     lectureState === "ongoing" && !!lectureSessionId ? ongoingLecture : null;
+
+  // the lecture that is on right now but not started by its teacher (hidden once its time is over)
+  const nowDate = new Date(clock);
+  const nowMin  = nowDate.getHours() * 60 + nowDate.getMinutes();
+  const scheduledNow =
+    !activeLecture && currentLecture && nowMin < toMin(currentLecture.end_time) + 1
+      ? currentLecture
+      : null;
+  const nextSoon = !!nextLecture && toMin(nextLecture.start_time) - nowMin <= 10 && toMin(nextLecture.start_time) - nowMin >= -1;
+  stateRef.current = { lectureSessionId, ongoing: lectureState === "ongoing", hasCurrent: !!currentLecture, soon: nextSoon };
 
   function fmtShortDate(d: Date) {
     return d.toLocaleDateString("en-IN", { day: "2-digit", month: "short" });
@@ -827,6 +960,8 @@ const StudentHome = () => {
               onMarkAttendance={handleMarkAttendance}
               onMethodSelected={() => {}}
             />
+          ) : scheduledNow ? (
+            <ScheduledLectureCard lecture={scheduledNow} nowMin={nowMin} />
           ) : (
             <View style={styles.empty}>
               <View style={styles.emptyIcon}>
@@ -968,6 +1103,10 @@ const styles = StyleSheet.create({
     alignItems: "center", justifyContent: "center", marginBottom: SP.md,
   },
 
+  curRows:      { marginTop: SP.md, gap: 6 },
+  curRow:       { flexDirection: "row", alignItems: "center", gap: 8 },
+  curChips:     { flexDirection: "row", flexWrap: "wrap", gap: 6, marginTop: SP.md },
+
   nextTop:      { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   nextTime:     { flexDirection: "row", alignItems: "center", gap: 6, marginTop: 6 },
   nextTimeText: { color: T.primary, fontWeight: "700", fontSize: 14 },
@@ -987,4 +1126,4 @@ const styles = StyleSheet.create({
   todoCard: { flexDirection: "row", alignItems: "center", gap: SP.md, padding: SP.md, marginBottom: SP.sm },
   todoIcon: { width: 40, height: 40, borderRadius: 12, alignItems: "center", justifyContent: "center" },
   metaRow:  { flexDirection: "row", alignItems: "center", gap: 4, marginTop: 1 },
-});
+});

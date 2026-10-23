@@ -6,6 +6,7 @@ const { TTLCache } = require("../utils/cache");
 const { rateLimit } = require("../utils/limiter");
 const { checkOtpToken, consumeOtpToken } = require("./otp.routes");
 const { shouldAutoApprove } = require("../utils/autoApprove");
+const { normalizePhone, PHONE_ERROR } = require("../utils/phone");
 
 // Registration needs an e-mail OTP token (see otp.routes.js). Set REQUIRE_REGISTER_OTP=false only for local testing.
 const REQUIRE_REGISTER_OTP = process.env.REQUIRE_REGISTER_OTP !== "false";
@@ -75,6 +76,9 @@ router.post("/register", registerLimiter, async (req, res) => {
           error: "Incomplete teacher data",
         });
       }
+      // the phone must be a real Indian mobile number; it is stored as +91XXXXXXXXXX
+      teacher.contact_phone = normalizePhone(teacher.contact_phone);
+      if (!teacher.contact_phone) return res.status(400).json({ error: PHONE_ERROR });
     }
 
     if (role === "student") {
@@ -93,6 +97,13 @@ router.post("/register", registerLimiter, async (req, res) => {
       }
       if (!isStr(student.degree)) {
         return res.status(400).json({ error: "Incomplete student data" });
+      }
+      // the phone is optional for students, but when given it must be a real Indian mobile number
+      if (student.phone !== undefined && student.phone !== null && String(student.phone).trim() !== "") {
+        student.phone = normalizePhone(student.phone);
+        if (!student.phone) return res.status(400).json({ error: PHONE_ERROR });
+      } else {
+        student.phone = null;
       }
     }
 

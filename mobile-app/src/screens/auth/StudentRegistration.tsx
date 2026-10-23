@@ -3,13 +3,12 @@
 // The server must still enforce every rule (role, college, e-mail uniqueness, college_name from the AISHE code).
 
 import React, { useEffect, useRef, useState } from "react";
-import { Alert, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, Text, View } from "react-native";
+import { Alert, ScrollView, StyleSheet, Text, View } from "react-native";
 import { Ionicons } from "@expo/vector-icons";
 import { useNavigation } from "@react-navigation/native";
 import { API_BASE } from "../../services/api";
 import {
   cleanAishe,
-  cleanPhone,
   cleanRoll,
   cleanText,
   fetchJson,
@@ -17,7 +16,8 @@ import {
   isValidName,
   validatePassword,
 } from "../../utils/validation";
-import { Banner, Button, Card, Header, ResultView, Screen, SelectField, SP, Steps, T, TextField, font } from "../../components/ui";
+import { isValidPhone, phoneError, toIntlPhone } from "../../utils/phone";
+import { Banner, Button, Card, Header, KeyboardView, ResultView, Screen, SelectField, SP, Steps, T, TextField, font } from "../../components/ui";
 
 const YEARS = ["1st Year", "2nd Year", "3rd Year", "4th Year"];
 const SEM_MAP: Record<string, string[]> = {
@@ -134,7 +134,7 @@ export default function StudentRegistration({ route }: any) {
       if (!isValidName(cleanText(firstName, 50))) next.first = "Enter your first name (letters only)";
       if (!isValidName(cleanText(lastName, 50))) next.last = "Enter your last name (letters only)";
       if (cleanRoll(rollNo).length < 2) next.roll = "Enter your roll number / PRN";
-      if (!cleanPhone(phone)) next.phone = "Enter a valid mobile number (10 to 13 digits)";
+      if (!toIntlPhone(phone)) next.phone = phoneError(phone) || "Enter a valid mobile number";
     } else {
       if (!course) next.course = "Select your course";
       if (!year) next.year = "Select your year";
@@ -161,7 +161,7 @@ export default function StudentRegistration({ route }: any) {
       Alert.alert("Weak password", pwErr, [{ text: "Change password", onPress: () => navigation.goBack() }]);
       return;
     }
-    const ph = cleanPhone(phone);
+    const ph = toIntlPhone(phone);
     if (!college || !ph) return;
 
     submitLock.current = true;
@@ -221,7 +221,7 @@ export default function StudentRegistration({ route }: any) {
   return (
     <Screen>
       <Header title="Student registration" subtitle={email} onBack={onBack} />
-      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === "ios" ? "padding" : undefined}>
+      <KeyboardView>
         <ScrollView contentContainerStyle={st.scroll} keyboardShouldPersistTaps="handled" showsVerticalScrollIndicator={false}>
           <Steps steps={STEPS} current={step} />
 
@@ -324,12 +324,12 @@ export default function StudentRegistration({ route }: any) {
                     clear("phone");
                   }}
                   placeholder="10 digit mobile number"
-                  keyboardType="phone-pad"
+                  phone
                   autoComplete="tel"
                   textContentType="telephoneNumber"
                   inputRef={phoneRef}
                   error={errs.phone}
-                  maxLength={16}
+                  helper={!errs.phone && phone.length > 0 && !isValidPhone(phone) ? `${phone.length}/10 digits` : undefined}
                 />
               </View>
             )}
@@ -403,7 +403,7 @@ export default function StudentRegistration({ route }: any) {
             )}
           </View>
         </ScrollView>
-      </KeyboardAvoidingView>
+      </KeyboardView>
     </Screen>
   );
 }
