@@ -18,7 +18,7 @@ const NAV = {
       icon: <CalIcon />,
     },
     // Public full-screen QR page for the classroom projector. Opens in a new tab and needs no extra login.
-    { path: "/qr", label: "QR Display", icon: <QrIcon />, external: true },
+    { path: "https://presence-pro-xw49.vercel.app/qr", label: "QR Display", icon: <QrIcon />, external: true },
     {
       path: "/dashboard/teacher/assignments",
       label: "Assignments",
