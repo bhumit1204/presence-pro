@@ -19,6 +19,16 @@ export const attTone = (pct: number | null | undefined): Tone =>
   pct == null ? "neutral" : pct >= ATT_OK ? "success" : pct >= ATT_WARN ? "warning" : "danger";
 export const scoreTone = (pct: number | null | undefined): Tone => (pct == null ? "neutral" : pct >= PASS_PCT ? "success" : "danger");
 
+export function classesNeededForAttendance(present: number, total: number, targetPct = ATT_OK): number {
+  if (!Number.isFinite(present) || !Number.isFinite(total) || total <= 0 || targetPct <= 0 || targetPct >= 100) return 0;
+  const safePresent = Math.max(0, Math.floor(present));
+  const safeTotal = Math.max(0, Math.floor(total));
+  const target = Math.max(0, Math.min(100, targetPct));
+  const remaining = target * safeTotal - 100 * safePresent;
+  if (remaining <= 0) return 0;
+  return Math.ceil(remaining / (100 - target));
+}
+
 export const num = (v: any, fallback = 0): number => (typeof v === "number" && isFinite(v) ? v : fallback);
 /** n / d clamped to 0..1, and 0 when d is 0 or missing (no NaN widths). */
 export const ratio = (n: any, d: any): number => (num(d) > 0 ? Math.max(0, Math.min(1, num(n) / num(d))) : 0);

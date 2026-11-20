@@ -10,6 +10,7 @@ import { auth, db } from "../../../services/firebase";
 import { getDoc, doc, collection, query, where, getDocs } from "firebase/firestore";
 import { Banner, Button, Card, Chip, EmptyState, ProgressBar, Screen, SP, T, TONE, Tone, font } from "../../../components/ui";
 import { meantForStudent, rollOf } from "../../../utils/batches";
+import { classesNeededForAttendance } from "../../reports/teacher/ReportShared";
 
 const API_URL = API_BASE;
 const OD_COLOR = "#7C3AED";
@@ -540,7 +541,7 @@ export default function StudentAttendance() {
           const pct    = s.percentage;
           const tone   = pctTone(pct);
           const needed = pct != null && pct < 75 && s.total > 0
-            ? Math.max(0, Math.ceil((0.75 * (s.total + 1) - s.present) / 0.25))
+            ? classesNeededForAttendance(s.present, s.total, 75)
             : 0;
 
           return (
